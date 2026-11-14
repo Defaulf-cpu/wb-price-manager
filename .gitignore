@@ -1,0 +1,10 @@
+node_modules/
+release/
+dist/
+out/
+.data/
+.data-test-rate/
+.data-test-repricer/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' econ:; img-src 'self' data: https: econ:; style-src 'self' 'unsafe-inline'; script-src 'self' econ: 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* econ:" />
+<title>WB Price Manager — цены, акции, экономика</title>
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<script>
+  // Общие модули расчётов: в Electron отдаются по протоколу econ:, в браузере — dev-сервером.
+  document.write('<script src="' + (window.wbApp ? 'econ:///economics.js' : '/economics.js') + '"><\/script>');
+  document.write('<script src="' + (window.wbApp ? 'econ:///repricer-engine.js' : '/repricer-engine.js') + '"><\/script>');
+</script>
+<div id="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">WB</div>
+      <div class="logo-text">
+        <b>Price Manager</b>
+        <span id="mode-badge" class="badge badge-demo">демо-режим</span>
+      </div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="sidebar-footer">
+      <div id="sync-info" class="muted small">данные не загружены</div>
+      <button id="btn-sync" class="btn btn-primary btn-sm" style="width:100%"
+        title="Выгрузить из кабинета WB товары, цены, акции, статистику и фактические расходы">Обновить данные из WB</button>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">Панель</h1>
+        <p id="page-subtitle" class="muted small"></p>
+      </div>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </header>
+    <section id="view" class="view"></section>
+  </main>
+</div>
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="./js/util.js"></script>
+<script src="./js/api.js"></script>
+<script src="./js/state.js"></script>
+<script src="./js/ui.js"></script>
+<script src="./js/views/itemcard.js"></script>
+<script src="./js/views/dashboard.js"></script>
+<script src="./js/views/prices.js"></script>
+<script src="./js/views/repricer.js"></script>
+<script src="./js/views/promos.js"></script>
+<script src="./js/views/economics.js"></script>
+<script src="./js/views/costs.js"></script>
+<script src="./js/views/reports.js"></script>
+<script src="./js/views/settings.js"></script>
+<script src="./js/app.js"></script>
+</body>
+</html>

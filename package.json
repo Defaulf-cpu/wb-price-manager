@@ -1,0 +1,70 @@
+{
+  "name": "wb-price-manager",
+  "productName": "WB Price Manager",
+  "version": "1.0.0",
+  "description": "Десктоп-приложение для управления ценами на Wildberries: массовая переценка, контроль входа в акции и расчёт юнит-экономики по данным API личного кабинета",
+  "main": "electron/main.js",
+  "author": "WB Price Manager",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "ui": "node tools/serve.js",
+    "ui:demo": "node tools/serve.js --demo",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable",
+    "dist:dir": "electron-builder --win --dir",
+    "test": "node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/uitest.js",
+    "test:limits": "node tools/checks/rate-limit-flow.js",
+    "test:repricer": "node tools/checks/repricer-flow.js",
+    "test:ui": "node tools/uitest.js"
+  },
+  "devDependencies": {
+    "electron": "^33.4.0",
+    "electron-builder": "latest",
+    "jsdom": "^25.0.1"
+  },
+  "build": {
+    "appId": "ru.wbpricemanager.app",
+    "productName": "WB Price Manager",
+    "artifactName": "WBPriceManager-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WB Price Manager",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "WBPriceManager-Portable-${version}.${ext}"
+    }
+  }
+}
