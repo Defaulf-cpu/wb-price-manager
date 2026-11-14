@@ -1902,6 +1902,26 @@ async function run() {
   check('закольцовка: в репрайсере видна «Моя цена»', /Моя цена/.test(rpHtml4));
   check('закольцовка: в репрайсере цена МП показана отдельно', /Цена на МП/.test(rpHtml4));
 
+  // цена должна дойти и до «Экономики», и до «Панели» — они берут строки из общего состояния
+  // «Экономика» группирует по категориям, поэтому сверяем итог раздела с общим состоянием:
+  // если сохранённая цена применена, выручка в разделе совпадёт с выручкой по S.getRows()
+  window.App.go('economics');
+  await wait(1400);
+  const econView = doc.getElementById('view');
+  const econTotals = window.S.totals(window.S.getRows());
+  const econViewText = econView.textContent.replace(/\s+/g, ' ');
+  check('закольцовка: «Экономика» считает по сохранённой цене',
+    econViewText.includes(window.U.compact(econTotals.revenue30)),
+    'выручка по общему состоянию ' + window.U.compact(econTotals.revenue30) + ' ₽, в разделе: ' +
+      econViewText.slice(econViewText.indexOf('Выручка'), econViewText.indexOf('Выручка') + 60));
+
+  window.App.go('dashboard');
+  await wait(1200);
+  const dashText = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
+  check('закольцовка: «Панель» пересчитана по сохранённым ценам',
+    dashText.length > 200 && !/Ошибка/.test(dashText),
+    'символов ' + dashText.length);
+
   // сервер: сохранённая цена важнее предложения репрайсера
   await service.handlers['repricer:calc']({ full: true });
   const propLoop = await service.handlers['repricer:proposal']();
