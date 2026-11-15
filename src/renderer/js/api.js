@@ -73,14 +73,10 @@ window.API = (function () {
       if (data.channel) handleEvent(String(data.channel), data.payload);
     };
 
-    // именованные события — для каналов, которые приложение точно использует
-    KNOWN_CHANNELS.forEach((ch) => {
-      es.addEventListener('svc:' + ch, (ev) => {
-        let payload = null;
-        try { payload = JSON.parse(ev.data); } catch (e) { return; }
-        handleEvent(ch, payload);
-      });
-    });
+    // именованные события регистрируются по мере подписки (listenChannel),
+    // а не по жёсткому списку: сервис может добавить канал, и интерфейс
+    // не должен из-за этого терять события
+    Object.keys(subs).forEach(listenChannel);
 
     es.onerror = () => {
       // EventSource переподключается сам; при длительном обрыве даём знать интерфейсу
@@ -95,14 +91,32 @@ window.API = (function () {
     es.onopen = () => { esRetry = 0; };
   }
 
-  /** Каналы, которые интерфейс слушает (для именованных SSE-событий). */
-  const KNOWN_CHANNELS = ['log', 'warn', 'facts', 'deferred', 'repricer', 'promo', 'prices'];
+  /** Уже зарегистрированные именованные слушатели SSE: канал → true. */
+  const listening = {};
+
+  /**
+   * Зарегистрировать слушателя на именованное событие `svc:<channel>`.
+   *
+   * Почему не общий `onmessage`: EventSource доставляет в `onmessage` только события
+   * БЕЗ имени, а сервер шлёт их с именем (`event: svc:info`). Со жёстким списком
+   * каналов часть событий терялась — например `info` с прогрессом обновления данных.
+   */
+  function listenChannel(channel) {
+    if (!es || listening[channel]) return;
+    listening[channel] = true;
+    es.addEventListener('svc:' + channel, (ev) => {
+      let payload = null;
+      try { payload = JSON.parse(ev.data); } catch (e) { return; }
+      handleEvent(channel, payload);
+    });
+  }
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return function () {};
     if (isElectron && window.wbApp.on) return window.wbApp.on('svc:' + channel, cb);
     (subs[channel] = subs[channel] || []).push(cb);
     openStream();
+    listenChannel(channel);
     // отписка
     return function () {
       const list = subs[channel];

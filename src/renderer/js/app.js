@@ -146,11 +146,28 @@ window.App = (function () {
     };
     line('Запрашиваем данные…', 'muted');
 
+    /**
+     * Живой прогресс: сервис шлёт событие `info` после каждого раздела, поэтому строки
+     * появляются по мере загрузки, а не все разом в конце. Раньше канал не слушался
+     * вовсе, и окно пару минут стояло с одной строкой «Запрашиваем данные…» —
+     * казалось, что приложение зависло.
+     */
+    const seen = new Set();
+    const offInfo = API.on('info', (p) => {
+      if (!p || !p.message) return;
+      const text = String(p.message);
+      if (seen.has(text)) return;   // одно и то же сообщение не дублируем
+      seen.add(text);
+      line(U.esc(text), 'muted');
+    });
+
     let res = null;
     try {
       res = await API.invoke('data:refresh-all', { facts: o.facts !== false });
     } catch (e) {
       line('<b class="neg">Ошибка:</b> ' + U.esc(e.message), 'neg');
+    } finally {
+      if (typeof offInfo === 'function') { try { offInfo(); } catch (e) { /* уже отписаны */ } }
     }
 
     // перечитываем состояние приложения

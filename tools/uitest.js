@@ -1083,7 +1083,23 @@ async function run() {
     const pathx = require('path');
     const pre = fsx.readFileSync(pathx.join(__dirname, '..', 'electron', 'preload.js'), 'utf8');
     const main = fsx.readFileSync(pathx.join(__dirname, '..', 'electron', 'main.js'), 'utf8');
-    check('каналы: main передаёт список обработчиков в preload', /--wb-channels=/.test(main) && /registeredChannels\(\)/.test(main));
+    // события в браузере: SSE вместо заглушки + живой прогресс обновления данных
+  const apiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'api.js'), 'utf8');
+  check('события: в браузере подписка идёт через SSE', /EventSource\('\/api\/events'\)/.test(apiSrc));
+  check('события: каналы регистрируются по мере подписки, а не жёстким списком',
+    /function listenChannel/.test(apiSrc) && !/KNOWN_CHANNELS/.test(apiSrc));
+  const serveSrc = fs.readFileSync(path.join(__dirname, '..', 'tools', 'serve.js'), 'utf8');
+  check('события: dev-сервер рассылает их в SSE-поток',
+    /text\/event-stream/.test(serveSrc) && /svc:/.test(serveSrc) && /broadcast\(channel, payload\)/.test(serveSrc));
+  check('события: сервер создан с настоящей функцией рассылки, а не заглушкой',
+    /createService\(store, \(channel, payload\) => broadcast/.test(serveSrc));
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'app.js'), 'utf8');
+  check('события: окно обновления данных показывает живой прогресс',
+    /API\.on\('info'/.test(appSrc) && /offInfo/.test(appSrc));
+  check('события: подписка на прогресс снимается после обновления',
+    /finally\s*{[\s\S]{0,120}offInfo\(\)/.test(appSrc));
+
+  check('каналы: main передаёт список обработчиков в preload', /--wb-channels=/.test(main) && /registeredChannels\(\)/.test(main));
     check('каналы: preload строит белый список из списка main', /fromMain/.test(pre) && /CHANNELS\.concat\(fromMain\)/.test(pre));
     check('каналы: preload отдаёт список в интерфейс для диагностики', /channels: ALLOWED\.slice\(\)/.test(pre));
     check('каналы: ошибка называет причину рассинхрона', /рассинхронизированы/.test(pre));
