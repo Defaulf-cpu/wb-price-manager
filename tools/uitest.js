@@ -1976,6 +1976,9 @@ async function run() {
   check('закольцовка: в «Цены и скидки» стоит сохранённая цена',
     !!cellInput && Number(cellInput.value) === Math.round(mpPrice * 1.5),
     cellInput ? 'в поле ' + cellInput.value : 'строка не найдена');
+  check('закольцовка: в «Цены и скидки» рядом видна цена маркетплейса',
+    !!pricesRow && /на МП/.test(pricesRow.textContent),
+    pricesRow ? pricesRow.textContent.replace(/\s+/g, ' ').slice(0, 110) : 'строка не найдена');
 
   // в репрайсере — колонка «Моя цена»
   window.App.go('repricer');

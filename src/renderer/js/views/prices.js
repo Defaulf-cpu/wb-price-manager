@@ -162,9 +162,17 @@ Views.prices = {
       { title: 'Скидка %', key: 'discount', num: true, render: (r) => this.editCell(r, 'discount', this.draftValue(r, 'discount', U.num(r.discount))) },
       { title: 'ЦенаWB', key: 'sellerPrice', num: true, render: (r) => {
           const e = this.editing.get(r.nmID);
-          if (!e) return `<b>${U.money(r.sellerPrice)}</b>`;
+          /**
+           * Если цена сохранена вручную, r.sellerPrice — уже она (черновик применяется
+           * ко всем разделам). Цену маркетплейса при этом показываем рядом: иначе
+           * непонятно, что реально стоит на WB и насколько мы от него отличаемся.
+           */
+          const onMp = r.hasDraft && Math.abs(U.num(r.mpSellerPrice) - U.num(r.sellerPrice)) > 0.5
+            ? `<div class="tiny muted">на МП ${U.money(r.mpSellerPrice)}</div>`
+            : '';
+          if (!e) return `<b>${U.money(r.sellerPrice)}</b>${onMp}`;
           const np = EC.num(e.basePrice, r.basePrice) * (1 - EC.num(e.discount, r.discount) / 100);
-          return `<b>${U.money(np)}</b> <span class="tiny muted">(было ${U.money(r.sellerPrice)})</span>`;
+          return `<b>${U.money(np)}</b> <span class="tiny muted">(сейчас ${U.money(r.sellerPrice)})</span>${onMp}`;
         } },
       { title: 'СПП %', key: 'spp', num: true, render: (r) => `<span class="muted">${U.pct(r.spp, 0)}</span>` },
       { title: 'Покупатель платит', key: 'buyerPrice', num: true, render: (r) => `<span class="muted">${U.money(r.buyerPrice)}</span>` },
