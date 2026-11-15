@@ -411,6 +411,8 @@ Views.repricer = {
       return;
     }
 
+    const manualCount = items.filter((x) => x.manual).length;
+    const rpCount = items.length - manualCount;
     const sendAt = prop.sendAt ? new Date(prop.sendAt) : null;
     const minutesLeft = sendAt ? Math.max(0, Math.round((sendAt - Date.now()) / 60000)) : null;
     const phaseLabel = prop.phase === 'sent' ? 'отправлено в WB'
@@ -421,7 +423,9 @@ Views.repricer = {
       <div class="card" style="margin-bottom:12px">
         <div class="row wrap" style="gap:12px">
           <div style="flex:1;min-width:280px">
-            <b>Репрайсер хочет изменить ${U.fmt(items.length)} цен</b> ${UI.badge(phaseLabel, kind)}
+            <b>К отправке ${U.fmt(items.length)} цен</b> ${UI.badge(phaseLabel, kind)}
+            ${manualCount ? UI.badge('из них ваших сохранённых: ' + U.fmt(manualCount), 'info') : ''}
+            ${rpCount ? '<span class="hint">по расчёту репрайсера: ' + U.fmt(rpCount) + '</span>' : ''}
             <div class="hint" style="margin-top:4px">
               Расчёт от <b>${U.date(prop.at, true)}</b>.
               ${sch.autoSend
@@ -1155,7 +1159,19 @@ Views.repricer = {
         { title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
             ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП</div>`
             : '<span class="muted tiny">нет данных</span>' },
-        { title: 'Новая цена', num: true, render: (r) => `<b>${U.money(r.proposed.sellerPrice)}</b><div class="tiny muted">скидка ${U.pct(r.proposed.discount, 0)} · база ${U.money(r.proposed.basePrice)}</div>` },
+        { title: 'Новая цена', num: true, render: (r) => {
+            /**
+             * Если по товару сохранена своя цена, в WB уйдёт именно она, а не расчёт
+             * репрайсера. Показываем это прямо в ячейке, иначе цифра в «Новой цене»
+             * и фактически отправленная цена расходятся, и непонятно, какая из них главная.
+             */
+            const d = (S.state.priceDrafts || {})[String(r.nmID)];
+            if (!d) return `<b>${U.money(r.proposed.sellerPrice)}</b><div class="tiny muted">скидка ${U.pct(r.proposed.discount, 0)} · база ${U.money(r.proposed.basePrice)}</div>`;
+            const mine = U.num(d.sellerPrice) || Math.round(U.num(d.basePrice) * (1 - U.num(d.discount) / 100) * 100) / 100;
+            return `<b class="warnc">${U.money(mine)}</b> ${UI.badge('моя цена', 'info')}
+              <div class="tiny muted">скидка ${U.pct(U.num(d.discount), 0)} · база ${U.money(d.basePrice)}</div>
+              <div class="tiny muted">репрайсер предлагал ${U.money(r.proposed.sellerPrice)} — не отправится</div>`;
+          } },
         { title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
             ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП</div>`
             : '<span class="muted tiny">—</span>' },

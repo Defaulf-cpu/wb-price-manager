@@ -1536,7 +1536,8 @@ async function run() {
     'плиток ' + doc.querySelectorAll('#rp-tiles .tile').length);
   check('репрайсер: цены пересчитаны без нажатия кнопки', (window.Views.repricer.results || []).length > 0,
     'строк ' + (window.Views.repricer.results || []).length);
-  check('репрайсер: предложение показано отдельно от установленных цен', /Репрайсер хочет изменить|Предложение репрайсера пустое/.test(rpText));
+  check('репрайсер: предложение показано отдельно от установленных цен',
+    /К отправке \d|Репрайсер хочет изменить|Предложение репрайсера пустое/.test(rpText));
   check('репрайсер: объяснено, что пересчёт не меняет цены сразу',
     /установленные цены не меняются|Автоотправка выключена/.test(rpText));
   const prop = await service.handlers['repricer:proposal']();
@@ -1662,6 +1663,20 @@ async function run() {
     /Цена покупателю сейчас/.test(rpHtml2) && /Цена покупателю станет/.test(rpHtml2));
   check('INDEEPA: есть колонка «Акции» с решениями', /<th[^>]*>\s*Акции/.test(rpHtml2) || /Акции/.test(rpHtml2));
   check('INDEEPA: есть колонка «План продаж»', /План продаж/.test(rpHtml2));
+
+  // сохранённая вручную цена важнее расчёта — это должно быть видно в ячейке «Новой цены»
+  const draftNm = (function () {
+    const d = window.S.state.priceDrafts || {};
+    const ids = Object.keys(d);
+    return ids.length ? Number(ids[0]) : null;
+  })();
+  if (draftNm) {
+    const draftRow = Array.from(doc.querySelectorAll('#rp-grid tbody tr'))
+      .find((tr) => tr.textContent.includes(String(draftNm)));
+    check('репрайсер: в «Новой цене» видно, что уйдёт сохранённая цена, а не расчёт',
+      !!draftRow && /моя цена/.test(draftRow.textContent) && /репрайсер предлагал/.test(draftRow.textContent),
+      draftRow ? draftRow.textContent.replace(/\s+/g, ' ').slice(0, 130) : 'строка не найдена на этой странице');
+  }
   check('INDEEPA: незаполненный план подписан как в референсе',
     /План не заполнен/.test(rpText2) || (window.Views.repricer.results || []).length === 0);
   check('INDEEPA: есть счётчик строк и пагинация', !!doc.getElementById('rp-pager') &&
