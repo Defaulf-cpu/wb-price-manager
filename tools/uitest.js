@@ -1642,6 +1642,80 @@ async function run() {
     /из/.test(doc.getElementById('rp-pager').textContent),
     doc.getElementById('rp-pager') ? doc.getElementById('rp-pager').textContent.replace(/\s+/g, ' ').trim() : 'нет панели');
 
+  // сегментированный фильтр (как «Все / Основной» в INDEEPA) и плотность строк
+  const seg = doc.querySelectorAll('#rp-seg [data-seg]');
+  check('INDEEPA: есть сегментированный фильтр', seg.length === 6, 'сегментов ' + seg.length);
+  check('INDEEPA: сегменты — Все, К отправке, Своя цена, Ошибки данных, Убыточные, С предупреждениями',
+    Array.from(seg).map((b) => b.textContent.trim()).join('|') ===
+      'Все|К отправке|Своя цена|Ошибки данных|Убыточные|С предупреждениями',
+    Array.from(seg).map((b) => b.textContent.trim()).join('|'));
+  const allCount = doc.querySelectorAll('#rp-grid tbody tr').length;
+  const errSeg = Array.from(seg).find((b) => b.getAttribute('data-seg') === 'errors');
+  if (errSeg) { errSeg.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(800); }
+  check('INDEEPA: сегмент фильтрует таблицу',
+    doc.querySelectorAll('#rp-grid tbody tr').length <= allCount &&
+      window.Views.repricer.itemFilter.seg === 'errors',
+    'строк ' + doc.querySelectorAll('#rp-grid tbody tr').length + ' из ' + allCount);
+  check('INDEEPA: показан счётчик отобранных товаров',
+    !!doc.getElementById('rp-seg-count') && /\d/.test(doc.getElementById('rp-seg-count').textContent),
+    doc.getElementById('rp-seg-count') ? doc.getElementById('rp-seg-count').textContent.trim() : 'нет');
+  // возвращаем фильтр «Все» без клика — каждая перерисовка таблицы дорого стоит по памяти
+  window.Views.repricer.itemFilter.seg = 'all';
+
+  // плотность строк
+  check('INDEEPA: есть переключатель плотности строк', !!doc.getElementById('rp-density'));
+  const densSel = doc.getElementById('rp-density');
+  if (densSel) {
+    densSel.value = 'compact';
+    densSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(900);
+    check('INDEEPA: плотный режим применяется к таблице',
+      !!doc.querySelector('#rp-grid .dense') && window.Views.repricer.density === 'compact');
+    check('INDEEPA: выбор плотности запоминается', (function () {
+      try { return window.localStorage.getItem('wb.repricer.density') === 'compact'; } catch (e) { return false; }
+    })());
+    // возвращаем обычную плотность напрямую, без ещё одной перерисовки
+    window.Views.repricer.density = 'normal';
+    try { window.localStorage.setItem('wb.repricer.density', 'normal'); } catch (e) { /* не критично */ }
+    const denseWrap = doc.querySelector('#rp-grid .dense');
+    if (denseWrap) denseWrap.classList.remove('dense');
+  }
+
+  // массовое назначение параметров на выбранные строки
+  const selBox = doc.querySelector('#rp-grid thead input[type="checkbox"]');
+  if (selBox) { selBox.click(); await wait(700); }
+  const bulkBar = doc.getElementById('rp-bulk');
+  check('INDEEPA: панель массовых действий появилась', !!bulkBar && bulkBar.style.display !== 'none',
+    bulkBar ? bulkBar.textContent.replace(/\s+/g, ' ').slice(0, 70) : 'нет панели');
+  check('INDEEPA: можно назначить стратегию всем выбранным', !!doc.getElementById('rb-strategy') &&
+    doc.getElementById('rb-strategy').options.length > 5,
+    'вариантов ' + (doc.getElementById('rb-strategy') || { options: [] }).options.length);
+  check('INDEEPA: можно задать минимальную цену всем выбранным', !!doc.getElementById('rb-minprice'));
+  check('INDEEPA: есть сброс личных настроек у выбранных', !!doc.getElementById('rb-clear-params'));
+  const rbStrategy = doc.getElementById('rb-strategy');
+  const rbMin = doc.getElementById('rb-minprice');
+  const selCount = window.Views.repricer.selection ? window.Views.repricer.selection.size : 0;
+  if (rbStrategy && selCount > 0) {
+    rbStrategy.value = 'margin';
+    rbMin.value = '500';
+    doc.getElementById('rb-apply-params').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(2600);
+    const cfgsAfter = await service.handlers['repricer:item-configs:get']();
+    const withMargin = Object.values(cfgsAfter).filter((c) => c && c.strategy === 'margin').length;
+    check('INDEEPA: стратегия назначена всем выбранным товарам', withMargin >= selCount,
+      'назначено ' + withMargin + ' из ' + selCount + ' выбранных');
+    const withFloor = Object.values(cfgsAfter).filter((c) => c && Number(c.minPrice) === 500).length;
+    check('INDEEPA: минимальная цена назначена всем выбранным', withFloor >= selCount,
+      'назначено ' + withFloor + ' из ' + selCount);
+    // сбрасываем, чтобы не влиять на остальные проверки
+    const ids = Object.keys(cfgsAfter).filter((k) => cfgsAfter[k] && cfgsAfter[k].strategy === 'margin');
+    const resetItems = {};
+    ids.forEach((k) => { resetItems[k] = null; });
+    if (ids.length) await service.handlers['repricer:item-configs:save']({ items: resetItems });
+    await wait(300);
+  }
+
+
   // переключатель видимости колонок: их в таблице 20, без выбора приходится листать вбок
   check('INDEEPA: есть кнопка выбора колонок', !!doc.getElementById('rp-cols'));
   const rpv = window.Views.repricer;
@@ -1791,6 +1865,7 @@ async function run() {
   check('журнал цен: есть фильтр по датам и поиск',
     !!doc.getElementById('j-from') && !!doc.getElementById('j-to') && !!doc.getElementById('j-q'));
   check('журнал цен: есть экспорт CSV', !!doc.getElementById('j-export'));
+  check('журнал цен: есть экспорт Excel', !!doc.getElementById('j-export-xlsx'));
   const jData = await service.handlers['repricer:journal']({ kinds: ['price', 'propose'], limit: 50 });
   check('журнал цен: канал отдаёт события с фазами', jData.ok === true && Array.isArray(jData.events),
     'событий ' + (jData.events || []).length + ', по фазам ' + JSON.stringify(jData.byKind));

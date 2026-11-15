@@ -16,7 +16,9 @@ Views.repricer = {
   results: [],
   summary: null,
   rstate: null,
-  itemFilter: { q: '', strategy: '', onlyChanges: true, tile: '' },
+  itemFilter: { q: '', strategy: '', onlyChanges: false, tile: '', seg: 'all' },
+  /** Плотность строк таблицы: 'normal' | 'compact' (хранится в localStorage). */
+  density: 'normal',
 
   render(container) {
     this.container = container;
@@ -52,6 +54,14 @@ Views.repricer = {
   },
 
   async loadState() {
+    // плотность строк запоминается между запусками
+    if (!this._densityLoaded) {
+      this._densityLoaded = true;
+      try {
+        const saved = window.localStorage.getItem('wb.repricer.density');
+        if (saved === 'compact' || saved === 'normal') this.density = saved;
+      } catch (e) { /* приватный режим браузера — остаёмся на обычной плотности */ }
+    }
     this.rstate = await API.invoke('repricer:state');
     // себестоимость по артикулам: без неё нельзя сказать, выгоден товар или нет
     // (в INDEEPA это «Без индекса»), и такие строки не должны уходить в WB
@@ -122,14 +132,24 @@ Views.repricer = {
         <div class="row wrap">
           <input id="rp-q" placeholder="Поиск: артикул, нм-код, название" style="width:280px" value="${U.esc(this.itemFilter.q)}" />
           <select id="rp-strategy" style="width:230px"><option value="">Все стратегии</option></select>
-          <label class="checkline"><input type="checkbox" id="rp-onlychanges" ${this.itemFilter.onlyChanges ? 'checked' : ''} /> только с изменением цены</label>
-          <label class="checkline"><input type="checkbox" id="rp-onlywarn" /> только с предупреждениями</label>
           <div class="grow"></div>
+          <select id="rp-density" style="width:150px" title="Плотность строк: сколько товаров влезает на экран">
+            <option value="normal" ${this.density === 'normal' ? 'selected' : ''}>Обычные строки</option>
+            <option value="compact" ${this.density === 'compact' ? 'selected' : ''}>Плотные строки</option>
+          </select>
           <button class="btn btn-sm btn-ghost" id="rp-cols" title="Выбрать, какие колонки показывать">Колонки</button>
           <button class="btn btn-sm btn-ghost" id="rp-export">Экспорт CSV</button>
           <button class="btn btn-sm btn-ghost" id="rp-export-xlsx" title="Выгрузка Excel — до 150 000 строк">Excel (до 150к строк)</button>
           ${rs.demo ? '<button class="btn btn-sm btn-ghost" id="rp-drift" title="Изменить цены конкурентов, чтобы посмотреть реакцию репрайсера">Сымитировать рынок</button>' : ''}
         </div>
+      </div>
+      <div class="row wrap" style="gap:8px;margin-bottom:10px;align-items:center">
+        <div class="seg" id="rp-seg">
+          ${[['all', 'Все'], ['tosend', 'К отправке'], ['mine', 'Своя цена'], ['errors', 'Ошибки данных'],
+             ['loss', 'Убыточные'], ['warn', 'С предупреждениями']]
+            .map(([id, label]) => `<button class="seg-btn ${this.itemFilter.seg === id ? 'active' : ''}" data-seg="${id}">${label}</button>`).join('')}
+        </div>
+        <span class="hint" id="rp-seg-count"></span>
       </div>
       <div id="rp-grid">${this.results.length ? '' : '<div class="card muted">Нажмите «Пересчитать цены», чтобы репрайсер предложил новые цены по вашим стратегиям.</div>'}</div>
       <div class="bulkbar" id="rp-bulk" style="display:none"></div>
@@ -181,8 +201,24 @@ Views.repricer = {
 
     $('#rp-cols').onclick = () => this.openColumnsPicker();
     $('#rp-q').oninput = U.debounce((e) => { this.itemFilter.q = e.target.value; this.renderResults(); }, 220);
-    $('#rp-onlychanges').onchange = (e) => { this.itemFilter.onlyChanges = e.target.checked; this.renderResults(); };
-    $('#rp-onlywarn').onchange = (e) => { this.itemFilter.onlyWarn = e.target.checked; this.renderResults(); };
+    // сегментированный фильтр (как «Все / Основной» в INDEEPA): один признак за раз,
+    // вместо набора чекбоксов, которые непонятно как сочетаются
+    host.querySelectorAll('#rp-seg [data-seg]').forEach((b) => {
+      b.onclick = () => {
+        this.itemFilter.seg = b.getAttribute('data-seg');
+        this.page = 0;
+        host.querySelectorAll('#rp-seg [data-seg]').forEach((x) => x.classList.toggle('active', x === b));
+        this.renderResults();
+      };
+    });
+
+    // плотность строк — сколько товаров влезает на экран
+    const dens = $('#rp-density');
+    if (dens) dens.onchange = () => {
+      this.density = dens.value === 'compact' ? 'compact' : 'normal';
+      try { window.localStorage.setItem('wb.repricer.density', this.density); } catch (e) { /* приватный режим */ }
+      this.renderResults();
+    };
 
     const sel = $('#rp-strategy');
     (rs.strategies || []).forEach((s) => {
@@ -1045,6 +1081,18 @@ Views.repricer = {
     let list = this.results;
     if (f.onlyChanges) list = list.filter((r) => r.needSend);
     if (f.onlyWarn) list = list.filter((r) => (r.warnings || []).length);
+    // сегментированный фильтр: один признак за раз
+    const drafts = S.state.priceDrafts || {};
+    if (f.seg && f.seg !== 'all') {
+      const test = {
+        tosend: (r) => !!r.needSend || !!drafts[String(r.nmID)],
+        mine: (r) => !!drafts[String(r.nmID)],
+        errors: (r) => this.rowErrors(r).length > 0,
+        loss: (r) => U.num(r.proposed ? r.proposed.profit : (r.current || {}).profit) < 0,
+        warn: (r) => (r.warnings || []).length > 0
+      }[f.seg];
+      if (test) list = list.filter(test);
+    }
     if (f.strategy) list = list.filter((r) => r.strategy === f.strategy);
     // клик по сводной плитке — это фильтр (те же признаки, что и в «Цены и скидки»)
     if (f.tile) {
@@ -1149,11 +1197,25 @@ Views.repricer = {
         return '';
       }
     });
+    if (this.density === 'compact') grid.el.classList.add('dense');
     host.appendChild(grid.el);
 
     this.drawPager(host);
     this.drawEditBar();
     this.markDirtyRows();
+
+    // сколько товаров под текущим сегментом фильтра.
+    // Счётчик лежит РЯДОМ с таблицей (в панели фильтров), а не внутри #rp-grid,
+    // поэтому ищем от контейнера раздела.
+    const segCount = this.container.querySelector('#rp-seg-count');
+    if (segCount) {
+      const labels = {
+        all: 'все товары', tosend: 'к отправке', mine: 'со своей ценой',
+        errors: 'с незаполненными данными', loss: 'убыточные', warn: 'с предупреждениями'
+      };
+      segCount.textContent = U.fmt(list.length) + ' ' + (labels[this.itemFilter.seg] || 'товаров') +
+        (this.density === 'compact' ? ' · плотный режим' : '');
+    }
 
     host.querySelectorAll('[data-why]').forEach((b) => {
       b.onclick = (e) => {
@@ -1219,14 +1281,72 @@ Views.repricer = {
     const n = this.selection ? this.selection.size : 0;
     bulk.style.display = n ? '' : 'none';
     if (!n) return;
+    const strategies = (this.rstate && this.rstate.strategies) || [];
     bulk.innerHTML = `
       <div class="fld"><span>Выбрано товаров</span><b style="font-size:16px">${n}</b></div>
+      <div class="fld"><span>Стратегия всем выбранным</span>
+        <select id="rb-strategy" style="width:190px">
+          <option value="">— не менять —</option>
+          ${strategies.map((x) => `<option value="${x.id}">${U.esc(x.name)}</option>`).join('')}
+        </select></div>
+      <div class="fld"><span>Мин. цена, ₽</span>
+        <input type="number" step="10" class="num" id="rb-minprice" style="width:110px" placeholder="— не менять —" /></div>
+      <button class="btn btn-sm" id="rb-apply-params">Применить параметры</button>
+      <button class="btn btn-ghost btn-sm" id="rb-clear-params">Сбросить личные настройки</button>
       <div class="grow"></div>
       <button class="btn btn-ghost btn-sm" id="rb-none">Снять выделение</button>
       <button class="btn btn-ok" id="rb-send">Отправить выбранные в WB</button>
     `;
     bulk.querySelector('#rb-none').onclick = () => { this.selection.clear(); this.renderResults(); };
     bulk.querySelector('#rb-send').onclick = () => this.sendSelected(true);
+
+    /**
+     * Массовое назначение параметров: стратегия и минимальная цена сразу всем выбранным
+     * строкам. Правки копятся в очереди и применяются одним пересчётом — так же,
+     * как правка одной строки.
+     */
+    bulk.querySelector('#rb-apply-params').onclick = async (e) => {
+      const btn = e.target;
+      const strategy = bulk.querySelector('#rb-strategy').value;
+      const minRaw = bulk.querySelector('#rb-minprice').value;
+      const minPrice = minRaw === '' ? null : U.num(minRaw);
+      if (!strategy && !(minPrice > 0)) {
+        App.toast('Выберите стратегию или укажите минимальную цену', 'warn');
+        return;
+      }
+      btn.disabled = true;
+      const patch = {};
+      if (strategy) patch.strategy = strategy;
+      if (minPrice > 0) patch.minPrice = minPrice;
+      this.selection.forEach((nmID) => this.stageEdit(nmID, 'config', patch));
+      await this.commitEdits(btn);
+      this.selection.clear();
+      App.toast('Параметры назначены ' + n + ' товарам', 'ok', 5000);
+    };
+
+    bulk.querySelector('#rb-clear-params').onclick = async (e) => {
+      const btn = e.target;
+      btn.disabled = true;
+      const items = {};
+      this.selection.forEach((nmID) => { items[String(nmID)] = null; });
+      try {
+        await API.invoke('repricer:item-configs:save', { items });
+        this.rstate = await API.invoke('repricer:state');
+        await this.loadState();
+        this.selection.clear();
+        App.toast('Личные настройки сброшены у ' + Object.keys(items).length +
+          ' товаров — работают общие правила', 'ok', 6000);
+        const res = await API.invoke('repricer:calc', { full: true });
+        this.results = res.results || [];
+        this.summary = res.summary;
+        this.drawSummary();
+        this.renderResults();
+        await this.drawProposal();
+      } catch (err) {
+        App.toast(err.message, 'err', 8000);
+        btn.disabled = false;
+      }
+    };
   },
 
   /** Подробный разбор: почему репрайсер предложил именно такую цену. */
@@ -2603,6 +2723,7 @@ Views.repricer = {
           <label class="field" style="margin:0">по<input type="date" id="j-to" value="${U.esc(f.to)}" /></label>
           <button class="btn btn-sm" id="j-apply">Показать</button>
           <button class="btn btn-sm btn-ghost" id="j-export">Экспорт CSV</button>
+          <button class="btn btn-sm btn-ghost" id="j-export-xlsx" title="Выгрузка журнала в Excel">Excel</button>
         </div>
       </div>
       <div id="j-body">${UI.loading('Читаем журнал…')}</div>`;
@@ -2699,26 +2820,65 @@ Views.repricer = {
       load();
     };
     host.querySelector('#j-q').oninput = U.debounce(() => host.querySelector('#j-apply').click(), 300);
+    /**
+     * Строки журнала для выгрузки — одни и те же для CSV и Excel, чтобы форматы
+     * не разъезжались по составу колонок.
+     */
+    const journalHeaders = mode === 'prices'
+      ? ['Когда', 'нм-код', 'Артикул', 'Название', 'Фаза', 'Было, ₽', 'Стало, ₽',
+         'Базовая цена', 'Скидка %', 'Стратегия', 'Причина']
+      : ['Когда', 'нм-код', 'Артикул', 'Название', 'Действие', 'Акции', 'Цена до, ₽',
+         'Цена после, ₽', 'Успешно', 'Причина', 'Держит автоакция'];
+
+    const journalRows = () => (this.journalEvents || []).map((e) => (mode === 'prices' ? [
+      e.at, e.nmID, e.vendorCode || '', e.title || '',
+      e.kind === 'propose' ? 'предложено' : 'отправлено',
+      e.prevSellerPrice || '', e.sellerPrice, e.basePrice, e.discount,
+      e.strategy || e.source || '', e.reason || ''
+    ] : [
+      e.at, e.nmID, e.vendorCode || '', e.title || '',
+      { 'promo-join': 'вход в акцию', 'promo-exit': 'выход из акции', 'promo-restore': 'возврат цены' }[e.kind] || e.kind,
+      (e.promoNames || []).join('; '),
+      e.prevSellerPrice || '', e.sellerPrice || '',
+      e.ok === false ? 'нет' : 'да',
+      e.reason || e.error || '',
+      e.blockedByAutoPromo ? 'да' : 'нет'
+    ]));
+
+    const fileName = () => 'repricer-journal-' + mode + '-' + new Date().toISOString().slice(0, 10);
+
     host.querySelector('#j-export').onclick = () => {
-      const ev = this.journalEvents || [];
-      if (!ev.length) { App.toast('Журнал пуст — выгружать нечего', 'warn'); return; }
-      const csv = U.toCsv(ev.map((e) => (mode === 'prices' ? {
-        'Когда': e.at, 'нм-код': e.nmID, 'Артикул': e.vendorCode, 'Название': e.title,
-        'Фаза': e.kind === 'propose' ? 'предложено' : 'отправлено',
-        'Было, ₽': e.prevSellerPrice || '', 'Стало, ₽': e.sellerPrice,
-        'Базовая цена': e.basePrice, 'Скидка %': e.discount,
-        'Стратегия': e.strategy || e.source || '', 'Причина': e.reason || ''
-      } : {
-        'Когда': e.at, 'нм-код': e.nmID, 'Артикул': e.vendorCode, 'Название': e.title,
-        'Действие': { 'promo-join': 'вход в акцию', 'promo-exit': 'выход из акции', 'promo-restore': 'возврат цены' }[e.kind] || e.kind,
-        'Акции': (e.promoNames || []).join('; '),
-        'Цена до, ₽': e.prevSellerPrice || '', 'Цена после, ₽': e.sellerPrice || '',
-        'Успешно': e.ok === false ? 'нет' : 'да',
-        'Причина': e.reason || e.error || '',
-        'Держит автоакция': e.blockedByAutoPromo ? 'да' : 'нет'
-      })));
-      API.exportCsv('repricer-journal-' + mode + '-' + new Date().toISOString().slice(0, 10) + '.csv', csv);
+      if (!(this.journalEvents || []).length) { App.toast('Журнал пуст — выгружать нечего', 'warn'); return; }
+      const objs = journalRows().map((row) => {
+        const o = {};
+        journalHeaders.forEach((h, i) => { o[h] = row[i]; });
+        return o;
+      });
+      API.exportCsv(fileName() + '.csv', U.toCsv(objs));
       App.toast('Журнал выгружен в CSV', 'ok');
+    };
+
+    host.querySelector('#j-export-xlsx').onclick = async (e) => {
+      const btn = e.target;
+      const rows = journalRows();
+      if (!rows.length) { App.toast('Журнал пуст — выгружать нечего', 'warn'); return; }
+      btn.disabled = true;
+      const was = btn.textContent;
+      btn.textContent = 'Собираем…';
+      try {
+        const res = await API.invoke('xlsx:build', {
+          rows, headers: journalHeaders,
+          sheetName: mode === 'prices' ? 'Изменение цен' : 'Участие в акциях',
+          fileName: fileName() + '.xlsx'
+        });
+        U.downloadBase64(res.fileName, res.base64);
+        App.toast('Журнал выгружен в Excel: ' + U.fmt(res.rows) + ' строк', 'ok', 6000);
+      } catch (err) {
+        App.toast(err.message, 'err', 9000);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = was;
+      }
     };
 
     await load();

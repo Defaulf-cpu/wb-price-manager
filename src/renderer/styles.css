@@ -346,3 +346,25 @@ table.grid-table tfoot td {
    что именно уйдёт в пересчёт. */
 .grid-table tbody tr.row-dirty > td { background: rgba(245, 166, 35, .10); }
 .grid-table tbody tr.row-dirty > td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+
+/* ─────────── Сегментированный фильтр и плотность строк (репрайсер) ───────────
+   Фильтр «Все / К отправке / Своя цена / Ошибки данных / Убыточные / С предупреждениями»
+   сделан сегментами, как «Все / Основной» в репрайсере INDEEPA: активен один признак,
+   и сразу видно, что именно сейчас отобрано. */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--bg-2); }
+.seg-btn {
+  padding: 5px 11px; border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  border-right: 1px solid var(--line);
+}
+.seg-btn:last-child { border-right: 0; }
+.seg-btn:hover { background: var(--bg-3); color: var(--text); }
+.seg-btn.active { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+
+/* Плотные строки: на экран влезает примерно вдвое больше товаров. */
+.grid-table.dense tbody td { padding-top: 2px; padding-bottom: 2px; }
+.grid-table.dense tbody .rowtitle b { font-size: 12px; }
+.grid-table.dense tbody .tiny { font-size: 10px; line-height: 1.25; }
+.grid-table.dense tbody .cellinput { height: 22px; padding: 1px 4px; font-size: 12px; }
+.grid-table.dense tbody select { height: 22px; font-size: 11px; }
+.grid-table.dense tbody .btn-xs { padding: 1px 5px; font-size: 10px; }
