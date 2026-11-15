@@ -851,6 +851,16 @@ async function run() {
       check('запуск: bat в кодировке CRLF (иначе cmd может споткнуться)', /\r\n/.test(txt));
       check('запуск: есть --no-sandbox для запуска из-под npm', /--no-sandbox/.test(txt));
     }
+    // скрипт публикации на GitHub: тоже должен быть CRLF и не тащить секреты в репозиторий
+    const pub = bat.find((f) => /Опубликовать на GitHub/.test(f));
+    check('github: есть скрипт публикации репозитория', !!pub, pub || '');
+    if (pub) {
+      const ptxt = fsx.readFileSync(pathx.join(dir, pub), 'utf8');
+      check('github: скрипт в кодировке CRLF', /\r\n/.test(ptxt));
+      check('github: скрипт проверяет, что секреты не попадут в репозиторий',
+        /secrets/.test(ptxt) && /ls-files/.test(ptxt));
+      check('github: скрипт работает из своего каталога', /"%~dp0\."/.test(ptxt));
+    }
   })();
 
   // ── регрессия: каждый канал, который зовёт интерфейс, обязан быть в белом списке Electron ──
