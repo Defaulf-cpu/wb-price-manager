@@ -353,14 +353,7 @@ Views.prices = {
         </div>
         <div class="fld"><span>Правило</span>
           <select id="b-type" style="width:280px">
-            <option value="none">Не менять — отправить только ручной ввод</option>
-            <option value="delta-pct">Изменить итоговую цену на %</option>
-            <option value="delta-price">Изменить итоговую цену на ₽</option>
-            <option value="set-price">Установить итоговую цену, ₽</option>
-            <option value="set-discount">Установить скидку, %</option>
-            <option value="set-base">Установить базовую цену, ₽</option>
-            <option value="set-target-margin">Цена под маржинальность, %</option>
-            <option value="set-profit">Цена под прибыль, ₽/шт</option>
+            ${RULES.TYPES.map((t) => `<option value="${t.id}">${U.esc(t.label)}</option>`).join('')}
           </select>
         </div>
         <div class="fld"><span>Значение</span><input id="b-value" type="number" step="any" class="num" style="width:110px" value="${rule.value}" /></div>
@@ -394,21 +387,15 @@ Views.prices = {
     this.updateBulk();
   },
 
-  /** Товары, к которым будет применено правило. */
+  /**
+   * Товары, к которым будет применено правило. Сам разбор области применения живёт
+   * в общем модуле RULES (его же использует репрайсер), здесь только чтение выбора.
+   */
   scopeRows() {
     const st = S.state;
     const sel = document.querySelector('#b-scope');
     const scope = sel ? sel.value : (st.filters.flag === 'all' ? 'filtered' : st.filters.flag);
-    const all = S.getRows();
-    switch (scope) {
-      case 'selected': return all.filter((r) => st.selection.has(r.nmID));
-      case 'edited': return all.filter((r) => this.editing && this.editing.has(r.nmID));
-      case 'filtered': return S.filtered();
-      case 'loss': return all.filter((r) => r.profit < 0);
-      case 'low': return all.filter((r) => r.profit >= 0 && r.margin < U.num(st.settings.minMarginPctAlert));
-      case 'illiquid': case 'badturn': return all.filter((r) => r.stock > 0 && r.turnoverDays > 90);
-      default: return S.filtered();
-    }
+    return RULES.scopeRows(scope, { editing: this.editing });
   },
 
   updateBulk(opts) {
@@ -468,56 +455,14 @@ Views.prices = {
     const targets = this.scopeRows();
     if (!targets.length) { App.toast('Нет товаров для изменения', 'warn'); return; }
 
-    // объединяем правило и ручные правки
-    const plan = [];
-    for (const r of targets) {
-      const ov = st.overrides[String(r.nmID)] || {};
-      const manual = this.editing.get(r.nmID);
-      let base = manual ? U.num(manual.basePrice, r.basePrice) : U.num(r.basePrice);
-      let disc = manual ? U.num(manual.discount, r.discount) : U.num(r.discount);
-
-      // ВАЖНО: ручная правка важнее массового правила.
-      // Раньше правило применялось поверх введённого вручную значения, и поскольку
-      // правило по умолчанию — «изменить итоговую цену на −5%», введённая цена
-      // молча заменялась расчётной. Пользователь видел, что цены «не сохраняются».
-      const ruleActive = rule.type && rule.type !== 'none';
-      const applied = (!manual && ruleActive) ? EC.applyRule(st.settings, r.item, ov, rule) : null;
-      if (applied && rule.type !== 'set-base') { base = applied.basePrice; disc = applied.discountPct; }
-      else if (applied && rule.type === 'set-base') { base = applied.basePrice; }
-
-      disc = Math.max(0, Math.min(95, U.num(disc)));
-      base = Math.max(1, Math.round(U.num(base)));
-      if (rule.minPrice > 0) {
-        const seller = base * (1 - disc / 100);
-        if (seller < rule.minPrice && base > rule.minPrice) disc = Math.max(0, Math.round((1 - rule.minPrice / base) * 1000) / 10);
-      }
-
-      const a = EC.analyze(st.settings, r.item, ov, { basePrice: base, discountPct: disc });
-      const newSeller = a.next.revenue;
-      const oldSeller = r.sellerPrice;
-      const warnings = [];
-      if (oldSeller > 0 && newSeller < oldSeller / 3) warnings.push('карантин цены WB (>3× вниз)');
-      const maxChange = U.num(st.settings.maxPriceChangePct);
-      if (maxChange && oldSeller > 0 && Math.abs((newSeller - oldSeller) / oldSeller) * 100 > maxChange) warnings.push(`изменение > ${maxChange}%`);
-      if (a.next.profit < 0) warnings.push('убыток после изменения');
-      else if (a.next.marginPct < U.num(st.settings.minMarginPctAlert)) warnings.push('маржа ниже порога');
-
-      plan.push({
-        nmID: r.nmID, vendorCode: r.vendorCode, title: r.title,
-        oldBase: r.basePrice, oldDisc: r.discount, oldSeller,
-        newBase: base, newDisc: disc, newSeller,
-        oldProfit: r.profit, newProfit: a.next.profit,
-        oldMargin: r.margin, newMargin: a.next.marginPct,
-        changePct: oldSeller ? ((newSeller - oldSeller) / oldSeller) * 100 : 0,
-        source: manual ? 'manual' : (ruleActive ? 'rule' : 'none'),
-        warnings, skipped: warnings.includes('карантин цены WB (>3× вниз)')
-      });
-    }
-
-    const changed = plan.filter((p) => Math.abs(p.newSeller - p.oldSeller) > 0.5 || p.newBase !== p.oldBase);
-    const risky = plan.filter((p) => p.warnings.length);
-    const quarantined = plan.filter((p) => p.skipped);
-    const deltaProfit = U.sum(plan, (p) => p.newProfit - p.oldProfit);
+    // Правило и ручные правки объединяет общий модуль RULES: тот же код работает
+    // во вкладке «Массовые правила» репрайсера, поэтому планы не могут разойтись.
+    const result = RULES.buildPlan({ rows: targets, rule, edits: this.editing, settings: st.settings });
+    const plan = result.plan;
+    const changed = result.changed;
+    const risky = result.risky;
+    const quarantined = result.quarantined;
+    const deltaProfit = result.deltaProfit;
 
     const body = U.el('div');
     body.innerHTML = `
