@@ -151,6 +151,17 @@ Views.settings = {
         (statsMeta.truncated ? ' <span class="neg">(данные обрезаны — увеличьте лимит страниц)</span>' : '')
       : 'Статистика не загружена. Нажмите «Обновить данные из WB» или «Загрузить статистику» ниже.';
 
+    const stocksInfo = await API.invoke('stocks:state').catch(() => null);
+    const stocksMeta = (stocksInfo && stocksInfo.meta) || {};
+    const stocksCount = stocksInfo ? Number(stocksInfo.items || 0) : 0;
+    const stocksStatus = stocksCount > 0
+      ? 'Загружено: <b>' + stocksCount + '</b> товаров с остатками, источник <span class="mono">' +
+        U.esc(String(stocksMeta.source || '—')) + '</span>' +
+        (stocksMeta.loadedAt ? ', обновлено ' + U.date(stocksMeta.loadedAt, true) : '') +
+        (stocksMeta.fallback ? ' <span class="warnc">(запасной путь: отчёт заданием)</span>' : '') +
+        (stocksMeta.empty ? ' <span class="warnc">(последний ответ WB — пуст, сохранены прежние остатки)</span>' : '')
+      : 'Остатки не загружены. Нажмите «Загрузить остатки» — понадобится ключ категории «Аналитика».';
+
     container.innerHTML = `
       <div class="grid g2">
         <div class="col">
@@ -192,6 +203,14 @@ Views.settings = {
                   <label class="field">Ключ «Финансы» <span class="muted tiny">— отчёты о реализации: фактическая логистика, комиссии, хранение, эквайринг</span>
                     <input type="password" id="k-finance" placeholder="${info.keys.finance ? 'сохранён: ' + info.keys.finance + ' — вставьте новый, чтобы заменить' : 'не задан'}" autocomplete="off" />
                     ${keySavedRow('finance', info.keys.finance)}
+                  </label>
+                  <label class="field">Ключ «Аналитика» <span class="muted tiny">— остатки товаров на складах WB</span>
+                    <input type="password" id="k-analytics" placeholder="${info.keys.analytics ? 'сохранён: ' + info.keys.analytics + ' — вставьте новый, чтобы заменить' : 'не задан'}" autocomplete="off" />
+                    ${keySavedRow('analytics', info.keys.analytics)}
+                  </label>
+                  <label class="field">Ключ «Маркетплейс» <span class="muted tiny">— склады продавца и остатки FBS (запасной путь для остатков)</span>
+                    <input type="password" id="k-marketplace" placeholder="${info.keys.marketplace ? 'сохранён: ' + info.keys.marketplace + ' — вставьте новый, чтобы заменить' : 'не задан'}" autocomplete="off" />
+                    ${keySavedRow('marketplace', info.keys.marketplace)}
                   </label>
                   <p class="hint" style="margin:0">Отдельный ключ имеет приоритет над общим. Пустое поле = не задан.</p>
                 </div>
@@ -438,6 +457,36 @@ Views.settings = {
       </div>
 
       <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>3.5 Остатки по складам WB</h2>
+          <span class="hint">остаток, оборачиваемость и «заканчивается»</span></div>
+        <div style="padding:14px 16px 16px">
+          <div class="alert info" style="margin-bottom:12px">
+            Метод <span class="mono">GET /api/v1/supplier/stocks</span> <b>отключён Wildberries 23.06.2026</b> —
+            остатки теперь грузятся другим способом: отчётом
+            <span class="mono">POST /api/analytics/v1/stocks-report/wb-warehouses</span> (категория токена
+            <b>«Аналитика»</b>, лимит <b>1 запрос в 20 секунд</b>). Запасной путь — отчёт заданием
+            <span class="mono">warehouse_remains</span> (категория <b>«Маркетплейс»</b>).
+            Загруженные остатки участвуют в расчёте: остаток в репрайсере и оборачиваемость берутся
+            из WB, если остатки загружены — иначе из ручного ввода.
+          </div>
+          <div class="grid g3" style="gap:10px;margin-bottom:12px">
+            <label class="field">Порог «заканчивается», дней
+              <input type="number" class="num" id="s-stocks-low" value="${U.num(s.stocksLowDays, 14)}" min="1" max="365" step="1" /></label>
+          </div>
+          <p class="hint" style="margin-bottom:10px">Если запаса хватит меньше этого числа дней при текущих продажах —
+            в строке репрайсера и в карточке товара появится бейдж <b>«заканчивается»</b>.
+            Нужен ключ с категорией <b>«Аналитика»</b> (запасной путь — <b>«Маркетплейс»</b>);
+            если категорий нет, раздел честно покажет, что доступа нет, а не «нет доступа ко всему».</p>
+          <div class="row wrap" style="margin-top:8px">
+            <button class="btn btn-sm" id="st-load">Загрузить остатки</button>
+            <button class="btn btn-sm btn-ghost" id="st-warehouses">Список складов</button>
+            <span class="hint" id="st-status">${stocksStatus}</span>
+          </div>
+          <div id="st-wh" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
         <div class="card-head"><h2>4. Комиссии и реклама по категориям</h2>
           <button class="btn btn-sm btn-ghost" id="cat-reset">Сбросить к значениям по умолчанию</button></div>
         <div id="cats-host"></div>
@@ -539,6 +588,7 @@ Views.settings = {
         promosFetchNomenclatures: $('#s-promo-fetch').checked,
         priceWatchAutoFetch: $('#s-pw-auto').checked,
         priceWatchTtlMinutes: U.num($('#s-pw-ttl').value, 60),
+        stocksLowDays: U.num($('#s-stocks-low').value, 14),
         statsLoadOrders: $('#f-orders').checked,
         statsMaxPages: U.num($('#f-statpages').value, 3),
         quarantineGuard: $('#g-quar').checked,
@@ -613,6 +663,45 @@ Views.settings = {
       this.draw();
     };
 
+    // остатки по складам WB: загрузка отчёта остатков (категория «Аналитика», 1 запрос/20 с)
+    $('#st-load').onclick = async () => {
+      const btn = $('#st-load');
+      btn.disabled = true;
+      btn.textContent = 'Загружаем… (лимит WB — 1 запрос/20 с)';
+      $('#st-status').innerHTML = 'Загружаем остатки по складам WB…';
+      try {
+        const res = await API.invoke('stocks:load', { force: true });
+        if (res && res.ok) {
+          App.toast('Остатки загружены: ' + res.items + ' товаров' +
+            (res.meta && res.meta.fallback ? ' (запасной путь: отчёт заданием)' : ''), 'ok', 7000);
+        } else {
+          App.toast((res && (res.message || res.error)) || 'Не удалось загрузить остатки', 'err', 8000);
+        }
+      } catch (e) {
+        App.toast(e.message, 'err', 9000);
+      }
+      this.draw();
+    };
+
+    // список складов продавца (FBS) — категория «Маркетплейс»
+    $('#st-warehouses').onclick = async () => {
+      const btn = $('#st-warehouses');
+      btn.disabled = true;
+      btn.textContent = 'Спрашиваем…';
+      try {
+        const res = await API.invoke('warehouses:list');
+        const items = (res && res.items) || [];
+        $('#st-wh').innerHTML = items.length
+          ? '<div class="tiny">' + items.map((w) => '<div><b>' + U.esc(w.name || 'склад ' + w.id) +
+            '</b> <span class="muted">' + U.esc(w.region || '') + '</span></div>').join('') + '</div>'
+          : '<div class="tiny muted">WB не вернул склады — проверьте ключ категории «Маркетплейс».</div>';
+      } catch (e) {
+        $('#st-wh').innerHTML = '<div class="tiny neg">' + U.esc(e.message) + '</div>';
+      }
+      btn.disabled = false;
+      btn.textContent = 'Список складов';
+    };
+
     // статистика: загрузить продажи (и заказы, если включено) / догрузить только заказы
     $('#f-load-stats').onclick = async () => {
       const btn = $('#f-load-stats');
@@ -684,7 +773,7 @@ Views.settings = {
       });
 
     // Как только вставили настоящий ключ — демо-режим не нужен: снимаем галку сами.
-    const keyInputs = ['#k-single', '#k-prices', '#k-stats', '#k-content', '#k-finance']
+    const keyInputs = ['#k-single', '#k-prices', '#k-stats', '#k-content', '#k-finance', '#k-analytics', '#k-marketplace']
       .map((sel) => $(sel)).filter(Boolean);
     const hintOf = (checked, anyKey) => {
       if (checked) {
@@ -718,7 +807,7 @@ Views.settings = {
     $('#k-demo').onchange = setHint;
 
     // ключи
-    const KEY_FIELDS = { single: '#k-single', prices: '#k-prices', statistics: '#k-stats', content: '#k-content', finance: '#k-finance' };
+    const KEY_FIELDS = { single: '#k-single', prices: '#k-prices', statistics: '#k-stats', content: '#k-content', finance: '#k-finance', analytics: '#k-analytics', marketplace: '#k-marketplace' };
     const KEY_TITLES = KEY_NAMES;
     const saveKeys = async () => {
       const payload = { demoMode: $('#k-demo').checked };

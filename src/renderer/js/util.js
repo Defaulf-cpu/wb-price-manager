@@ -227,8 +227,26 @@ window.U = (function () {
       .replace(/\{name\}/g, encodeURIComponent(p.name === undefined ? (p.promoName || '') : p.name));
   }
 
+  /**
+   * «Заканчивается»: запаса хватит меньше lowDays дней при текущих продажах.
+   * 纯函数 — без DOM, чтобы логика бейджа тестировалась в node.
+   *
+   * @param {number} stock       остаток (шт)
+   * @param {number} turnoverDays оборачиваемость (дн; 999 = без продаж)
+   * @param {number} lowDays     порог из настроек (stocksLowDays)
+   * @returns {boolean} true, если нужен бейдж «заканчивается»
+   */
+  function stockWarn(stock, turnoverDays, lowDays) {
+    const s = Number(stock) || 0;
+    const t = Number(turnoverDays) || 0;
+    const n = Number(lowDays);
+    if (!(s > 0) || !Number.isFinite(n) || !(n > 0)) return false;
+    if (!(t > 0) || t >= 999) return false; // без продаж оборачиваемость не считается
+    return t < n;
+  }
+
   return {
     num, fmt, money, signed, pct, compact, date, time, daysBetween, esc, el, cls,
-    profitClass, debounce, toCsv, parseCsv, download, downloadBase64, sum, groupBy, sortBy, promoCabinetUrl
+    profitClass, debounce, toCsv, parseCsv, download, downloadBase64, sum, groupBy, sortBy, promoCabinetUrl, stockWarn
   };
 })();

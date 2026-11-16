@@ -49,7 +49,7 @@ function createService(store, emit, electron) {
   let demoApi = null;
   let client = null;
   let clientSignature = '';
-  const cache = { goods: null, goodsAt: 0, stats: null, statsAt: 0, statsErrors: [], statsMeta: null, cards: null, cardsAt: 0 };
+  const cache = { goods: null, goodsAt: 0, stats: null, statsAt: 0, statsErrors: [], statsMeta: null, cards: null, cardsAt: 0, stocks: null, stocksAt: 0, stocksMeta: null };
   const sched = { timer: null, nextRunAt: null, lastRun: null, running: false };
 
   function getSettings() {
@@ -816,6 +816,16 @@ function createService(store, emit, electron) {
         const rows = Array.isArray(c) ? c : ((c && c.cards) || []);
         return rows.length + ' карточек';
       });
+      await step('stocks', 'Остатки по складам WB', async () => {
+        // Категория «Аналитика» — 1 запрос в 20 с; при занятом лимите (429)
+        // раздел уходит в фоновую догрузку, как статистика. Пустой отчёт
+        // не затирает уже загруженные остатки (см. loadStocksIntoCache).
+        const r = await loadStocksIntoCache({});
+        let detail = r.items + ' товаров с остатками';
+        if (r.meta && r.meta.fallback) detail += ' (запасной путь: отчёт заданием)';
+        if (r.meta && r.meta.empty) detail += ' (WB вернул пусто — сохранены прежние остатки)';
+        return detail;
+      });
       if (withFacts) {
         await step('facts', 'Фактические расходы (отчёт о реализации)', async () => {
           const f = await loadFactCosts({ days: Number(o.factDays) || undefined });
@@ -921,6 +931,55 @@ function createService(store, emit, electron) {
       deferred: deferredList().filter((x) => x.name === 'stats' || x.name === 'stats-orders')
     }),
 
+    /**
+     * Загружать остатки по складам WB.
+     *
+     * Основной путь — stocks-report/wb-warehouses (категория «Аналитика»),
+     * запасной — отчёт заданием warehouse_remains (категория «Маркетплейс»).
+     * Пустой ответ не затирает прежние остатки: они остаются в кэше, а в
+     * meta ставится empty:true и время попытки.
+     */
+    'stocks:load': async (payload) => {
+      const o = payload || {};
+      if (o.force !== true && cache.stocks && Date.now() - cache.stocksAt < CACHE_TTL_MS) {
+        return {
+          ok: true, fromCache: true, demo: isDemo(),
+          items: Object.keys(cache.stocks).length, meta: cache.stocksMeta,
+          loadedAt: cache.stocksAt ? new Date(cache.stocksAt).toISOString() : null
+        };
+      }
+      const r = await loadStocksIntoCache({
+        force: true,
+        patient: !!o.patient,
+        maxPages: Number(o.maxPages) || undefined,
+        maxWaitMs: o.maxWaitMs,
+        pageWaitMs: o.pageWaitMs
+      });
+      return Object.assign({ fromCache: false }, r);
+    },
+
+    /**
+     * Что известно об остатках по складам WB: сколько товаров, когда загружено,
+     * откуда (основной метод или отчёт заданием), были ли пустые ответы.
+     * Намеренно НЕ ходит в WB: лимит категории «Аналитика» — 1 запрос в 20 с,
+     * тратить его на справочный запрос нельзя.
+     */
+    'stocks:state': async () => ({
+      ok: true,
+      demo: isDemo(),
+      items: Object.keys(stocksMap()).length,
+      meta: cache.stocksMeta || null,
+      loadedAt: cache.stocksAt ? new Date(cache.stocksAt).toISOString() : null,
+      deferred: deferredList().filter((x) => x.name === 'stocks')
+    }),
+
+    /** Список складов продавца (FBS): GET /api/v3/warehouses, категория «Маркетплейс». */
+    'warehouses:list': async () => {
+      if (isDemo()) return { ok: true, demo: true, items: await getDemo().getWarehouses() };
+      const items = await getClient().getWarehouses();
+      return { ok: true, demo: false, items };
+    },
+
     /** Диагностика лимитов WB: сколько ждать до следующего запроса по каждой категории. */
     'wb:rate-state': async () => {
       if (isDemo()) {
@@ -952,6 +1011,8 @@ function createService(store, emit, electron) {
           content: maskKey(secrets.content),
           finance: maskKey(secrets.finance),
           advert: maskKey(secrets.advert),
+          analytics: maskKey(secrets.analytics),
+          marketplace: maskKey(secrets.marketplace),
           master: maskKey(secrets.master)
         },
         keysSet: Object.keys(secrets).filter((k) => secrets[k]).length,
@@ -969,7 +1030,10 @@ function createService(store, emit, electron) {
           goodsAt: cache.goodsAt || null,
           goodsCount: cache.goods ? cache.goods.items.length : 0,
           statsAt: cache.statsAt || null,
-          cardsAt: cache.cardsAt || null
+          cardsAt: cache.cardsAt || null,
+          stocksAt: cache.stocksAt || null,
+          stocksCount: Object.keys(stocksMap()).length,
+          stocksMeta: cache.stocksMeta || null
         },
         costsCount: Object.keys(costsMap()).length,
         appDir: store.dir
@@ -986,7 +1050,7 @@ function createService(store, emit, electron) {
       const secrets = store.loadSecrets();
       const p = payload || {};
       // single/universal/all — один ключ на все разделы (WB выдаёт JWT с выбранными категориями)
-      const names = ['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'master'];
+      const names = ['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace', 'master'];
       // Пустое поле означает «не трогать сохранённый ключ», а НЕ «удалить».
       // Раньше пустая строка удаляла ключ: интерфейс отправлял все пять полей,
       // а после перерисовки они пустые (сохранённый ключ виден только в подсказке) —
@@ -1867,6 +1931,10 @@ function createService(store, emit, electron) {
       const competitors = (await competitorsMap())[String(nmID)] || [];
       const itemConfig = (store.loadItemConfigs() || {})[String(nmID)] || null;
       const promos = item ? promosForItem(item, pi) : [];
+      // остатки по складам WB: сумма + разбивка по складам и регионам (из кэша)
+      const stocks = stocksMap()[String(nmID)] || null;
+      const wbStock = stocks && stocks.total > 0;
+      const stockValue = wbStock ? Number(stocks.total) : Number(overrides.stock || 0);
       return {
         ok: !!item,
         demo: isDemo(),
@@ -1876,6 +1944,9 @@ function createService(store, emit, electron) {
         stats,
         facts,
         card,
+        stocks,
+        stock: stockValue,
+        stockSource: wbStock ? 'wb' : (String(overrides.source || '') === 'user' ? 'manual' : 'demo'),
         promos,
         promosNoApi: pi ? Object.keys(pi.noApi || {}).length : 0,
         competitors,
@@ -2465,7 +2536,8 @@ function createService(store, emit, electron) {
     promos: 'нужна категория «Цены и скидки» — календарь акций',
     stats: 'нужна категория «Статистика»',
     cards: 'нужна категория «Контент» — карточки и размеры',
-    facts: 'нужна категория «Финансы» — отчёты о реализации'
+    facts: 'нужна категория «Финансы» — отчёты о реализации',
+    stocks: 'нужна категория «Аналитика» — остатки на складах WB (запасной путь — «Маркетплейс»)'
   };
   function sectionHint(name, e) {
     if (e && e.hint) return e.hint;
@@ -2641,7 +2713,8 @@ function createService(store, emit, electron) {
     cards: 'Карточки и габариты',
     stats: 'Статистика продаж',
     'stats-orders': 'Заказы (статистика)',
-    facts: 'Фактические расходы (отчёт о реализации)'
+    facts: 'Фактические расходы (отчёт о реализации)',
+    stocks: 'Остатки по складам WB'
   };
   const deferred = {};
 
@@ -2687,6 +2760,13 @@ function createService(store, emit, electron) {
       }
       return f.items + ' товаров, ' + f.rowsProcessed + ' строк за ' + f.dateFrom + ' → ' + f.dateTo +
         (f.widened ? ' (взят последний доступный отчёт WB)' : '');
+    },
+    stocks: async () => {
+      const r = await loadStocksIntoCache({ patient: true });
+      let detail = r.items + ' товаров с остатками';
+      if (r.meta && r.meta.fallback) detail += ' (использован запасной путь: отчёт заданием)';
+      if (r.meta && r.meta.empty) detail += ' (WB вернул пусто — сохранены прежние остатки)';
+      return detail;
     }
   };
 
@@ -2796,6 +2876,10 @@ function createService(store, emit, electron) {
     cache.goods = null; cache.goodsAt = 0;
     if (!keep) {
       cache.stats = null; cache.statsAt = 0; cache.statsErrors = []; cache.statsMeta = null;
+      // Остатки — «сохранённые» данные, как статистика: при обновлении данных
+      // (keepExpensive) их не сбрасываем, чтобы 429/ошибка не стирала загруженные
+      // остатки. Полный сброс нужен только при смене ключей/кабинета.
+      cache.stocks = null; cache.stocksAt = 0; cache.stocksMeta = null;
     }
     cache.cards = null; cache.cardsAt = 0;
     cache.promos = null; cache.promosAt = 0;
@@ -2815,6 +2899,103 @@ function createService(store, emit, electron) {
     const out = Object.assign({}, demo);
     for (const [k, v] of Object.entries(user)) out[k] = v;
     return out;
+  }
+
+  /**
+   * Загрузка остатков по складам WB в кэш приложения и в файл .data/stocks.json.
+   *
+   * Основной метод — POST /api/analytics/v1/stocks-report/wb-warehouses (категория
+   * «Аналитика», 1 запрос в 20 с). Если ключа без категории «Аналитика» —
+   * запасной путь: отчёт заданием warehouse_remains (категория «Маркетплейс»).
+   *
+   * ВАЖНО: пустой ответ НЕ затирает прежние остатки. Если WB вернул 0 строк
+   * (или ошибку) — оставляем уже загруженный кэш, а в мета записываем, что
+   * последний запрос вернул пусто, и время этой попытки.
+   *
+   * @param {{force?:boolean, patient?:boolean, maxPages?:number, maxWaitMs?:number}} opts
+   */
+  async function loadStocksIntoCache(opts) {
+    const o = opts || {};
+    if (isDemo()) {
+      const res = await getDemo().getStocksReport();
+      applyStocksResult(res, { source: 'demo', meta: { demo: true } });
+      return { ok: true, demo: true, items: Object.keys(cache.stocks || {}).length, meta: cache.stocksMeta };
+    }
+    const c = getClient();
+    const pageOpts = {
+      maxPages: Number(o.maxPages) || 250,
+      maxWaitMs: o.maxWaitMs,
+      pageWaitMs: o.pageWaitMs
+    };
+    let res;
+    let usedFallback = false;
+    try {
+      res = await c.getStocksReport(Object.assign({}, pageOpts, {
+        maxWaitMs: o.patient ? undefined : pageOpts.maxWaitMs
+      }));
+    } catch (e) {
+      // Основной метод недоступен для ключа (403/404/405/422) — пробуем отчёт заданием.
+      // Лимит (429) и сетевые ошибки НЕ заменяются запасным путём: это временное
+      // состояние, и ломать его «в лоб» только продлит блокировку — пусть раздел
+      // уйдёт в фоновую догрузку, как и статистика.
+      const status = Number(e && e.status) || 0;
+      const code = (e && e.code) || '';
+      const fallbackable = status === 403 || status === 404 || status === 405 || status === 422 || code === '403' || code === '404' || code === '405' || code === '422' || code === 'API_ERROR';
+      if (!fallbackable) throw e;
+      usedFallback = true;
+      notify('info', { where: 'stocks', message: 'Основной метод остатков недоступен для ключа — пробуем отчёт заданием: ' + e.message });
+      res = await c.getStocksByTask({ maxAttempts: 20, pollMs: 3000 });
+    }
+    applyStocksResult(res, { source: res.source, meta: { fallback: usedFallback } });
+    return {
+      ok: true,
+      demo: false,
+      items: Object.keys(cache.stocks || {}).length,
+      meta: cache.stocksMeta
+    };
+  }
+
+  /**
+   * Сохранение результата загрузки остатков: в кэш памяти и в файл.
+   * Пустой ответ (0 строк) не перезаписывает уже загруженные остатки.
+   */
+  function applyStocksResult(res, extra) {
+    const aggregated = (res && res.aggregated) || {};
+    const rows = (res && res.rows) || [];
+    const at = new Date().toISOString();
+    if (!rows.length && cache.stocks) {
+      // Пустой отчёт — оставляем прежние остатки и честно помечаем, что WB вернул пусто.
+      cache.stocksMeta = Object.assign({}, cache.stocksMeta || {}, {
+        source: (extra && extra.source) || (cache.stocksMeta && cache.stocksMeta.source) || '',
+        empty: true,
+        emptyAt: at,
+        rows: 0,
+        items: Object.keys(cache.stocks).length,
+        at,
+        updatedAt: at
+      });
+      return;
+    }
+    cache.stocks = aggregated;
+    cache.stocksAt = Date.now();
+    const meta = {
+      source: (extra && extra.source) || (res && res.source) || '',
+      fallback: !!(extra && extra.meta && extra.meta.fallback),
+      demo: !!(extra && extra.meta && extra.meta.demo),
+      empty: false,
+      rows: rows.length,
+      pages: Number(res && res.pages) || 1,
+      items: Object.keys(aggregated).length,
+      at,
+      updatedAt: at
+    };
+    cache.stocksMeta = meta;
+    store.saveStocks(aggregated, meta);
+  }
+
+  /** Остатки по складам WB: кэш из памяти (он же — файл stocks.json). */
+  function stocksMap() {
+    return cache.stocks || (store.loadStocks() || {}).items || {};
   }
 
   /** Собирает контекст товара для движка репрайсера. */
@@ -2856,7 +3037,11 @@ function createService(store, emit, electron) {
 
       const seller = Number(item.price) * (1 - Number(item.discount) / 100);
       const perDay = stats.salesQty ? stats.salesQty / 30 : Number(ov.salesPerDay || 0);
-      const stock = Number(ov.stock || 0);
+      // Остаток: из загруженных остатков WB (по складам) — приоритетнее ручного
+      // ввода; если остатки не загружены — ручной ввод/демо, с пометкой источника.
+      const wbStock = stocksMap()[key];
+      const stock = wbStock ? Number(wbStock.total) : Number(ov.stock || 0);
+      const stockSource = wbStock ? 'wb' : (ov.source === 'user' ? 'manual' : 'demo');
       const salesMonthQty = perDay > 0 ? perDay * dayOfMonth : 0;
 
       const p = EC.resolveParams(settings, item, ov, fact);
@@ -2877,6 +3062,7 @@ function createService(store, emit, electron) {
           sppPct: Number(p.sppPct || 0),
           forPayAvg: Number(stats.avgForPay || 0),
           stock,
+          stockSource,
           salesPerDay: perDay,
           salesMonthQty,
           sales30: Number(stats.salesQty || 0),

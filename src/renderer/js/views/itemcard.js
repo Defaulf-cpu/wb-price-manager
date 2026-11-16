@@ -153,6 +153,21 @@ Views.itemcard = {
     // своя цена: черновик, если он есть, иначе цена МП
     const myBase = draft ? U.num(draft.basePrice) : mpBase;
     const myDisc = draft ? U.num(draft.discount) : mpDisc;
+    // оборачиваемость: остаток на складах / темп продаж (тот же расчёт, что в репрайсере)
+    const perDay = U.num(st.salesQty) > 0 ? U.num(st.salesQty) / 30 : U.num((d.overrides || {}).salesPerDay || 0);
+    const turnoverDaysOf = (dd) => {
+      const stock = U.num(dd.stock || 0);
+      if (perDay > 0) return stock / perDay;
+      return stock > 0 ? 999 : 0;
+    };
+    // разбивка остатков по складам и регионам — как в отчёте WB
+    const breakdownLine = (map, label) => {
+      const entries = Object.entries(map || {}).filter(([, q]) => Number(q) > 0);
+      if (!entries.length) return '';
+      return '<div class="tiny" style="margin-top:4px"><b class="tiny muted">' + label + ':</b> ' +
+        entries.map(([k, q]) => U.esc(k) + ' — ' + U.fmt(q) + ' шт').join(' · ') + '</div>';
+    };
+    const warehouseBreakdown = (s) => breakdownLine(s.byWarehouse, 'Склады') + breakdownLine(s.byRegion, 'Регионы');
 
     host.innerHTML = `
       <div class="grid g2" style="gap:12px">
@@ -212,7 +227,7 @@ Views.itemcard = {
             ['Возвраты, шт', U.fmt(st.returnsQty || 0)],
             ['Средняя цена продажи', st.avgPrice ? U.money(st.avgPrice) : '—'],
             ['Средняя выплата (ppvz_for_pay)', st.avgForPay ? U.money(st.avgForPay) : '—'],
-            ['Остаток на складах', U.fmt((d.overrides || {}).stock || 0) + ' шт'],
+            ['Остаток на складах', U.fmt(d.stock || 0) + ' шт' + (U.stockWarn(d.stock, turnoverDaysOf(d), (d.settings || {}).stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : '')],
             ['Объём, л', card && card.volumeLiters ? U.num(card.volumeLiters, 2) + ' л' : '—'],
             ['Габариты, см', card && card.dimensions
               ? U.num(card.dimensions.length) + ' × ' + U.num(card.dimensions.width) + ' × ' + U.num(card.dimensions.height)
@@ -220,6 +235,11 @@ Views.itemcard = {
           ])}
           ${(d.statsMeta && d.statsMeta.truncated) ? '<p class="hint warnc" style="margin-top:8px">WB отдал не все страницы статистики — цифры за период могут быть неполными.</p>' : ''}
           ${(d.statsMeta && d.statsMeta.stale) ? '<p class="hint warnc" style="margin-top:8px">Статистика от ' + U.esc(U.date(d.statsMeta.staleAt, true)) + ': последний запрос к WB отклонён (лимит 1 запрос в минуту).</p>' : ''}
+          ${d.stocks && d.stockSource === 'wb' ? `<div class="divider"></div>
+            <b class="tiny">Остатки по складам WB${d.stocks.at ? ' · ' + U.esc(U.date(d.stocks.at, true)) : ''}</b>
+            ${warehouseBreakdown(d.stocks)}
+            <div class="tiny muted" style="margin-top:4px">Источник: загружено из WB (отчёт остатков по складам).</div>` : ''}
+          ${d.stockSource === 'manual' && !d.stocks ? '<div class="tiny muted" style="margin-top:6px">Остаток введён вручную — остатки по складам WB ещё не загружены («Настройки → 3.5 Остатки по складам»).</div>' : ''}
           <div class="divider"></div>
           <b class="tiny">Цены по размерам</b>
           <div id="ic-sizes"><div class="loader"><div class="spinner"></div></div></div>

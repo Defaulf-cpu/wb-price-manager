@@ -1613,7 +1613,7 @@ Views.repricer = {
           } },
         // ══ блок «Инфо о товаре» ══
         { title: 'Инфо о товаре', render: (r) => this.itemInfoCellHtml(r) },
-        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
+        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт${U.stockWarn(r.context.stock, r.context.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : ''}<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
         { title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
         // ══ блок «Текущая цена» ══
         { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
@@ -1970,7 +1970,7 @@ Views.repricer = {
             ['Маржинальность', `${U.pct(r.current.marginPct)} → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>`],
             ['Прогноз Δ прибыли/мес', `<b class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</b>`],
             ['Режим расчёта маржи', r.context.marginMode === 'forpay' ? 'от суммы ForPay' : (r.context.marginMode === 'wallet' ? 'от цены с кошельком' : 'от цены со скидкой')],
-            ['Остаток', U.fmt(r.context.stock) + ' шт'],
+            ['Остаток', U.fmt(r.context.stock) + ' шт' + (U.stockWarn(r.context.stock, r.context.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : '')],
             ['Темп продаж', U.num(r.context.salesPerDay).toFixed(1) + ' шт/день'],
             ['Оборачиваемость', r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'],
             ['В акции', r.context.inPromo ? 'да' + (r.context.promoPrice ? ', цена ' + U.money(r.context.promoPrice) : '') : 'нет']

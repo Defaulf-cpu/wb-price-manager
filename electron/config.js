@@ -9,6 +9,7 @@ const APP_NAME = 'WB Price Manager';
 const SETTINGS_FILE = 'settings.json';
 const PRICEWATCH_FILE = 'pricewatch.json';
 const COSTS_FILE = 'costs.json';
+const STOCKS_FILE = 'stocks.json';
 const TASKS_FILE = 'tasks.json';
 const SECRETS_FILE = 'secrets.enc';
 const FACTCOSTS_FILE = 'factcosts.json';
@@ -31,7 +32,11 @@ const WB_HOSTS = {
     content: 'https://content-api.wildberries.ru',
     common: 'https://common-api.wildberries.ru',
     advert: 'https://advert-api.wildberries.ru',
-    finance: 'https://finance-api.wildberries.ru'
+    finance: 'https://finance-api.wildberries.ru',
+    // Остатки по складам: «Аналитика» — отчёт остатков на складах WB
+    analytics: 'https://analytics-api.wildberries.ru',
+    // Склады продавца и остатки FBS: категория «Маркетплейс»
+    marketplace: 'https://seller-api.wildberries.ru'
   },
   sandbox: {
     prices: 'https://discounts-prices-api-sandbox.wildberries.ru',
@@ -41,7 +46,9 @@ const WB_HOSTS = {
     common: 'https://common-api-sandbox.wildberries.ru',
     advert: 'https://advert-api-sandbox.wildberries.ru',
     // песочницы для финансового API WB не публикует — используем боевой хост
-    finance: 'https://finance-api.wildberries.ru'
+    finance: 'https://finance-api.wildberries.ru',
+    analytics: 'https://analytics-api-sandbox.wildberries.ru',
+    marketplace: 'https://seller-api-sandbox.wildberries.ru'
   }
 };
 
@@ -84,7 +91,12 @@ const RATE_LIMITS = {
   content: { perWindow: 10, windowMs: sc(6000), minIntervalMs: sc(620), burst: 5, maxWaitMs: sc(10000) },
   common: { perWindow: 10, windowMs: sc(6000), minIntervalMs: sc(620), burst: 5, maxWaitMs: sc(10000) },
   advert: { perWindow: 10, windowMs: sc(6000), minIntervalMs: sc(620), burst: 5, maxWaitMs: sc(10000) },
-  finance: { perWindow: 1, windowMs: sc(60000), minIntervalMs: sc(62000), burst: 1, maxWaitMs: sc(2500) }
+  finance: { perWindow: 1, windowMs: sc(60000), minIntervalMs: sc(62000), burst: 1, maxWaitMs: sc(2500) },
+  // Остатки на складах WB: категория «Аналитика» — 1 запрос в 20 секунд.
+  // Отчёт может содержать до 250 000 строк, поэтому пагинация по offset.
+  analytics: { perWindow: 1, windowMs: sc(20000), minIntervalMs: sc(20100), burst: 1, maxWaitMs: sc(2000) },
+  // Склады продавца и остатки FBS: категория «Маркетплейс» — 3 запроса в 30 секунд.
+  marketplace: { perWindow: 3, windowMs: sc(30000), minIntervalMs: sc(10100), burst: 3, maxWaitMs: sc(2000) }
 };
 
 /** Через сколько повторно просить раздел, если WB не прислал срок в заголовках. */
@@ -100,7 +112,9 @@ const TOKEN_SCOPES = {
   statistics: 'Статистика (бит 5)',
   content: 'Контент (бит 1)',
   tariffs: 'Продвижение (бит 6) — раздел «Тарифы»',
-  finance: 'Финансы — отчёты о реализации (фактическая логистика, комиссия, хранение, эквайринг)'
+  finance: 'Финансы — отчёты о реализации (фактическая логистика, комиссия, хранение, эквайринг)',
+  analytics: 'Аналитика — остатки товаров на складах WB',
+  marketplace: 'Маркетплейс — склады продавца и остатки FBS'
 };
 
 module.exports = {
@@ -108,6 +122,7 @@ module.exports = {
   SETTINGS_FILE,
   PRICEWATCH_FILE,
   COSTS_FILE,
+  STOCKS_FILE,
   TASKS_FILE,
   SECRETS_FILE,
   FACTCOSTS_FILE,
