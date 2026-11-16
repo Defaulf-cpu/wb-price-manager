@@ -83,7 +83,17 @@ const MARKERS = [
   ['docs/API.md', 'pricewatch:fetch', 'контракты наблюдателя в справочнике API'],
   ['tools/checks/repricer-flow.js', 'sppPctWatch', 'проверки приоритета СПП с витрины'],
   ['tools/uitest.js', 'pw-m-shelf', 'UI-проверки вкладки «Цены на площадке»'],
-  ['package.json', 'price-watch-flow.js', 'прогон наблюдателя в npm test']
+  ['package.json', 'price-watch-flow.js', 'прогон наблюдателя в npm test'],
+  ['tools/web-server.js', 'createWebServer', 'веб-версия с авторизацией'],
+  ['tools/web-server.js', 'frame-ancestors', 'CSP и защита от кликджекинга'],
+  ['tools/web-server.js', 'allowFraming', 'опция встраивания в iframe'],
+  ['tools/web-auth.js', 'scryptSync', 'пароль хранится хешем scrypt'],
+  ['tools/web-auth.js', 'SameSite', 'cookie сессии с SameSite'],
+  ['src/renderer/js/api.js', 'X-CSRF-Token', 'CSRF-заголовок в браузерных запросах'],
+  ['src/renderer/js/api.js', 'function logout', 'выход из веб-сессии'],
+  ['src/renderer/js/app.js', "mk('Выйти'", 'кнопка «Выйти» в веб-версии'],
+  ['package.json', 'web-server-flow.js', 'прогон веб-сервера в npm test'],
+  ['docs/WEB.md', 'cloudflared', 'инструкция по туннелю и HTTPS']
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */
@@ -103,6 +113,8 @@ const REQUIRED_FILES = [
   'src/renderer/js/views/reports.js', 'src/renderer/js/views/repricer.js',
   'src/renderer/js/views/settings.js',
   'tools/serve.js', 'tools/uitest.js', 'tools/version.js',
+  'docs/WEB.md', 'tools/web-auth.js', 'tools/web-server.js',
+  'tools/checks/web-server-flow.js',
   'tools/checks/demo-flow.js', 'tools/checks/pl-flow.js', 'tools/checks/promo-import.js',
   'tools/checks/promo-import2.js', 'tools/checks/promo-index.js',
   'tools/checks/price-watch-flow.js',
@@ -111,7 +123,8 @@ const REQUIRED_FILES = [
   'tools/checks/rate-limit-flow.js', 'tools/checks/repo-check.js',
   'tools/checks/repricer-flow.js',
   'Запуск (Windows).bat', 'Запуск в браузере (демо).bat',
-  'Собрать EXE (Windows).bat', 'Опубликовать на GitHub (Windows).bat'
+  'Собрать EXE (Windows).bat', 'Опубликовать на GitHub (Windows).bat',
+  'Веб-версия (доступ из сети).bat'
 ];
 
 let ok = 0;

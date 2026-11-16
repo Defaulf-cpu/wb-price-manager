@@ -9,6 +9,13 @@ window.API = (function () {
 
   const isElectron = !!(window.wbApp && typeof window.wbApp.invoke === 'function');
 
+  function csrfToken() {
+    const match = String(document.cookie || '').split(';').map((x) => x.trim()).find((x) => x.indexOf('wb_web_csrf=') === 0);
+    if (!match) return '';
+    try { return decodeURIComponent(match.slice('wb_web_csrf='.length)); }
+    catch (e) { return match.slice('wb_web_csrf='.length); }
+  }
+
   async function invoke(channel, ...args) {
     if (isElectron) {
       const res = await window.wbApp.invoke(channel, ...args);
@@ -22,7 +29,7 @@ window.API = (function () {
     }
     const r = await fetch('/api/invoke', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
       body: JSON.stringify({ channel, args })
     });
     const res = await r.json();
@@ -193,6 +200,30 @@ window.API = (function () {
     });
   }
 
+  /**
+   * Работаем ли сейчас через веб-сервер с авторизацией (а не в Electron и не в dev-сервере).
+   * Признак — CSRF-cookie, которую выдаёт `tools/web-server.js` после входа: в dev-сервере
+   * `tools/serve.js` её нет, поэтому кнопка «Выйти» там не показывается.
+   */
+  function webSession() {
+    return !isElectron && csrfToken() !== '';
+  }
+
+  /**
+   * Выйти из веб-сессии: отозвать сессию на сервере и вернуться на страницу входа.
+   * В Electron приложения закрывается окно, а не сессия, поэтому там выход не нужен.
+   */
+  async function logout() {
+    if (isElectron) return false;
+    try {
+      await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken() } });
+    } catch (e) {
+      // даже если сервер не ответил,-cookie нужно сбросить и уйти на страницу входа
+    }
+    window.location.href = '/login';
+    return true;
+  }
+
   async function openExternal(url) {
     if (isElectron) { await window.wbApp.invoke('ui:open-external', url); return; }
     window.open(url, '_blank', 'noopener');
@@ -206,5 +237,5 @@ window.API = (function () {
     return { version: 'web-preview', platform: navigator.platform, appDir: 'tools/.data', electron: '—', encryption: '—' };
   }
 
-  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, isElectron };
+  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron };
 })();

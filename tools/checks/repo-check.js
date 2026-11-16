@@ -79,6 +79,7 @@ const REQUIRED = [
 const BAT_FILES = [
   'Запуск (Windows).bat',
   'Запуск в браузере (демо).bat',
+  'Веб-версия (доступ из сети).bat',
   'Собрать EXE (Windows).bat',
   'Опубликовать на GitHub (Windows).bat'
 ];

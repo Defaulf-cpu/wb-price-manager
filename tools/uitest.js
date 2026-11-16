@@ -2139,6 +2139,50 @@ async function run() {
   if (cc2) cc2.click();
   await wait(200);
 
+  // ── веб-версия: CSRF-заголовок и видимая кнопка «Выйти» ──
+  // В Electron и в dev-сервере tools/serve.js сессии нет — значит и кнопки выхода быть не должно.
+  const topButtons = () => Array.from(doc.querySelectorAll('#topbar-actions button')).map((b) => b.textContent.trim());
+  window.App.go('dashboard');
+  await wait(900);
+  check('веб-версия: без сессии кнопки «Выйти» нет', !topButtons().includes('Выйти'), topButtons().join(' · '));
+
+  // перехватываем запросы, чтобы увидеть заголовки браузерного режима
+  const webCalls = [];
+  const origFetch = window.fetch;
+  window.fetch = async (url, opts) => {
+    webCalls.push({ url: String(url), method: (opts && opts.method) || 'GET', headers: (opts && opts.headers) || {} });
+    return origFetch(url, opts);
+  };
+  doc.cookie = 'wb_web_csrf=test-csrf-token';
+  check('веб-версия: сессия определяется по CSRF-cookie', window.API.webSession() === true);
+  // перерисовываем ту же «Панель», а не «Цены»: таблица на 213 строку в jsdom дорога,
+  // а для проверки кнопки выхода и CSRF-заголовка достаточно любого запроса к сервису
+  window.App.go('dashboard');
+  await wait(1200);
+  check('веб-версия: в сессии появляется кнопка «Выйти»', topButtons().includes('Выйти'), topButtons().join(' · '));
+  const invokeCall = webCalls.find((c) => c.url.includes('/api/invoke'));
+  check('веб-версия: браузерные запросы несут заголовок X-CSRF-Token',
+    !!invokeCall && invokeCall.headers['X-CSRF-Token'] === 'test-csrf-token',
+    invokeCall ? JSON.stringify(invokeCall.headers) : 'запросов не было');
+
+  const logoutBtn = Array.from(doc.querySelectorAll('#topbar-actions button')).find((b) => b.textContent.trim() === 'Выйти');
+  webCalls.length = 0;
+  // считаем попытки перехода ДО и ПОСЛЕ: в jsdom их и так хватает от скачивания файлов,
+  // поэтому проверять «есть хоть один лог навигации» было бы проверкой впустую
+  const navBefore = logs.filter((l) => /navigation/.test(l)).length;
+  logoutBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(500);
+  const logoutCall = webCalls.find((c) => c.url.includes('/api/logout'));
+  check('веб-версия: «Выйти» отзывает сессию на сервере с CSRF-заголовком',
+    !!logoutCall && logoutCall.method === 'POST' && logoutCall.headers['X-CSRF-Token'] === 'test-csrf-token',
+    logoutCall ? logoutCall.method + ' ' + logoutCall.url : 'запроса не было');
+  const navAfter = logs.filter((l) => /navigation/.test(l)).length;
+  check('веб-версия: после выхода интерфейс уходит на страницу входа',
+    navAfter > navBefore || /\/login/.test(String(window.location.href)),
+    'переходов к /login: ' + (navAfter - navBefore));
+  window.fetch = origFetch;
+  doc.cookie = 'wb_web_csrf=; Max-Age=0';
+
   console.log('\n=== РЕЗУЛЬТАТЫ ===');
   report.forEach((r) => console.log(r));
   console.log('\nОшибок JS: ' + errors.length);

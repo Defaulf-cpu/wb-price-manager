@@ -1759,3 +1759,47 @@ SKU: без него непонятно, какого конкурента об�
 
 Фикстуры ответов витрины: `tools/checks/fixtures/price-watch-normal.json` и
 `price-watch-changed.json`. Устройство модуля и разбор схемы полей — `docs/PRICE-WATCH.md`.
+
+---
+
+## 24. Веб-версия: HTTP-маршруты (`tools/web-server.js`)
+
+Веб-сервер использует **тот же слой бизнес-логики**, что и Electron: `createService(store, broadcast)`
+из `electron/service.js`. Поэтому любой канал из этого справочника одинаково работает в десктопе,
+в dev-сервере и в веб-версии — различается только транспорт и защита.
+
+| Маршрут | Метод | Что делает | Без сессии |
+| --- | --- | --- | --- |
+| `/login` | GET | страница входа (логин, пароль, CSRF-токен в скрытом поле) | доступен |
+| `/login` | POST | вход: JSON или form-urlencoded `{ user, pass, csrf }`; успех → `303 /` + cookie | доступен |
+| `/api/invoke` | POST | `{ channel, args: [] }` → `{ ok, data }` / `{ ok:false, error }` — как в Electron | `401` |
+| `/api/events` | GET | SSE-поток событий сервиса (`event: svc:<канал>`), heartbeat 25 с, лимит 50 клиентов | `401` |
+| `/api/logout` | POST | отозвать текущую сессию и очистить cookie | `401` |
+| `/` и статика | GET/HEAD | файлы `src/renderer` + общие модули `/economics.js`, `/repricer-engine.js` | `302 /login` |
+
+Отличия от Electron-транспорта:
+
+* **CSRF.** Каждый `POST /api/*` обязан нести заголовок `X-CSRF-Token`, совпадающий с cookie
+  `wb_web_csrf` и с токеном сессии. `src/renderer/js/api.js` добавляет его сам
+  (`csrfToken()` → заголовок), поэтому код интерфейса не знает, где работает.
+* **Сессия.** Cookie `wb_web_session` — HMAC-SHA256-подпись идентификатора сессии, сам
+  идентификатор хранится на сервере (`.data/web-sessions.json`). Срок 12 часов, `HttpOnly`,
+  `SameSite=Lax`, `Path=/`; подпись проверяется на каждом запросе.
+* **Выход.** `API.logout()` → `POST /api/logout` → `/login`. Кнопка «Выйти» в шапке появляется
+  только когда `API.webSession()` видит CSRF-cookie: в Electron и в dev-сервере `tools/serve.js`
+  сессии нет, и кнопки нет.
+* **Режимы доступа.** `local` (только `127.0.0.1`), `lan` (`0.0.0.0` + проверка, что IP приватный),
+  `internet` (без ограничения IP). `X-Forwarded-For` не используется — по нему нельзя ни
+  ограничивать доступ, ни считать блокировку попыток входа.
+* **Заголовки.** CSP (`script-src 'self'` + SHA-256-хеши inline-скриптов `index.html`),
+  `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `Permissions-Policy`, `Cache-Control: no-store`
+  (для HTML — `no-cache`), лимит тела 25 МБ, `requestTimeout` 120 с.
+* **Опции встраивания в iframe** (по умолчанию выключены): `--allow-framing` снимает
+  `X-Frame-Options` и переключает CSP на `frame-ancestors *`; `--samesite none` выдаёт cookie
+  с `SameSite=None; Secure`. Нужны только для показа страницы внутри чужого портала.
+* **Канал `pricewatch:open`** в веб-версии возвращает `NO_BROWSER` (нет Electron) — это честно:
+  страницу WB нужно открыть в обычном браузере.
+
+Запуск: `npm run web` или `node tools/web-server.js --mode lan --port 8080`.
+Полная инструкция (туннели, HTTPS, смена пароля, отзыв сессий) — `docs/WEB.md`.
+Прогон: `npm run test:web` → `tools/checks/web-server-flow.js` (18 проверок).

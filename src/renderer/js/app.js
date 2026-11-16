@@ -278,6 +278,14 @@ window.App = (function () {
     }
     if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
     mk('Справка', 'btn-ghost', showHelp);
+    // в веб-версии (tools/web-server.js) нужна видимая кнопка выхода: сессия живёт 12 часов,
+    // а компьютер может быть чужим. В Electron и в dev-сервере кнопки нет — там нет и сессии.
+    if (API.webSession && API.webSession()) {
+      mk('Выйти', 'btn-ghost', async (e) => {
+        e.target.disabled = true;
+        await API.logout();
+      });
+    }
   }
 
   function showHelp() {
