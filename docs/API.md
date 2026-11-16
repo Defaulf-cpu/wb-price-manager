@@ -1770,6 +1770,140 @@ CSV и XLSX никогда не расходятся по составу кол�
 
 ---
 
+### 21.11 Задание D: вся работа с ценой на одной странице
+
+Задача владельца: «весь функционал перетянем в Репрайсер, чтобы можно было редактировать и
+никуда не проваливаться… как в РП INDEEPA — таблица в Экселе: заголовок и дальше остальное».
+Ниже — что именно добавлено поверх §21.1–§21.10.
+
+#### Блоки колонок и двухрядная шапка
+
+Справочник `COLUMNS` — **31 колонка**, у каждой есть `group`; блоки (`GROUP_TITLES`,
+порядок в `GROUP_ORDER`):
+
+| Блок | Колонки |
+|---|---|
+| `article` «Артикул» | `item`, `vendorCode`, `barcode`, `allowSend`, `tag` |
+| `info` «Инфо о товаре» | `info`, `stock`, `plan` |
+| `now` «Текущая цена» | `priceNow`, `myPrice`, `buyerNow`, `value` |
+| `next` «Новая цена» | `priceNext`, `buyerNext`, `delta`, `strategy`, `status`, `why` |
+| `minpromo` «Мин цена (в акции)» | `floor`, `promoMin`, `promos` |
+| `outpromo` «Цена (вне акции)» | `restore`, `corridor` |
+| `cost` «Себестоимость и экономика» | `cost`, `costDetail`, `breakEven`, `profit`, `margin`, `profitMonth` |
+| `comp` «Конкуренты» | `competitor`, `offset` |
+
+Обязательные (`always`, выключить нельзя): `item`, `priceNow`, `myPrice`, `priceNext`,
+`delta`, `why`. Наборы: `DEFAULT_COLUMNS` — 26 колонок (скрыты `vendorCode`, `barcode`,
+`corridor`, `costDetail`, `breakEven`), `COMPACT_COLUMNS` — 14. Выбор хранится в
+`localStorage['wb.repricer.columns']` (`COLS_KEY`).
+
+`ui.js` рисует шапку в два ряда, если у колонок есть `group`: первый ряд — чекбокс выбора
+(`rowSpan=2`) и названия блоков с `colspan` по числу видимых колонок блока, второй ряд —
+сами колонки. Оба ряда липкие (`.rp-sticky-head`), первая колонка закреплена слева
+(`.rp-sticky-first`). **Считать видимые колонки нужно по `thead tr:last-child th`** — в
+первом ряду ячеек меньше. Инвариант прежний и теперь критичный: порядок массива ячеек в
+`renderResults()` обязан совпадать с порядком `COLUMNS`, потому что `filterCols()`
+сопоставляет их по индексу и подставляет блок из справочника.
+
+Пикер «Колонки» работает на двух уровнях: чекбокс блока включает/выключает блок целиком,
+чекбокс внутри — одну колонку; есть кнопки «По умолчанию» и «Компактный набор».
+
+Ячейки-блоки (несколько значений в одной клетке) собраны хелперами `*CellHtml()`:
+`itemInfoCellHtml`, `vendorCodeCellHtml`, `barcodeCellHtml`, `promoMinCellHtml`,
+`restoreCellHtml`, `costCellHtml`, `costDetailCellHtml`, `breakEvenCellHtml`,
+`planCellHtml`, `myPriceCellHtml`, `promoCellHtml`, `competitorCellHtml`,
+`offsetCellHtml`. Многострочное содержимее оборачивается в `.rp-wrap` (перенос,
+`max-width: 230px`) — иначе широкие ячейки растягивали таблицу.
+
+#### Себестоимость в валюте и курсы
+
+Себестоимость вводится прямо в строке (колонка `cost`) — число и валюта. Хранится в
+`costs[nmID]` как `costPriceRub` (введённое число) и `currency`. Курсы — в
+`settings.costRates` (пара «код → ₽ за единицу»), по умолчанию:
+`CNY 12.5, USD 92, EUR 100, TRY 2.7, KZT 0.18, BYN 28, UZS 0.0072, AED 25, PLN 23`.
+Валюты: `RUB, CNY, USD, EUR, TRY, KZT, BYN, UZS, AED, PLN` плюс своя — код из трёх
+заглавных букв (`#pm-rate-code`), `RUB` добавить нельзя.
+
+* `overridesFor()` пересчитывает введённую сумму в рубли и отдаёт в строке
+  `costCurrency`, `costRate`, `costEntered`, `costPriceRub`;
+* если курс валюты не задан — `costPriceRub = 0` и
+  `costError = 'не задан курс <CUR> — укажите его на вкладке «Параметры»'`: это блокер
+  предложения (§21.1), предупреждение расчёта и красная подпись в строке (`rowErrors`);
+* карточка «Себестоимость и курсы валют» на вкладке «Параметры»: таблица курсов,
+  добавление своей валюты (`#pm-rate-add`), название магазина (`#pm-shopname` →
+  `settings.shopName`, показывается бейджем `.rp-shopname` и попадает в выгрузку);
+* канал **`costs:rates`** (без аргументов) → `{ rates, currencies, currency }` — справочный,
+  в WB не ходит; добавлен в белый список `preload.js` и веб-сервера. Вкладка «Параметры»
+  читает и пишет курсы через `settings:get` / `settings:save`, канал `costs:rates` — для
+  внешних потребителей (веб-версия, проверки);
+* под полем себестоимости живая подпись: сколько это в рублях по текущему курсу
+  (`.rp-cost-hint` / `.rp-cost-rub`) — пересчитывается на каждый ввод без перерисовки строки.
+
+#### «Отправка в WB» и метка товара
+
+`itemConfigs[nmID].allowSend` (по умолчанию `true`) — колонка «Отправка в WB»:
+
+* движок: `needSend &&= allowSend` плюс предупреждение, то есть цена считается и видна,
+  но в предложение не попадает;
+* `saveProposal()`: строка уходит в `blocked` с `{ notSending: true, reasons: ['отправка в WB
+  отключена для товара'] }`;
+* `sendProposal()`: фильтр по живым `itemConfigs` (а не по сохранённому снимку предложения), поэтому
+  выключенные позже товары не уходят в WB; `disabled` остаются в предложении; если после
+  фильтра отправлять нечего — `WBError` с кодом `SEND_DISABLED`; в ответе есть
+  `skippedDisabled`.
+
+`itemConfigs[nmID].tag` — своя метка (до 24 символов): по ней работает сегмент фильтра
+`f.tag`, поиск (метка и баркод учитываются), массовое редактирование (`#rb-tag`) и сегмент
+«Не отправлять» (`f.send === 'nosend'`, массовый флаг `#rb-allowsend`).
+
+#### Что добавил движок
+
+`computeItem()` возвращает дополнительно:
+
+* `cost` — `{ currency, rate, entered, rub, error, now, next }`;
+* `wallet` — `{ sppPct, walletPct, nowBuyer, nextBuyer }`;
+* `promo` — `{ inPromo, discountFloor, plannedPrice, plannedDiscount, chosen, restorePair,
+  holdDiscountMax }`;
+* `floor` — `{ min, max, corridorMin, minByMargin, by: 'margin'|'corridor', minPriceSet,
+  basePriceTarget }`;
+* `barcode`, `tag`, `allowSend`.
+
+`econSummary()` — плоская выжимка экономики для ячеек: `cogs, commission, acquiring,
+logistics, accept, storage, packaging, tax, ad, wbTotal, totalCosts, pctCosts, fixedCosts,
+markupPct, breakEvenPrice, minPriceForMargin, profit, profitBeforeTax, marginPct, revenue`.
+Контекст строки (`ctx`) пополнен полями `barcode` (берётся из кэша `cache.cards`, без
+запроса к WB), `categoryName`, `volumeLiters`, `sizesCount`, `brand`, `plannedPrice`,
+`cost*`, `allowSend`, `tag`.
+
+#### Выгрузка «Блок · Колонка»
+
+`exportSpec()` — 72 колонки с заголовками вида «Блок · Колонка» (например
+«Себестоимость и экономика · Безубыточность»), `buildExport(list)` собирает строки по этой
+спецификации. Кнопки «Excel (до 150к строк)» и «CSV» выгружают **всю** выборку, а не
+текущую страницу; файл `repricer-YYYY-MM-DD.xlsx`, лист «Репрайсер».
+
+#### Размер страницы и память
+
+`PAGE_SIZE` уменьшен с 200 до **100**: колонок стало 31 вместо 20, и страница 200 × 26
+ячеек с многострочным содержимым в jsdom-прогоне упиралась в предел памяти. Расчёт и
+выгрузка по-прежнему идут по всем товарам — пагинация касается только отрисовки.
+Дополнительно `U.fmt()` больше не вызывает `toLocaleString()` на каждое число: форматтеры
+`Intl.NumberFormat` кешируются в `Map` по числу знаков (`numFormats`) — именно этот вызов
+создавал основную массу мусора. В `tools/uitest.js` ссылки на DOM-узлы объявлены через `let`
+и обнуляются в конце секции (в jsdom узел держит родителя, поэтому забытая ссылка оставляет
+в памяти всю старую таблицу), между тяжёлыми разделами вызывается `global.gc()`, а проверки
+ячеек переведены с текста DOM на рендер (`rpD.costCellHtml(row)` и т. п.). Переменная
+окружения `UI_TEST_MEM=1` печатает занятую кучу каждые 20 проверок.
+
+#### Что сознательно не сделано
+
+По решению владельца **не реализованы** колонки «Индекс цены», «Индекс новой цены»,
+прогнозные индексы, `ROI` и «% возврата»: для них нет согласованной методики, а спорные
+цифры в таблице цен опаснее их отсутствия. Остальное из образца INDEEPA перенесено в
+границах, описанных в §21.10.
+
+---
+
 ## 23. Наблюдатель цен витрины WB — `pricewatch:*`
 
 Модуль `electron/price-watcher.js`. Зачем: API продавца отдаёт только **вашу** цену и скидку,
