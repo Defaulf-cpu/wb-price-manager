@@ -185,7 +185,9 @@ function baseRoutes() {
     '/api/v2/list/goods/filter': () => res(200, goodsBody()),
     '/api/v1/calendar/promotions/nomenclatures': () => res(200, { data: { nomenclatures: [] } }),
     '/api/v1/calendar/promotions': () => res(200, { data: { promotions: [] } }),
-    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0, nmID: 0, updatedAt: '' } })
+    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0, nmID: 0, updatedAt: '' } }),
+    // остатки по складам: пустой отчёт — раздел не считает это ошибкой
+    '/api/analytics/v1/stocks-report/wb-warehouses': () => res(200, { data: { rows: [], total: 0 } })
   };
 }
 

@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE,
+  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE,
   PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE
 } = require('./config');
 
@@ -20,6 +20,12 @@ const PROMONOMS_FILE = 'promonoms.json';
 const DEFAULT_SETTINGS = {
   priceWatchAutoFetch: false, // витрина: включение на свой риск
   priceWatchTtlMinutes: 60,
+  /**
+   * Остатки по складам WB: порог оборачиваемости для бейджа «заканчивается».
+   * Если запаса хватает меньше этого числа дней (при текущих продажах) —
+   * товар помечается в репрайсере и в карточке.
+   */
+  stocksLowDays: 14,
   demoMode: true,
   sandbox: false,
   model: 'marketplace', // marketplace | fbw
@@ -146,6 +152,7 @@ function createStore(dir, secretBox) {
   fs.mkdirSync(dir, { recursive: true });
   const settingsPath = path.join(dir, SETTINGS_FILE);
   const priceWatchPath = path.join(dir, PRICEWATCH_FILE);
+  const stocksPath = path.join(dir, STOCKS_FILE);
   const costsPath = path.join(dir, COSTS_FILE);
   const tasksPath = path.join(dir, TASKS_FILE);
   const secretsPath = path.join(dir, SECRETS_FILE);
@@ -293,6 +300,43 @@ function createStore(dir, secretBox) {
         items[key] = (Array.isArray(items[key]) ? items[key] : []).concat([row]).slice(-50);
       }
       return api.savePriceWatch(items);
+    },
+
+    // ───────────────────────── Остатки по складам WB ─────────────────────────
+
+    /**
+     * Кэш остатков по складам WB: nmID → {
+     *   total,                                  — суммарный остаток по всем складам и размерам
+     *   byWarehouse: { name: qty },             — разбивка по складам
+     *   byRegion: { region: qty },              — разбивка по регионам
+     *   sizeRows,                               — сколько строк отчёта легло в сумму
+     *   at                                      — когда загружено
+     * }
+     * Плоский объект (не массив наблюдений): остатки — текущее состояние,
+     * его достаточно переписать целиком после каждой загрузки.
+     */
+    loadStocks() {
+      const d = readJson(stocksPath, { items: {}, meta: {} });
+      return { items: isObject(d.items) ? d.items : {}, meta: isObject(d.meta) ? d.meta : {} };
+    },
+
+    saveStocks(items, meta) {
+      const clean = {};
+      for (const [key, row] of Object.entries(isObject(items) ? items : {})) {
+        if (!/^[1-9]\d*$/.test(key) || !isObject(row)) continue;
+        clean[key] = {
+          total: Number(row.total) || 0,
+          byWarehouse: isObject(row.byWarehouse) ? row.byWarehouse : {},
+          byRegion: isObject(row.byRegion) ? row.byRegion : {},
+          sizeRows: Number(row.sizeRows) || 0,
+          at: row.at || new Date().toISOString()
+        };
+      }
+      writeJson(stocksPath, {
+        items: clean,
+        meta: Object.assign({}, api.loadStocks().meta, isObject(meta) ? meta : {}, { updatedAt: new Date().toISOString() })
+      });
+      return { items: clean, meta: api.loadStocks().meta };
     },
 
     loadCompetitors() {

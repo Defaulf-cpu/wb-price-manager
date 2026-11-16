@@ -1266,7 +1266,7 @@ Views.repricer = {
         { title: 'Маржа', num: true, render: (r) => `<span class="muted">${U.pct(r.current.marginPct)}</span> → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>` },
         { title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
         { title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
-        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
+        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт${U.stockWarn(r.context.stock, r.context.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : ''}<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
         { title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
         { title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) },
         { title: 'Статус', render: (r) => {
@@ -1504,7 +1504,7 @@ Views.repricer = {
             ['Маржинальность', `${U.pct(r.current.marginPct)} → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>`],
             ['Прогноз Δ прибыли/мес', `<b class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</b>`],
             ['Режим расчёта маржи', r.context.marginMode === 'forpay' ? 'от суммы ForPay' : (r.context.marginMode === 'wallet' ? 'от цены с кошельком' : 'от цены со скидкой')],
-            ['Остаток', U.fmt(r.context.stock) + ' шт'],
+            ['Остаток', U.fmt(r.context.stock) + ' шт' + (U.stockWarn(r.context.stock, r.context.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : '')],
             ['Темп продаж', U.num(r.context.salesPerDay).toFixed(1) + ' шт/день'],
             ['Оборачиваемость', r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'],
             ['В акции', r.context.inPromo ? 'да' + (r.context.promoPrice ? ', цена ' + U.money(r.context.promoPrice) : '') : 'нет']

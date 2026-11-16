@@ -31,6 +31,15 @@ const SIZE_SETS = [
   ['200 мл', '500 мл']
 ];
 
+/** Склады продавца (имитация /api/v3/warehouses) — с регионом, как в реальном ответе WB. */
+const WAREHOUSES = [
+  { id: 1, name: 'Коледино', region: 'Москва и Московская область', type: 'FBS', address: 'Москва, ул. Коледино, 1' },
+  { id: 2, name: 'Электросталь', region: 'Московская область', type: 'FBS', address: 'Электросталь, ул. Ленина, 5' },
+  { id: 3, name: 'Казань', region: 'Татарстан', type: 'FBS', address: 'Казань, ул. Пугачёва, 20' },
+  { id: 4, name: 'Тула', region: 'Тульская область', type: 'FBS', address: 'Тула, ул. Металлургов, 8' },
+  { id: 5, name: 'Краснодар', region: 'Краснодарский край', type: 'FBS', address: 'Краснодар, ул. Саратовская, 12' }
+];
+
 /** Простой детерминированный ГПСЧ (mulberry32). */
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -328,6 +337,41 @@ function buildCards(goods) {
 }
 
 /**
+ * Остатки по складам (имитация /api/analytics/v1/stocks-report/wb-warehouses).
+ * Один размер на одном складе — одна строка, как в реальном отчёте WB:
+ * распределяем демо-остаток товара по 2–4 складам, сумма равна g.demo.stock.
+ */
+function buildStocks(goods) {
+  const rnd = mulberry32(5150);
+  const rows = [];
+  for (const g of goods) {
+    const total = g.demo.stock;
+    if (total <= 0) continue;
+    const count = 2 + Math.floor(rnd() * 3);
+    const whs = WAREHOUSES.slice().sort(() => rnd() - 0.5).slice(0, count);
+    const parts = whs.map(() => Math.max(0, Math.floor(total * (0.2 + rnd() * 0.8) / count)));
+    const sum = parts.reduce((a, b) => a + b, 0);
+    if (sum <= 0) continue;
+    const sizeID = g.sizes && g.sizes[0] ? g.sizes[0].sizeID : 0;
+    whs.forEach((wh, i) => {
+      const qty = i === whs.length - 1 ? total - parts.slice(0, i).reduce((a, b) => a + b, 0) : parts[i];
+      if (qty > 0) {
+        rows.push({
+          nmID: g.nmID,
+          nmId: g.nmID,
+          sizeID,
+          stock: qty,
+          warehouseId: wh.id,
+          warehouseName: wh.name,
+          region: wh.region
+        });
+      }
+    });
+  }
+  return rows;
+}
+
+/**
  * Демо-API: повторяет интерфейс, используемый приложением,
  * но работает на локальных данных и ничего не отправляет в Wildberries.
  */
@@ -358,6 +402,7 @@ function createDemoApi(opts) {
   const cards = buildCards(goods);
   const competitors = buildCompetitors(goods);
   const financeRows = buildFinanceReport(goods, salesRows);
+  const stockRows = buildStocks(goods);
   const tasks = [];
   let taskSeq = 5000;
 
@@ -610,6 +655,28 @@ function createDemoApi(opts) {
       return JSON.parse(JSON.stringify(competitors));
     },
 
+    /** Имитация /api/v3/warehouses — склады продавца. */
+    async getWarehouses() {
+      return WAREHOUSES.map((w) => Object.assign({}, w));
+    },
+
+    /**
+     * Имитация /api/analytics/v1/stocks-report/wb-warehouses.
+     * Демо-остатки распределены по складам и регионам — структура строки
+     * полностью совпадает с нормализованными строками боевого клиента.
+     */
+    async getStocksReport() {
+      return {
+        rows: stockRows.map((r) => Object.assign({}, r)),
+        aggregated: require('./wb-client').WBClient.aggregateStocks(stockRows),
+        pages: 1,
+        total: stockRows.length,
+        source: 'demo-wb-warehouses'
+      };
+    },
+
+    demoStockRows: stockRows,
+
     /** Имитация finance-api: список отчётов о реализации. */
     async getSalesReportsList(opts) {
       const o = opts || {};
@@ -675,4 +742,4 @@ function createDemoApi(opts) {
   };
 }
 
-module.exports = { createDemoApi, buildCatalog, buildPromotions, buildStats, buildCards, CATEGORIES };
+module.exports = { createDemoApi, buildCatalog, buildPromotions, buildStats, buildCards, buildStocks, CATEGORIES, WAREHOUSES };

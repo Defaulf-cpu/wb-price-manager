@@ -113,7 +113,9 @@ const CATEGORY_TITLES = {
   content: 'Контент',
   finance: 'Финансы',
   advert: 'Продвижение',
-  common: 'Общие методы'
+  common: 'Общие методы',
+  analytics: 'Аналитика',
+  marketplace: 'Маркетплейс'
 };
 
 function categoryTitle(c) {
@@ -247,7 +249,9 @@ class WBClient {
       content: ['content'],
       finance: ['finance', 'finances'],
       common: [],
-      advert: ['advert', 'promotion']
+      advert: ['advert', 'promotion'],
+      analytics: ['analytics'],
+      marketplace: ['marketplace', 'market', 'seller']
     };
     const order = (map[category] || []).concat(universal);
     for (const c of order) {
@@ -262,7 +266,7 @@ class WBClient {
 
   /** Какие категории покрыты заданными ключами (для подсказок в интерфейсе). */
   keyCoverage() {
-    const cats = ['prices', 'calendar', 'statistics', 'content', 'finance', 'advert'];
+    const cats = ['prices', 'calendar', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace'];
     const out = {};
     cats.forEach((c) => {
       try { this.keyFor(c); out[c] = true; } catch (e) { out[c] = false; }
@@ -368,6 +372,8 @@ class WBClient {
     if (json && json.error === true) {
       throw new WBError(json.errorText || 'WB вернул ошибку без описания.', { status: res.status, category, code: 'API_ERROR' });
     }
+    // asText: вернуть сырой текст (для /download отчётов заданием — там может быть CSV).
+    if (opts && opts.asText) return text;
     return json;
   }
 
@@ -455,6 +461,38 @@ class WBClient {
         });
       },
       detail() { return 'отчёты о реализации доступны'; }
+    },
+    {
+      category: 'analytics', title: 'Аналитика',
+      hint: 'категория «Аналитика» — остатки на складах WB',
+      call(c) {
+        // Самый дешёвый метод категории: отчёт остатков с одной строкой.
+        // Если у ключа нет категории «Аналитика» — WB отвечает 403, и это
+        // честно показывается как «нет доступа к разделу «Аналитика», а не как
+        // «нет доступа ко всему».
+        return c.request('analytics', 'POST', '/api/analytics/v1/stocks-report/wb-warehouses', {
+          body: { limit: 1, offset: 0 },
+          retries: 0, maxWaitMs: 0
+        });
+      },
+      detail(json) {
+        const rows = pick(json, ['rows', 'stocks', 'data'], []) || [];
+        return 'отчёт остатков WB отвечает' + (Array.isArray(rows) ? ' (' + rows.length + ' строк в выборке)' : '');
+      }
+    },
+    {
+      category: 'marketplace', title: 'Маркетплейс',
+      hint: 'категория «Маркетплейс» — склады продавца и остатки FBS',
+      call(c) {
+        return c.request('marketplace', 'GET', '/api/v3/warehouses', {
+          query: { limit: 1 },
+          retries: 0, maxWaitMs: 0
+        });
+      },
+      detail(json) {
+        const list = pick(json, ['warehouses', 'data'], []) || [];
+        return 'склады продавца доступны' + (Array.isArray(list) ? ' (' + list.length + ' в выборке)' : '');
+      }
     }
   ];
 
@@ -1228,6 +1266,252 @@ class WBClient {
       photo: photoUrl(photos),
       photos
     };
+  }
+
+  // ───────────────────────── Остатки по складам ─────────────────────────
+
+  /**
+   * Строка отчёта остатков → единый формат.
+   *
+   * WB уже несколько раз менял схемы отчётов (snake_case → camelCase, числовые
+   * значения → строки), поэтому каждое поле читается по нескольким кандидатам,
+   * а числа приводятся через Number() с проверкой.
+   */
+  static normalizeStockRow(r) {
+    const n = (...names) => {
+      for (const k of names) {
+        const v = r[k];
+        if (v !== undefined && v !== null && v !== '') {
+          const num = Number(String(v).replace(/\s/g, '').replace(',', '.'));
+          if (Number.isFinite(num)) return num;
+        }
+      }
+      return null;
+    };
+    const str = (...names) => {
+      for (const k of names) if (r[k] !== undefined && r[k] !== null && r[k] !== '') return String(r[k]);
+      return '';
+    };
+    return {
+      nmID: n('nmID', 'nmId', 'nm_id', 'imid'),
+      sizeID: n('sizeID', 'sizeId', 'size_id'),
+      stock: n('stock', 'qty', 'quantity', 'leftovers', 'leftover'),
+      warehouseId: n('warehouseId', 'warehouse_id', 'whId', 'wh_id'),
+      warehouseName: str('warehouseName', 'warehouse_name', 'whName', 'wh_name', 'officeName', 'office_name'),
+      region: str('region', 'regionName', 'region_name', 'regionTitle')
+    };
+  }
+
+  /**
+   * Агрегация строк отчёта по nmID: сумма по складам + разбивка по складам
+   * и регионам. Один размер на одном складе — одна строка, поэтому суммируем
+   * все строки nmID (всех размеров и всех складов).
+   */
+  static aggregateStocks(rows) {
+    const out = {};
+    for (const r of rows || []) {
+      const nm = Number(r && (r.nmID !== undefined ? r.nmID : (r.nmId || r.nm_id || 0)));
+      if (!(nm > 0)) continue;
+      const qty = Number(r.stock);
+      if (!(qty > 0)) continue;
+      const a = out[nm] || (out[nm] = { nmID: nm, total: 0, byWarehouse: {}, byRegion: {}, sizeRows: 0 });
+      a.total += qty;
+      a.sizeRows++;
+      const wh = String(r.warehouseName || ('склад ' + (r.warehouseId || '?')));
+      a.byWarehouse[wh] = (a.byWarehouse[wh] || 0) + qty;
+      const region = String(r.region || 'неизвестный');
+      a.byRegion[region] = (a.byRegion[region] || 0) + qty;
+    }
+    return out;
+  }
+
+  /** Разобрать ответ отчёта остатков: массив строк может быть в data/rows/stocks. */
+  static extractStockRows(json) {
+    if (Array.isArray(json)) return json;
+    if (!json) return [];
+    if (Array.isArray(json.data)) return json.data;
+    if (json.data && Array.isArray(json.data.rows)) return json.data.rows;
+    if (json.data && Array.isArray(json.data.stocks)) return json.data.stocks;
+    return pick(json, ['rows', 'stocks', 'items'], []) || [];
+  }
+
+  /**
+   * POST /api/analytics/v1/stocks-report/wb-warehouses — остатки на складах WB.
+   *
+   * Основной метод. Категория токена «Аналитика», лимит — 1 запрос в 20 секунд,
+   * в ответе до 250 000 строк, поэтому пагинация по offset: страница за страницей,
+   * между запросами лимитер категории заставляет выжидать.
+   *
+   * Первая страница жётся недолго (maxWaitMs): если лимит занят — бросает
+   * RATE_WAIT/RATE_LIMIT, и раздел уходит в фоновую догрузку, а не блокирует
+   * интерфейс. Последующие страницы — терпеливо (pageWaitMs): отчёт уже загружен
+   * частично, и начинать заново дороже, чем подождать сброса лимита.
+   */
+  async getStocksReport(opts) {
+    const o = opts || {};
+    const limit = Math.max(1, Math.min(Number(o.limit) || 1000, 10000));
+    const maxPages = Math.max(1, Math.min(Number(o.maxPages) || 250, 250));
+    const rows = [];
+    let offset = 0;
+    let pages = 0;
+    let total = 0;
+    while (pages < maxPages) {
+      pages++;
+      const json = await this.request('analytics', 'POST', '/api/analytics/v1/stocks-report/wb-warehouses', {
+        body: { limit, offset },
+        retries: 0,
+        maxWaitMs: pages === 1 ? o.maxWaitMs : Math.max(Number(o.pageWaitMs) || 0, Number(o.maxWaitMs) || 0)
+      });
+      const list = WBClient.extractStockRows(json);
+      const declared = Number(pick(json, ['total', 'totalRows', 'total_rows'], 0) || 0);
+      if (declared > 0) total = declared;
+      list.forEach((r) => rows.push(WBClient.normalizeStockRow(r)));
+      if (!list.length) break;
+      offset += list.length;
+      if (total > 0 && offset >= total) break;
+    }
+    return { rows, aggregated: WBClient.aggregateStocks(rows), pages, total: total || rows.length, source: 'wb-warehouses' };
+  }
+
+  /**
+   * Запасной путь: отчёт об остатках на складах WB заданием.
+   *
+   * GET /api/v1/warehouse_remains — создать задачу (не чаще 1 раза в минуту:
+   * держим метку последнего создания, чтобы не ломать лимит WB),
+   * GET .../tasks/{task_id}/status — опрашивать статус с шагом в несколько секунд
+   * с ограничением числа попыток, GET .../download — скачать результат.
+   *
+   * Используется, когда основной метод (stocks-report/wb-warehouses) недоступен
+   * для ключа (403/404/405/422).
+   */
+  async getStocksByTask(opts) {
+    const o = opts || {};
+    const maxAttempts = Math.max(1, Math.min(Number(o.maxAttempts) || 20, 60));
+    const pollMs = Math.max(1000, Number(o.pollMs) || 3000);
+    if (this._lastRemainsTaskAt && Date.now() - this._lastRemainsTaskAt < 60000) {
+      throw new WBError('Отчёт об остатках задачей создан недавно — WB разрешает создавать не чаще раза в минуту. Повторите позже.', { category: 'marketplace', code: 'TASK_RATE' });
+    }
+    this._lastRemainsTaskAt = Date.now();
+    const created = await this.request('marketplace', 'GET', '/api/v1/warehouse_remains', {
+      query: o.query, retries: 0
+    });
+    const taskId = Number(pick(created, ['task_id', 'taskId', 'id'], 0) ||
+      pick(created && created.data, ['task_id', 'taskId', 'id'], 0) || 0);
+    if (!(taskId > 0)) {
+      throw new WBError('WB не вернул ID задачи отчёта об остатках.', { category: 'marketplace', code: 'NO_TASK' });
+    }
+    let finished = false;
+    for (let i = 0; i < maxAttempts; i++) {
+      await sleep(pollMs);
+      const st = await this.request('marketplace', 'GET', '/api/v1/warehouse_remains/tasks/' + taskId + '/status', {
+        retries: 0, maxWaitMs: pollMs + 5000
+      });
+      const status = String(pick(st, ['status', 'state'], '') || '').toLowerCase();
+      if (/done|finish|success|complete|ready|export/.test(status)) { finished = true; break; }
+      if (/error|fail|cancel/.test(status)) {
+        throw new WBError('Задача отчёта об остатках завершилась с ошибкой у WB.', { category: 'marketplace', code: 'TASK_ERROR' });
+      }
+    }
+    if (!finished) {
+      throw new WBError('Задача отчёта об остатках не завершилась за ' + (maxAttempts * pollMs / 1000) + ' с — попробуйте позже.', { category: 'marketplace', code: 'TASK_TIMEOUT', retryable: true });
+    }
+    const raw = await this.request('marketplace', 'GET', '/api/v1/warehouse_remains/tasks/' + taskId + '/download', {
+      retries: 0, asText: true
+    });
+    const rows = WBClient.parseRemainsPayload(raw).map((r) => WBClient.normalizeStockRow(r));
+    return { rows, aggregated: WBClient.aggregateStocks(rows), pages: 1, total: rows.length, source: 'warehouse-remains', taskId };
+  }
+
+  /**
+   * Разбор payload от /download: JSON (в том числе обёрнутый в data) или CSV
+   * с заголовками (первые столбцы — nmID, размер, остаток, склад, регион).
+   */
+  static parseRemainsPayload(payload) {
+    if (payload === null || payload === undefined) return [];
+    if (typeof payload === 'string') {
+      const t = payload.trim();
+      if (!t) return [];
+      try { return WBClient.extractStockRows(JSON.parse(t)); } catch (e) { /* не JSON — CSV */ }
+      const lines = t.split(/\r?\n/).filter((l) => l.trim().length);
+      if (lines.length < 2) return [];
+      const head = lines[0].split(',').map((x) => x.trim().toLowerCase());
+      const idx = (...names) => {
+        for (let i = 0; i < head.length; i++) {
+          if (names.some((n) => head[i] === n || head[i].includes(n))) return i;
+        }
+        return -1;
+      };
+      const cols = { nmID: idx('nmid', 'nm_id', 'имт', 'артикул'), stock: idx('stock', 'остаток', 'qty', 'quantity'), wh: idx('warehouse', 'склад', 'wh'), region: idx('region', 'регион') };
+      const out = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cells = lines[i].split(',');
+        const nm = Number(String(cells[cols.nmID] || '').replace(/\s/g, ''));
+        if (!(nm > 0)) continue;
+        out.push({
+          nmID: nm,
+          stock: Number(String(cells[cols.stock] || '0').replace(/\s/g, '').replace(',', '.')) || 0,
+          warehouseName: String(cells[cols.wh] || '').trim(),
+          region: String(cells[cols.region] || '').trim()
+        });
+      }
+      return out;
+    }
+    return WBClient.extractStockRows(payload);
+  }
+
+  /** GET /api/v3/warehouses — список складов продавца (FBS). Категория «Маркетплейс». */
+  async getWarehouses() {
+    const json = await this.request('marketplace', 'GET', '/api/v3/warehouses');
+    const list = WBClient.extractWarehouses(json);
+    return list.map((w) => ({
+      id: Number(pick(w, ['id', 'warehouseId', 'warehouse_id'], 0) || 0),
+      name: String(pick(w, ['name', 'title', 'warehouseName', 'warehouse_name'], '') || ''),
+      region: String(pick(w, ['region', 'regionName', 'region_name'], '') || ''),
+      type: String(pick(w, ['type', 'warehouseType', 'warehouse_type'], '') || ''),
+      address: String(pick(w, ['address', 'street'], '') || ''),
+      raw: w
+    }));
+  }
+
+  /** Разбор ответа /api/v3/warehouses: data / data.warehouses / warehouses / массив. */
+  static extractWarehouses(json) {
+    if (Array.isArray(json)) return json;
+    if (!json) return [];
+    if (Array.isArray(json.data)) return json.data;
+    if (json.data && Array.isArray(json.data.warehouses)) return json.data.warehouses;
+    return pick(json, ['warehouses', 'items'], []) || [];
+  }
+
+  /**
+   * POST /api/v3/stocks/{warehouseId} — остатки на складе продавца.
+   * Категория «Маркетплейс», лимит 3 запроса в 30 секунд.
+   */
+  async getSellerStocks(warehouseId, opts) {
+    const id = Number(warehouseId);
+    if (!(id > 0)) throw new WBError('Не указан ID склада.', { category: 'marketplace', code: 'BAD_WH' });
+    const json = await this.request('marketplace', 'POST', '/api/v3/stocks/' + id, {
+      body: Object.assign({ limit: 1000 }, (opts && opts.body) || {})
+    });
+    const rows = WBClient.extractStockRows(json).map((r) => WBClient.normalizeStockRow(r));
+    return { warehouseId: id, rows, aggregated: WBClient.aggregateStocks(rows) };
+  }
+
+  /**
+   * PUT /api/v3/stocks/{warehouseId} — обновление остатков (до 1000 позиций,
+   * при успехе 204). Категория «Маркетплейс».
+   */
+  async updateStocks(warehouseId, positions) {
+    const id = Number(warehouseId);
+    if (!(id > 0)) throw new WBError('Не указан ID склада.', { category: 'marketplace', code: 'BAD_WH' });
+    const list = (Array.isArray(positions) ? positions : [])
+      .slice(0, 1000)
+      .map((p) => ({ id: Number(p.nmID || p.id), qty: Math.max(0, Math.round(Number(p.qty || p.stock || 0))) }))
+      .filter((p) => p.id > 0);
+    if (!list.length) throw new WBError('Нет позиций для обновления остатков.', { category: 'marketplace', code: 'EMPTY' });
+    const res = await this.request('marketplace', 'PUT', '/api/v3/stocks/' + id, {
+      body: { positions: list }, retries: 0
+    });
+    return { warehouseId: id, sent: list.length, response: res };
   }
 }
 
