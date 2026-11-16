@@ -385,6 +385,35 @@ function planProgress(ctx, itemCfg) {
   return { planQty, fact, expected, dayOfMonth, daysInMonth, ratio: expected > 0 ? fact / expected : (fact > 0 ? 2 : 0) };
 }
 
+/** Формат процента, совпадающий с U.pct() в интерфейсе. */
+function formatPct(v) {
+  return num(v).toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+}
+
+/**
+ * Чистая классификация выгодности строки. Вынесена из Views.repricer, чтобы одна и та же
+ * логика статусов могла проверяться без DOM/jsdom и использоваться интерфейсом как есть.
+ * Порог себестоимости <= 2 ₽ остаётся отдельной проверкой строки/предложения.
+ */
+function valueStatus(r, itemCfg, defaults, costPriceRub) {
+  const I = itemCfg || {};
+  const D = defaults || {};
+  const target = num(I.targetMarginPct !== undefined ? I.targetMarginPct : D.targetMarginPct);
+  const minMargin = num(I.minMarginPct !== undefined ? I.minMarginPct : D.minMarginPct);
+  const next = (r && r.proposed) || {};
+  const margin = num(next.marginPct !== undefined ? next.marginPct : ((r && r.current) || {}).marginPct);
+  if (!(num(costPriceRub) > 0)) {
+    return { id: 'noindex', label: 'Без индекса', kind: '', hint: 'Себестоимость не задана — оценить выгодность нельзя' };
+  }
+  if (num(next.profit) < 0 || margin < minMargin) {
+    return { id: 'bad', label: 'Невыгодный', kind: 'danger', hint: 'Прибыль отрицательная или маржа ниже минимальной (' + formatPct(minMargin) + ')' };
+  }
+  if (target > 0 && margin >= target) {
+    return { id: 'super', label: 'Супер-выгодный', kind: 'ok', hint: 'Маржа ' + formatPct(margin) + ' ≥ целевой ' + formatPct(target) };
+  }
+  return { id: 'good', label: 'Выгодный', kind: 'info', hint: 'Маржа ' + formatPct(margin) + ' между минимальной и целевой' };
+}
+
 /**
  * Планировщик действий по акциям Wildberries.
  *
@@ -1307,6 +1336,7 @@ return {
   priceForMargin,
   bestCompetitorPrice,
   planProgress,
+  valueStatus,
   computeItem,
   computeAll,
   summarize,

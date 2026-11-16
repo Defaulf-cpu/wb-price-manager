@@ -700,15 +700,8 @@ Views.repricer = {
   valueStatus(r) {
     const cfg = this.rowConfig(r.nmID);
     const defs = this.rstate.defaults || {};
-    const target = U.num(cfg.targetMarginPct !== undefined ? cfg.targetMarginPct : defs.targetMarginPct);
-    const minMargin = U.num(cfg.minMarginPct !== undefined ? cfg.minMarginPct : defs.minMarginPct);
-    const next = r.proposed || {};
-    const margin = U.num(next.marginPct !== undefined ? next.marginPct : (r.current || {}).marginPct);
     const cogs = U.num((this.cogsByNm || {})[String(r.nmID)]);
-    if (!(cogs > 0)) return { id: 'noindex', label: 'Без индекса', kind: '', hint: 'Себестоимость не задана — оценить выгодность нельзя' };
-    if (U.num(next.profit) < 0 || margin < minMargin) return { id: 'bad', label: 'Невыгодный', kind: 'danger', hint: 'Прибыль отрицательная или маржа ниже минимальной (' + U.pct(minMargin) + ')' };
-    if (target > 0 && margin >= target) return { id: 'super', label: 'Супер-выгодный', kind: 'ok', hint: 'Маржа ' + U.pct(margin) + ' ≥ целевой ' + U.pct(target) };
-    return { id: 'good', label: 'Выгодный', kind: 'info', hint: 'Маржа ' + U.pct(margin) + ' между минимальной и целевой' };
+    return RP.valueStatus(r, cfg, defs, cogs);
   },
 
   /**
