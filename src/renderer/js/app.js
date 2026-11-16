@@ -16,6 +16,33 @@ window.App = (function () {
 
   function toast(msg, kind, ms) { UI.toast(msg, kind, ms); }
 
+  let updatePromptVersion = '';
+  function handleUpdateStatus(update) {
+    if (!API.isElectron || !update || !update.status) return;
+    const version = update.updateVersion || 'новая версия';
+    if (update.status === 'available') {
+      toast(`Доступно обновление ${version}; загрузка идёт в фоне.`, 'warn', 8000);
+    } else if (update.status === 'offline') {
+      toast('Не удалось проверить обновления: нет соединения с GitHub или сеть недоступна.', 'warn', 9000);
+    } else if (update.status === 'error') {
+      toast('Ошибка автообновления: ' + (update.error || 'неизвестная ошибка'), 'warn', 9000);
+    } else if (update.status === 'downloaded') {
+      const key = update.updateVersion || 'downloaded';
+      if (updatePromptVersion === key) return;
+      updatePromptVersion = key;
+      UI.modal({
+        title: 'Обновление готово',
+        content: `<div class="alert info">Версия <b>${U.esc(version)}</b> загружена в фоне. Перезапустите приложение сейчас или установите её позже из раздела «Настройки → Данные приложения». Пользовательские данные сохраняются.</div>`,
+        buttons: [
+          { label: 'Позже', class: 'btn-ghost' },
+          { label: 'Перезапустить и установить', class: 'btn-primary', onClick: () => {
+            API.invoke('ui:update-restart').catch((error) => toast('Не удалось запустить установку: ' + error.message, 'err', 8000));
+          } }
+        ]
+      });
+    }
+  }
+
   function buildNav() {
     const nav = document.getElementById('nav');
     nav.innerHTML = '';
@@ -361,6 +388,10 @@ window.App = (function () {
   async function init() {
     S.setEconomics(window.EC);
     buildNav();
+    if (API.isElectron) {
+      API.on('update-status', handleUpdateStatus);
+      API.invoke('ui:update-state').then(handleUpdateStatus).catch(() => {});
+    }
     const bridgeProblem = checkBridge();
     if (bridgeProblem) {
       setTimeout(() => {

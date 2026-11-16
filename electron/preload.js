@@ -84,7 +84,11 @@ const CHANNELS = [
   'ui:import-file',
   'ui:open-external',
   'ui:app-info',
-  'ui:theme'
+  'ui:theme',
+  'ui:update-state',
+  'ui:update-check',
+  'ui:update-enable',
+  'ui:update-restart'
 ];
 
 /**

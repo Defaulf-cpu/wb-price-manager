@@ -16,7 +16,7 @@
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
     "dist:dir": "electron-builder --win --dir",
-    "test": "node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/engine-unit.js && node tools/checks/price-watch-flow.js && node tools/checks/web-server-flow.js && node --expose-gc --max-old-space-size=1200 tools/uitest.js",
+    "test": "node tools/checks/updater-flow.js && node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/engine-unit.js && node tools/checks/price-watch-flow.js && node tools/checks/web-server-flow.js && node --expose-gc --max-old-space-size=1200 tools/uitest.js",
     "test:engine": "node tools/checks/engine-unit.js",
     "test:limits": "node tools/checks/rate-limit-flow.js",
     "test:repricer": "node tools/checks/repricer-flow.js",
@@ -27,6 +27,7 @@
   "devDependencies": {
     "electron": "^33.4.0",
     "electron-builder": "latest",
+    "electron-updater": "^6.8.11",
     "jsdom": "^25.0.1"
   },
   "build": {
@@ -40,7 +41,29 @@
     "files": [
       "electron/**/*",
       "src/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/electron-updater/**/*",
+      "node_modules/builder-util-runtime/**/*",
+      "node_modules/debug/**/*",
+      "node_modules/fs-extra/**/*",
+      "node_modules/graceful-fs/**/*",
+      "node_modules/js-yaml/**/*",
+      "node_modules/jsonfile/**/*",
+      "node_modules/lazy-val/**/*",
+      "node_modules/lodash.escaperegexp/**/*",
+      "node_modules/lodash.isequal/**/*",
+      "node_modules/ms/**/*",
+      "node_modules/semver/**/*",
+      "node_modules/sax/**/*",
+      "node_modules/tiny-typed-emitter/**/*",
+      "node_modules/universalify/**/*",
+      "!**/.data/**",
+      "!**/*.log",
+      "!tools/checks/**",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/testdata/**",
+      "!**/coverage/**"
     ],
     "win": {
       "target": [
@@ -56,7 +79,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -65,10 +89,23 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "WB Price Manager",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerLanguages": [
+        "ru_RU"
+      ]
     },
     "portable": {
       "artifactName": "WBPriceManager-Portable-${version}.${ext}"
-    }
+    },
+    "asar": true,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Defaulf-cpu",
+        "repo": "wb-price-manager"
+      }
+    ]
   }
 }

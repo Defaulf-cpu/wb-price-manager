@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
   priceWatchAutoFetch: false, // витрина: включение на свой риск
   priceWatchTtlMinutes: 60,
   demoMode: true,
+  autoUpdateEnabled: true,
   sandbox: false,
   model: 'marketplace', // marketplace | fbw
   currency: 'RUB',

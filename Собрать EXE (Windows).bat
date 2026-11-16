@@ -21,10 +21,17 @@ if not exist node_modules (
   if errorlevel 1 ( echo  [ОШИБКА] npm install не удался & pause & exit /b 1 )
 )
 
+for /f "usebackq tokens=*" %%V in (`npm pkg get version`) do set "VERSION=%%~V"
+if not defined VERSION (
+  echo  [ОШИБКА] Не удалось прочитать версию из package.json
+  pause
+  exit /b 1
+)
+
 echo.
 echo  Собираю установщик ^(NSIS^) и портативную версию...
 echo.
-call npx electron-builder --win --x64
+call npm run dist
 if errorlevel 1 (
   echo.
   echo  [ОШИБКА] Сборка не удалась. Текст ошибки выше.
@@ -34,8 +41,8 @@ if errorlevel 1 (
 
 echo.
 echo  Готово! Файлы в папке release:
-echo    - WBPriceManager-Setup-1.0.0.exe   ^(установщик^)
-echo    - WBPriceManager-Portable-1.0.0.exe ^(без установки^)
+echo    - WBPriceManager-Setup-%VERSION%.exe   ^(установщик^)
+echo    - WBPriceManager-Portable-%VERSION%.exe ^(без установки^)
 echo.
 explorer "%~dp0release"
 pause
