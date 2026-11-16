@@ -516,12 +516,55 @@ Views.settings = {
     // категории
     const catsHost = $('#cats-host');
     const cats = Object.keys(s.categoryDefaults || {});
+
+    /**
+     * Поле значения категории. Пустое поле означает «как в общих настройках», поэтому
+     * пишем null: ноль переопределил бы общий тариф нулём и молча обнулил расходы.
+     * Объявлено стрелкой и до построения таблицы: в файле включён строгий режим, и обычная
+     * функция-объявление имела бы this === undefined — правки категорий не сохранялись.
+     */
+    const catInput = (name, field, value, step, hint) => {
+      const i = document.createElement('input');
+      i.type = 'number'; i.step = step; i.className = 'num cellinput';
+      i.value = (value === undefined || value === null) ? '' : value;
+      if (hint) i.title = hint;
+      i.onchange = () => {
+        this.catPatch = this.catPatch || {};
+        this.catPatch[name] = Object.assign({}, this.catPatch[name],
+          { [field]: i.value === '' ? null : U.num(i.value) });
+      };
+      return i;
+    };
+
+    /**
+     * Тарифы логистики по объёму для категории: база, доплата за литр, порог и крупный
+     * тариф. Пусто — берутся общие настройки (порядок разбора — в resolveParams,
+     * electron/economics.js).
+     */
+    const catLogCell = (c) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'cat-logistics';
+      wrap.style.cssText = 'display:flex;gap:4px;align-items:center;flex-wrap:wrap';
+      [['logisticsBaseRub', '1', 'база ₽'],
+       ['logisticsPerLiterRub', '1', 'за литр ₽'],
+       ['literThreshold', '0.5', 'порог л'],
+       ['logisticsLargeRub', '1', 'крупная ₽']].forEach((spec) => {
+        const i = catInput(c.name, spec[0], c.def[spec[0]], spec[1],
+          spec[2] + ' — пусто: как в общих настройках');
+        i.style.width = '78px';
+        i.placeholder = spec[2];
+        wrap.appendChild(i);
+      });
+      return wrap;
+    };
+
     const grid = UI.table({
       columns: [
         { title: 'Категория', render: (c) => `<b>${U.esc(c.name)}</b>` },
         { title: 'Комиссия WB, %', num: true, render: (c) => catInput(c.name, 'commissionPct', c.def.commissionPct, '0.5') },
         { title: 'Реклама, %', num: true, render: (c) => catInput(c.name, 'adPct', c.def.adPct, '0.5') },
-        { title: 'Упаковка, ₽', num: true, render: (c) => catInput(c.name, 'packagingRub', c.def.packagingRub, '1') },
+        { title: 'Упаковка, ₽', num: true, render: (c) => catInput(c.name, 'packagingRub', c.def.packagingRub, '1', 'Упаковка категории — пусто: как в общих настройках') },
+        { title: 'Логистика по объёму', render: (c) => catLogCell(c) },
         { title: 'Налоговый режим', render: (c) => {
             const sel = document.createElement('select');
             sel.style.width = '190px';
@@ -546,16 +589,6 @@ Views.settings = {
     });
     catsHost.appendChild(grid.el);
 
-    function catInput(name, field, value, step) {
-      const i = document.createElement('input');
-      i.type = 'number'; i.step = step; i.className = 'num cellinput';
-      i.value = value === undefined ? '' : value;
-      i.onchange = () => {
-        this.catPatch = this.catPatch || {};
-        this.catPatch[name] = Object.assign({}, this.catPatch[name], { [field]: U.num(i.value) });
-      };
-      return i;
-    }
 
     // сохранение
     $('#save-all').onclick = async () => {

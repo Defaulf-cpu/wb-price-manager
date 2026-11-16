@@ -165,10 +165,15 @@ function resolveParams(settings, item, overrides, facts) {
     targetMarginPct: pickNum(o.targetMarginPct, s.targetMarginPct, 0),
     minMarginPctAlert: pickNum(s.minMarginPctAlert, 10),
     model: o.model || s.model || 'marketplace',
-    logisticsBaseRub: pickNum(o.logisticsBaseRub, s.logisticsBaseRub),
-    logisticsPerLiterRub: pickNum(o.logisticsPerLiterRub, s.logisticsPerLiterRub),
-    literThreshold: pickNum(o.literThreshold, s.literThreshold, 5),
-    logisticsLargeRub: pickNum(o.logisticsLargeRub, s.logisticsLargeRub),
+    /**
+     * Объёмные тарифы логистики: своя сумма в товаре → тариф категории → общие настройки.
+     * Категорийные тарифы раньше игнорировались, и для «Обуви» при 2 л считался глобальный
+     * тариф (60 ₽ вместо 90 ₽), а порог и крупный тариф категории не применялись вовсе.
+     */
+    logisticsBaseRub: pickNum(o.logisticsBaseRub, catDef.logisticsBaseRub, s.logisticsBaseRub),
+    logisticsPerLiterRub: pickNum(o.logisticsPerLiterRub, catDef.logisticsPerLiterRub, s.logisticsPerLiterRub),
+    literThreshold: pickNum(o.literThreshold, catDef.literThreshold, s.literThreshold, 5),
+    logisticsLargeRub: pickNum(o.logisticsLargeRub, catDef.logisticsLargeRub, s.logisticsLargeRub),
 
     // откуда взялось каждое значение — показываем в интерфейсе подписью
     factCosts: useFacts ? {

@@ -150,7 +150,13 @@ function beautifulPrice(price, cfg, stepLimitRub) {
   if (stepLimitRub !== undefined && stepLimitRub !== null && num(stepLimitRub) <= 0) return p;
   const limit = (stepLimitRub === undefined || stepLimitRub === null) ? Infinity : num(stepLimitRub);
   const allowed = candidates.filter((c) => Math.abs(c - p) <= limit);
-  const pool = allowed.length ? allowed : candidates.filter((c) => c > 0);
+  /**
+   * Если ни один кандидат не укладывается в остаток лимита шага — цену не трогаем.
+   * Раньше здесь был запасной путь «округлить до ближайшего кандидата», и репрайсер
+   * менял цену сильнее, чем разрешает лимит за обновление: 1234 ₽ при запасе 4 ₽
+   * превращались в 1229 ₽ (5 ₽ хода).
+   */
+  const pool = allowed;
   if (!pool.length) return p;
 
   switch (mode) {
@@ -292,8 +298,18 @@ function toBaseAndDiscount(targetSeller, cur, cfg, itemCfg) {
 
   // разрешено менять базовую цену: ставим её «в рубль» и держим текущую скидку
   discount = Math.max(canZero ? 0 : Math.min(num(cur.discount), 1), Math.min(95, num(cur.discount)));
-  base = discount < 95 ? Math.round(seller / (1 - discount / 100)) : Math.round(seller);
-  const realSeller = base * (1 - discount / 100);
+  const denom = 1 - discount / 100;
+  base = denom > 0 ? Math.max(1, Math.round(seller / denom)) : Math.max(1, Math.round(seller));
+  let realSeller = base * denom;
+  /**
+   * WB не принимает цену меньше 1 ₽. При упоре в скидку 95 % прежняя формула ставила базу
+   * «в рубль» (base = round(seller)), и цена продавца выходила 0,05 ₽ — скидка валидная,
+   * а цена нет. Поднимаем базу, пока цена не станет ≥ 1 ₽.
+   */
+  if (denom > 0 && realSeller < 1) {
+    base = Math.max(base, Math.ceil(1 / denom));
+    realSeller = base * denom;
+  }
   return { basePrice: base, discount, sellerPrice: r2(realSeller), mode: 'base-price' };
 }
 

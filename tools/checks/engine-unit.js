@@ -195,18 +195,14 @@ const catLogisticsSettings = {
 };
 const catVolumeParams = EC.resolveParams(catLogisticsSettings, { categoryName: 'Обувь', volumeLiters: 2 }, {}, {});
 const catLargeParams = EC.resolveParams(catLogisticsSettings, { categoryName: 'Обувь', volumeLiters: 4 }, {}, {});
-expectedFailNumber(
+numberCase(
   'логистика: категория должна применять собственные базу и тариф за литр',
   { categoryName: 'Обувь', volumeLiters: 2, categoryTariff: { base: 70, perLiter: 20 }, globalTariff: { base: 50, perLiter: 10 } },
-  90, () => EC.calcLogistics(catVolumeParams),
-  'resolveParams сейчас читает объёмные тарифы только из overrides/settings, не из categoryDefaults'
-);
-expectedFailNumber(
+  90, () => EC.calcLogistics(catVolumeParams));
+numberCase(
   'логистика: категория должна применять собственный порог и крупный тариф',
   { categoryName: 'Обувь', volumeLiters: 4, categoryTariff: { threshold: 3, large: 240 }, globalTariff: { threshold: 5, large: 150 } },
-  240, () => EC.calcLogistics(catLargeParams),
-  'порог и тариф категории сейчас игнорируются; владелец решает, добавлять ли эту настройку'
-);
+  240, () => EC.calcLogistics(catLargeParams));
 
 console.log('\n=== Экономика: разрешение параметров и источники ===');
 const categorySettings = {
@@ -438,12 +434,10 @@ const beautifulCases = [
 ];
 beautifulCases.forEach((c) => numberCase(c.name, { price: c.price, cfg: c.cfg, stepLimitRub: c.limit }, c.expected,
   () => RP.beautifulPrice(c.price, c.cfg, c.limit)));
-expectedFailNumber(
+numberCase(
   'красивая цена не должна выходить за остаток лимита шага',
   { price: 1234, ending: 9, stepLimitRub: 4, expectedNoMove: 1234 },
-  1234, () => RP.beautifulPrice(1234, { ending: 9, mode: 'nearest' }, 4),
-  'beautifulPrice использует ближайшего кандидата даже когда ни один кандидат не входит в stepLimitRub'
-);
+  1234, () => RP.beautifulPrice(1234, { ending: 9, mode: 'nearest' }, 4));
 
 console.log('\n=== Репрайсер: режимы маржи и цена по целевой марже ===');
 const marginCtx = {
@@ -696,9 +690,8 @@ const noDiscountRp = RP.computeItem(engineContext({ discount: 0 }), engineConfig
 numberCase('репрайсер: товар без скидки не меняет seller price', { discount: 0, sellerPrice: 1000 }, 1000,
   () => noDiscountRp.proposed.sellerPrice);
 const fullDiscountRp = RP.computeItem(engineContext({ discount: 100, sellerPrice: 0 }), engineConfig(), { strategy: 'hold' });
-expectedFailNumber('репрайсер: нулевая цель при скидке 100% должна сохранить минимум 1 ₽ после перевода в пару',
-  { discount: 100, sellerPrice: 0, minOutputExpected: 1 }, 1, () => fullDiscountRp.proposed.sellerPrice,
-  'при упоре в скидку 95% toBaseAndDiscount округляет базу до 1 ₽, поэтому расчётная seller price становится 0,05 ₽');
+numberCase('репрайсер: нулевая цель при скидке 100% должна сохранить минимум 1 ₽ после перевода в пару',
+  { discount: 100, sellerPrice: 0, minOutputExpected: 1 }, 1, () => fullDiscountRp.proposed.sellerPrice);
 numberCase('репрайсер: скидка ограничена 95% при переводе в пару', { discount: 100 }, 95,
   () => fullDiscountRp.proposed.discount);
 

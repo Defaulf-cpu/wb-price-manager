@@ -303,6 +303,42 @@ async function run() {
   await wait(900);
   check('настройки сохраняются', window.S.state.settings.targetMarginPct === 25, 'targetMarginPct=' + window.S.state.settings.targetMarginPct);
 
+  /**
+   * Тарифы логистики по категории. Заодно это проверка того, что поля категории вообще
+   * сохраняются: в строгом режиме функция-объявление catInput имела this === undefined,
+   * и правка комиссии/рекламы/упаковки по категории молча не доезжала до хранилища.
+   */
+  const catRow = doc.querySelector('#cats-host tbody tr');
+  if (catRow) {
+    const catName = ((catRow.querySelector('td') || {}).textContent || '').trim();
+    const catIns = catRow.querySelectorAll('input.num.cellinput');
+    check('в строке категории есть поля тарифов логистики', catIns.length >= 7, catIns.length + ' полей');
+    const setInp = (el, v) => { el.value = String(v); el.dispatchEvent(new window.Event('change', { bubbles: true })); };
+    const tail = catIns.length - 4;      // база, за литр, порог, крупный тариф
+    setInp(catIns[tail], 70); setInp(catIns[tail + 1], 20);
+    setInp(catIns[tail + 2], 3); setInp(catIns[tail + 3], 240);
+    doc.getElementById('save-all').click();
+    await wait(900);
+    const catDefOf = () => (window.S.state.settings.categoryDefaults || {})[catName] || {};
+    const cd = catDefOf();
+    check('тарифы логистики категории сохранились',
+      cd.logisticsBaseRub === 70 && cd.logisticsPerLiterRub === 20 && cd.literThreshold === 3 && cd.logisticsLargeRub === 240,
+      JSON.stringify(cd));
+    const logOf = (liters) => window.EC.calcLogistics(
+      window.EC.resolveParams(window.S.state.settings, { categoryName: catName, volumeLiters: liters }, {}, {}));
+    check('категория применяет свои базу и тариф за литр', Math.abs(logOf(2) - 90) < 0.01, logOf(2) + ' ₽');
+    check('категория применяет свой порог и крупный тариф', Math.abs(logOf(4) - 240) < 0.01, logOf(4) + ' ₽');
+    // вернуть «как в общих настройках», чтобы категорийные тарифы не влияли на остальные проверки
+    [tail, tail + 1, tail + 2, tail + 3].forEach((k) => setInp(catIns[k], ''));
+    doc.getElementById('save-all').click();
+    await wait(900);
+    const cd2 = catDefOf();
+    check('пустое поле категории возвращает к общим настройкам',
+      cd2.logisticsBaseRub === null && cd2.literThreshold === null, JSON.stringify(cd2));
+  } else {
+    check('в строке категории есть поля тарифов логистики', false, 'таблица категорий пуста');
+  }
+
   // карточка товара (клик по строке таблицы)
   window.S.state.filters.flag = 'all';
   window.App.go('prices');
