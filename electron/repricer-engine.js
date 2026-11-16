@@ -297,6 +297,25 @@ function toBaseAndDiscount(targetSeller, cur, cfg, itemCfg) {
   return { basePrice: base, discount, sellerPrice: r2(realSeller), mode: 'base-price' };
 }
 
+/**
+ * Сводка расходов из расчёта юнит-экономики — для блока «Себестоимость» в таблице
+ * репрайсера (задание D): все слагаемые одной строки, чтобы продавец видел,
+ * из чего сложилась прибыль, не открывая карточку товара.
+ */
+function econSummary(e) {
+  if (!e || typeof e !== 'object') return null;
+  return {
+    cogs: num(e.cogs), commission: num(e.commission), acquiring: num(e.acquiring),
+    logistics: num(e.logistics), accept: num(e.accept), storage: num(e.storage),
+    packaging: num(e.packaging), tax: num(e.tax), ad: num(e.ad),
+    wbTotal: num(e.wbTotal), totalCosts: num(e.totalCosts), pctCosts: num(e.pctCosts),
+    fixedCosts: num(e.fixedCosts), markupPct: num(e.markupPct),
+    breakEvenPrice: num(e.breakEvenPrice), minPriceForMargin: num(e.minPriceForMargin),
+    profit: num(e.profit), profitBeforeTax: num(e.profitBeforeTax),
+    marginPct: num(e.marginPct), revenue: num(e.revenue)
+  };
+}
+
 /** Маржинальность в выбранном режиме расчёта. */
 function marginOf(ctx, price) {
   const econ = ctx.econAt ? ctx.econAt(price) : null;
@@ -1078,6 +1097,12 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const changeAbs = newSeller - curSeller;
   const changePct = curSeller > 0 ? (changeAbs / curSeller) * 100 : 0;
   const needSend = Math.abs(changeAbs) >= 0.5 || Math.abs(pair.basePrice - curBase) >= 0.5 || Math.abs(pair.discount - curDisc) >= 0.05;
+  /**
+   * Флаг «Отправка в WB» (задание D) — выключается прямо в строке таблицы.
+   * Цена при этом продолжает рассчитываться и показываться: товар остаётся
+   * в таблице со всеми цифрами, но в предложение и в кабинет не уходит.
+   */
+  const allowSend = ctx.allowSend !== false;
 
   const econBefore = marginOf(marginCtx, curSeller);
   const econAfter = marginOf(marginCtx, newSeller);
@@ -1088,6 +1113,10 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const upliftFactor = 1 + upliftPctUsed / 100;
   const perDay = num(ctx.salesPerDay);
   const deltaProfitMonth = econAfter.profit * perDay * 30 * upliftFactor - econBefore.profit * perDay * 30;
+
+  // себестоимость введена в валюте, курс которой не задан: расчёт без себестоимости
+  if (ctx.costError) warnings.push(String(ctx.costError) + ' — себестоимость в расчёте не учтена.');
+  if (!allowSend && needSend) warnings.push('Отправка в WB отключена для товара: цена рассчитана, но в кабинет не уйдёт.');
 
   if (econAfter.profit < 0 && !allowNeg) warnings.push('Новая цена даёт убыток. Проверьте минимальный порог и себестоимость.');
   else if (econAfter.marginPct < targetMargin - 0.5) warnings.push(`Маржа ${econAfter.marginPct.toFixed(1)}% ниже целевой ${targetMargin}%.`);
@@ -1124,7 +1153,50 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       breakEvenUpliftPct: promoJoin ? (promoPlan.chosen.breakEvenUpliftPct === undefined ? null : promoPlan.chosen.breakEvenUpliftPct) : null
     },
     corridor: { min: r2(priceFloor), max: r2(corridorMax), minByMargin: minByMargin === null ? null : r2(minByMargin) },
-    needSend,
+    needSend: needSend && allowSend,
+    allowSend,
+    tag: ctx.tag ? String(ctx.tag) : '',
+    barcode: ctx.barcode ? String(ctx.barcode) : '',
+    /**
+     * ── Блоки таблицы репрайсера (задание D) ──
+     * Всё, что нужно для решения по цене, отдаётся одной строкой: себестоимость
+     * с валютой и курсом, слагаемые расходов, цена с СПП и кошельком, пороги
+     * и данные акций. Интерфейс рисует из них блоки колонок.
+     */
+    cost: {
+      currency: String(ctx.costCurrency || 'RUB'),
+      rate: num(ctx.costRate, 1),
+      entered: (ctx.costEntered === undefined || ctx.costEntered === null || ctx.costEntered === '') ? null : num(ctx.costEntered),
+      rub: num(ctx.params && ctx.params.costPriceRub),
+      error: ctx.costError || null,
+      now: econSummary(econBefore.econ),
+      next: econSummary(econAfter.econ)
+    },
+    wallet: {
+      sppPct: r2(num(ctx.sppPct)),
+      walletPct: r2(num(C.priceEdit.walletPct)),
+      nowBuyer: r2(curBuyer),
+      nextBuyer: r2(newSeller * (1 - num(ctx.sppPct) / 100) * (1 - num(C.priceEdit.walletPct) / 100))
+    },
+    promo: {
+      inPromo: !!ctx.inPromo,
+      discountFloor: r2(num(promoPlan.discountFloor)),
+      plannedPrice: num(ctx.promoPrice, 0) || 0,
+      plannedDiscount: r2(num(ctx.promoDiscountPct)),
+      chosen: promoPlan.chosen || null,
+      restorePair: (promoPlan.chosen && promoPlan.chosen.restorePair) || null,
+      holdDiscountMax: num((ctx.promoHold || {}).maxDiscountPct) || 0
+    },
+    floor: {
+      min: r2(priceFloor),
+      max: r2(corridorMax),
+      corridorMin: r2(corridorMin),
+      minByMargin: minByMargin === null ? null : r2(minByMargin),
+      // чем задан пол: порогом минимальной цены или минимальной маржинальностью
+      by: (minByMargin !== null && minByMargin > corridorMin) ? 'margin' : 'corridor',
+      minPriceSet: minPrice > 0 ? r2(minPrice) : null,
+      basePriceTarget: r2(basePriceTarget)
+    },
     limitedBy,
     quarantine,
     layers,

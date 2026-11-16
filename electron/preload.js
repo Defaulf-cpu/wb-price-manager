@@ -40,6 +40,7 @@ const CHANNELS = [
   'costs:save',
   'costs:import',
   'costs:clear',
+  'costs:rates',
   'cache:clear',
   'tasks:history',
   'repricer:state',

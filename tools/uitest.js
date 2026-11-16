@@ -141,7 +141,7 @@ async function run() {
   }
 
   // Общие UI-сценарии не нуждаются в 200 DOM-строках на каждом шаге.
-  // Расчёты идут по всем товарам; штатные 200 строк проверяются отдельно ниже.
+  // Расчёты идут по всем товарам; штатные 100 строк проверяются отдельно ниже.
   const productionRepricerPageSize = window.Views.repricer.PAGE_SIZE;
   window.Views.repricer.PAGE_SIZE = 40;
 
@@ -149,6 +149,9 @@ async function run() {
   const check = (name, cond, extra) => {
     report.push(`${cond ? 'OK  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`);
     if (process.env.UI_TEST_PROGRESS) console.log(report[report.length - 1]);
+    if (process.env.UI_TEST_MEM && report.length % 20 === 0) {
+      console.log('MEM ' + report.length + ' heap=' + Math.round(process.memoryUsage().heapUsed / 1048576) + 'MB rss=' + Math.round(process.memoryUsage().rss / 1048576) + 'MB');
+    }
     if (!cond) errors.push('CHECK FAILED: ' + name + (extra ? ' — ' + extra : ''));
   };
 
@@ -1781,10 +1784,10 @@ async function run() {
 
   // сегментированный фильтр (как «Все / Основной» в INDEEPA) и плотность строк
   const seg = doc.querySelectorAll('#rp-seg [data-seg]');
-  check('INDEEPA: есть сегментированный фильтр', seg.length === 6, 'сегментов ' + seg.length);
-  check('INDEEPA: сегменты — Все, К отправке, Своя цена, Ошибки данных, Убыточные, С предупреждениями',
+  check('INDEEPA: есть сегментированный фильтр', seg.length === 7, 'сегментов ' + seg.length);
+  check('INDEEPA: сегменты — Все, К отправке, Своя цена, Ошибки, Убыточные, Предупреждения, Не отправлять',
     Array.from(seg).map((b) => b.textContent.trim()).join('|') ===
-      'Все|Только с изменением|Своя цена|Только ошибки|Только убыточные|С предупреждениями',
+      'Все|Только с изменением|Своя цена|Только ошибки|Только убыточные|С предупреждениями|Не отправлять',
     Array.from(seg).map((b) => b.textContent.trim()).join('|'));
   const allCount = doc.querySelectorAll('#rp-grid tbody tr').length;
   const errSeg = Array.from(seg).find((b) => b.getAttribute('data-seg') === 'errors');
@@ -1853,24 +1856,34 @@ async function run() {
   }
 
 
-  // переключатель видимости колонок: их в таблице 20, без выбора приходится листать вбок
+  // переключатель видимости колонок: без выбора приходится листать вбок
   check('INDEEPA: есть кнопка выбора колонок', !!doc.getElementById('rp-cols'));
   const rpv = window.Views.repricer;
+  /**
+   * Шапка таблицы стала двухрядной (задание D): верхний ряд — блоки колонок
+   * («Артикул», «Текущая цена», «Новая цена», «Мин цена (в акции)», «Цена (вне акции)»…),
+   * нижний — сами колонки. Поэтому колонки считаем по ПОСЛЕДНЕМУ ряду шапки:
+   * в нём ровно видимые колонки, без чекбокса (он занимает оба ряда).
+   */
+  const colTh = () => doc.querySelectorAll('#rp-grid thead tr:last-child th').length;
+  const visCount = () => {
+    const vis = rpv.visibleCols();
+    return (rpv.COLUMNS || []).filter((c) => c.always || vis.has(c.id)).length;
+  };
   check('INDEEPA: справочник колонок совпадает с таблицей',
-    (rpv.COLUMNS || []).length === 21 &&
-      doc.querySelectorAll('#rp-grid thead th').length === (rpv.COLUMNS || []).length,
-    'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + doc.querySelectorAll('#rp-grid thead th').length);
+    (rpv.COLUMNS || []).length === 31 && colTh() === visCount(),
+    'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + colTh() + ', видимых ' + visCount());
   check('INDEEPA: по умолчанию показан полный набор (кроме дубля «Коридор»)',
     rpv.visibleCols().size >= 18 && !rpv.visibleCols().has('corridor'),
     'видимо ' + rpv.visibleCols().size + ' колонок');
   check('INDEEPA: обязательные колонки нельзя выключить',
     (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.id).join(',') === 'item,priceNow,myPrice,priceNext,delta,why',
     (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.title || c.id).join(', '));
-  const headersBefore = doc.querySelectorAll('#rp-grid thead th').length;
+  const headersBefore = colTh();
   rpv.saveVisibleCols(rpv.COMPACT_COLUMNS);
   rpv.renderResults();
   await wait(700);
-  const headersAfter = doc.querySelectorAll('#rp-grid thead th').length;
+  const headersAfter = colTh();
   check('INDEEPA: компактный набор уменьшает число колонок', headersAfter < headersBefore,
     headersBefore + ' → ' + headersAfter);
   check('INDEEPA: обязательные колонки остались при компактном наборе',
@@ -1879,8 +1892,7 @@ async function run() {
   rpv.renderResults();
   await wait(700);
   check('INDEEPA: набор колонок возвращается к полному',
-    doc.querySelectorAll('#rp-grid thead th').length === headersBefore,
-    'колонок ' + doc.querySelectorAll('#rp-grid thead th').length);
+    colTh() === headersBefore, 'колонок ' + colTh());
   rpv.openColumnsPicker();
   await wait(500);
   const cpModal = (function () { const bs = doc.querySelectorAll('#modal-root .modal-backdrop'); return bs.length ? bs[bs.length - 1] : null; })();
@@ -1888,6 +1900,275 @@ async function run() {
   check('INDEEPA: в окне есть готовые наборы', !!cpModal && /Компактный набор/.test(cpModal.textContent) &&
     /Все колонки/.test(cpModal.textContent));
   if (cpModal) { const c = cpModal.querySelector('.modal-close'); if (c) c.click(); await wait(250); }
+
+  // ═════════════ Задание D: весь функционал на одном экране репрайсера ═════════════
+  // Таблица собрана из блоков, а себестоимость, валюта, метка и флаг отправки
+  // правятся прямо в строке — проваливаться в другие разделы не нужно.
+  const rpD = window.Views.repricer;
+  rpD.tab = 'prices';
+  rpD.saveVisibleCols(rpD.DEFAULT_COLUMNS);
+  rpD.page = 0;
+  rpD.renderResults();
+  await wait(800);
+
+  // Ссылки на DOM объявлены через let и обнуляются в конце секции: в jsdom одна
+  // ячейка держит ссылку на родителя, поэтому забытая строка оставляет в памяти
+  // всю старую таблицу (27 колонок × 40 строк) до конца прогона.
+  let headRowsD = doc.querySelectorAll('#rp-grid thead tr');
+  check('D: шапка таблицы двухрядная — блоки над колонками', headRowsD.length === 2, 'рядов ' + headRowsD.length);
+  let groupThs = Array.from(doc.querySelectorAll('#rp-grid thead tr:first-child th[data-group]'));
+  const groupNames = groupThs.map((th) => th.textContent.trim()).join(' | ');
+  check('D: блоки колонок как в таблице INDEEPA', groupThs.length >= 7, groupNames);
+  check('D: блоки «Артикул», «Инфо о товаре», «Текущая цена», «Новая цена»',
+    groupNames.includes('Артикул') && groupNames.includes('Инфо о товаре') &&
+      groupNames.includes('Текущая цена') && groupNames.includes('Новая цена'), groupNames);
+  check('D: блоки «Мин цена (в акции)» и «Цена (вне акции)»',
+    groupNames.includes('Мин цена (в акции)') && groupNames.includes('Цена (вне акции)'), groupNames);
+  check('D: блоки «Себестоимость и экономика» и «Конкуренты»',
+    groupNames.includes('Себестоимость') && groupNames.includes('Конкуренты'), groupNames);
+  check('D: colspan блока равен числу его видимых колонок',
+    groupThs.length > 0 && groupThs.every((th) => Number(th.colSpan) === rpD.colsOfGroup(th.getAttribute('data-group'))
+      .filter((c) => c.always || rpD.visibleCols().has(c.id)).length),
+    groupThs.map((th) => th.textContent.trim() + ':' + th.colSpan).join(', '));
+  check('D: чекбокс «выбрать все» занимает оба ряда шапки',
+    (() => { const th = doc.querySelector('#rp-grid thead th.rp-check'); return !!th && th.rowSpan === 2; })());
+  check('D: широкая таблица закреплена слева по первым колонкам',
+    !!doc.querySelector('#rp-grid table.rp-sticky-first'));
+
+  const dPage = rpD.pageOf(rpD.filteredResults());
+  const dRow = dPage.find((r) => !r.error && r.cost && r.cost.next);
+  const dNm = dRow ? String(dRow.nmID) : '';
+  check('D: расчёт отдаёт блоки для колонок (себестоимость, СПП, пороги, акции)',
+    !!dRow && !!dRow.wallet && !!dRow.floor && !!dRow.promo && typeof dRow.allowSend === 'boolean', dNm);
+  let dTr = Array.from(doc.querySelectorAll('#rp-grid tbody tr'))
+    .find((tr) => !!tr.querySelector('.rp-cost[data-nm="' + dNm + '"]'));
+  check('D: строка с блоками найдена в таблице', !!dTr, dNm);
+
+  if (dTr) {
+    const dItem = (window.S.state.items || []).find((x) => String(x.nmID) === dNm) || {};
+    const dText = dTr.textContent;
+    check('D: себестоимость и её валюта правятся в строке',
+      !!dTr.querySelector('.rp-cost') && !!dTr.querySelector('.rp-costcur'),
+      dTr.querySelector('.rp-costcur') ? dTr.querySelector('.rp-costcur').value : 'нет списка валют');
+    check('D: флаг «Отправка в WB» и метка правятся в строке',
+      !!dTr.querySelector('.rp-allowsend') && !!dTr.querySelector('.rp-tag'));
+    check('D: пороги минимальной и базовой цены остались в строке',
+      !!dTr.querySelector('.rp-minprice') && !!dTr.querySelector('.rp-baseprice'));
+    check('D: блок «Инфо о товаре» показывает категорию или объём',
+      !dItem.categoryName || dText.includes(dItem.categoryName) || /объём|размеров/.test(dText),
+      String(dItem.categoryName || ''));
+    check('D: баркод показан или честно помечен как отсутствующий',
+      /нет в карточке|\d{6,}/.test(dText));
+    // колонка «Расходы на единицу» по умолчанию скрыта (состав расходов есть в «почему»),
+    // поэтому проверяем сам рендер ячейки, а не её присутствие в таблице
+    const costDetailHtml = rpD.costDetailCellHtml(dRow);
+    check('D: ячейка «Расходы на единицу» раскладывает расходы по статьям',
+      /всего/.test(costDetailHtml) && /комиссия|логистика|себест\./.test(costDetailHtml),
+      costDetailHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90));
+    // «Безубыточность» по умолчанию скрыта (цифра есть в «почему») — проверяем рендер ячейки
+    const breakEvenHtml = rpD.breakEvenCellHtml(dRow);
+    check('D: ячейка «Безубыточность» показывает точку и запас',
+      /безубыточность/.test(breakEvenHtml) && /запас/.test(breakEvenHtml),
+      breakEvenHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80));
+    check('D: в строке виден блок «Мин цена (в акции)»', /порог скидки|акций нет/.test(dText));
+    check('D: в строке виден блок «Цена (вне акции)»', /база/.test(dText));
+
+    // ── правки в строке копятся и применяются одной кнопкой ──
+    const rateCny = Number((window.S.state.settings.costRates || {}).CNY);
+    const curInp = dTr.querySelector('.rp-costcur');
+    curInp.value = 'CNY';
+    curInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(150);
+    check('D: валюта себестоимости копится в несохранённых правках',
+      rpD.pendingEdits.get(dNm).cost.currency === 'CNY', JSON.stringify(rpD.pendingEdits.get(dNm).cost));
+    check('D: подпись «по курсу» пересчитывается сразу, без сохранения',
+      /по курсу/.test(dTr.querySelector('.rp-cost-hint').textContent),
+      dTr.querySelector('.rp-cost-hint').textContent);
+    const costInp = dTr.querySelector('.rp-cost');
+    costInp.value = '40';
+    costInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(150);
+    check('D: значение себестоимости копится в правках',
+      rpD.pendingEdits.get(dNm).cost.costPriceRub === 40);
+    check('D: в рублях себестоимость = значение × курс из настроек',
+      dTr.querySelector('.rp-cost-rub').textContent.trim() === window.U.money(40 * rateCny).trim(),
+      dTr.querySelector('.rp-cost-rub').textContent + ' против ' + window.U.money(40 * rateCny));
+
+    const sendCb = dTr.querySelector('.rp-allowsend');
+    sendCb.checked = false;
+    sendCb.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(150);
+    check('D: флаг «не отправлять» копится в правках',
+      rpD.pendingEdits.get(dNm).config.allowSend === false);
+    const tagInp = dTr.querySelector('.rp-tag');
+    tagInp.value = 'распродажа';
+    tagInp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(150);
+    check('D: метка товара копится в правках', rpD.pendingEdits.get(dNm).config.tag === 'распродажа');
+    check('D: строка с несохранёнными правками подсвечена',
+      !!doc.querySelector('#rp-grid tbody tr.row-dirty'));
+
+    // commitEdits сам сохраняет правки, пересчитывает цены и перерисовывает таблицу
+    await rpD.commitEdits();
+    await wait(1500);
+    const savedCost = (window.S.state.costs || {})[dNm] || {};
+    check('D: «Сохранить» пишет себестоимость и валюту',
+      savedCost.costPriceRub === 40 && savedCost.currency === 'CNY', JSON.stringify(savedCost));
+    const savedCfg = (rpD.rstate.itemConfigs || {})[dNm] || {};
+    check('D: «Сохранить» пишет флаг отправки и метку',
+      savedCfg.allowSend === false && savedCfg.tag === 'распродажа', JSON.stringify(savedCfg));
+    const afterRow = rpD.results.find((r) => String(r.nmID) === dNm);
+    check('D: после пересчёта себестоимость в рублях по курсу',
+      !!afterRow && afterRow.cost.currency === 'CNY' && afterRow.cost.entered === 40 &&
+        Math.abs(afterRow.cost.rub - 40 * rateCny) < 0.01, afterRow && (afterRow.cost.rub + ' ₽'));
+    check('D: товар с выключенной отправкой не помечен «к отправке»',
+      !!afterRow && afterRow.allowSend === false && afterRow.needSend === false && afterRow.tag === 'распродажа');
+    check('D: предупреждение объясняет, почему товар не уйдёт в WB',
+      !!afterRow && (afterRow.warnings || []).some((w) => /Отправка в WB отключена/.test(w)));
+
+    // ── валюта без курса: явная ошибка, а не тихий расчёт 1:1 ──
+    // сохраняем только валюту и пересчитываем: полный commitEdits здесь не нужен,
+    // а лишняя перерисовка таблицы в jsdom дорога
+    await window.S.saveCosts({ [dNm]: { currency: 'GEL' } });
+    const resGel = await window.API.invoke('repricer:calc', { full: true });
+    rpD.results = resGel.results || [];
+    rpD.summary = resGel.summary;
+    await wait(600);
+    const gelRow = rpD.results.find((r) => String(r.nmID) === dNm);
+    check('D: валюта без курса даёт явную ошибку',
+      !!gelRow && !!gelRow.cost.error && gelRow.cost.error.includes('не задан курс GEL'),
+      gelRow && String(gelRow.cost.error));
+    check('D: ошибка курса видна в проверке строки',
+      !!gelRow && rpD.rowErrors(gelRow).some((x) => /не задан курс/.test(x)));
+    // ячейку проверяем по рендеру, а не по DOM: лишний прогон по 100 строкам
+    // в jsdom дорог, а результат один и тот же — именно этот HTML попадает в таблицу
+    const costCellGel = rpD.costCellHtml(gelRow);
+    check('D: ошибка курса показана в ячейке себестоимости',
+      costCellGel.includes('не задан курс GEL') && costCellGel.includes('rp-validation'),
+      costCellGel.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80));
+
+    // ── возвращаем товар в исходное состояние ──
+    await window.S.saveCosts({ [dNm]: null });
+    await window.API.invoke('repricer:item-configs:save', { items: { [dNm]: null } });
+    rpD.rstate = await window.API.invoke('repricer:state');
+    const resD = await window.API.invoke('repricer:calc', { full: true });
+    rpD.results = resD.results || [];
+    rpD.summary = resD.summary;
+    await rpD.loadState();
+    rpD.page = 0;
+    await wait(500);
+    const cleanRow = rpD.results.find((r) => String(r.nmID) === dNm);
+    check('D: правки снимаются — товар снова отправляется, себестоимость в рублях',
+      !!cleanRow && cleanRow.allowSend === true && !cleanRow.cost.error && cleanRow.cost.currency === 'RUB',
+      cleanRow && (cleanRow.cost.currency + ' / allowSend=' + cleanRow.allowSend));
+  }
+
+  // ── выгрузка повторяет блоки колонок ──
+  let exD = rpD.buildExport(rpD.filteredResults());
+  check('D: выгрузка собрана из блоков колонок',
+    exD.headers.length >= 60 && exD.headers.some((h) => h.indexOf('Артикул · ') === 0) &&
+      exD.headers.some((h) => h.indexOf('Себестоимость · ') === 0) &&
+      exD.headers.some((h) => h.indexOf('Мин цена (в акции) · ') === 0) &&
+      exD.headers.some((h) => h.indexOf('Цена (вне акции) · ') === 0),
+    'колонок ' + exD.headers.length);
+  check('D: в выгрузке есть валюта, курс и рублёвая себестоимость',
+    exD.headers.includes('Себестоимость · Валюта себестоимости') &&
+      exD.headers.includes('Себестоимость · Курс валюты') &&
+      exD.headers.includes('Себестоимость · Себестоимость, ₽'));
+  check('D: в выгрузке есть флаг отправки, метка и баркод',
+    exD.headers.includes('Артикул · Отправка в WB') && exD.headers.includes('Артикул · Метка') &&
+      exD.headers.includes('Артикул · Баркод'));
+  check('D: в выгрузке есть расходы на единицу и цена безубыточности',
+    exD.headers.includes('Себестоимость · Всего расходов, ₽') &&
+      exD.headers.includes('Себестоимость · Цена безубыточности, ₽'));
+  check('D: строки выгрузки совпадают по ширине с заголовками',
+    exD.rows.length > 0 && exD.rows.every((row) => row.length === exD.headers.length),
+    'строк ' + exD.rows.length);
+  check('D: в выгрузке заполнены расходы и порог акции',
+    exD.rows[0][exD.headers.indexOf('Себестоимость · Всего расходов, ₽')] !== '' &&
+      exD.headers.includes('Мин цена (в акции) · Порог скидки акции, %'));
+  exD = null;
+
+  // ── окно выбора колонок: чекбоксы блоков ──
+  rpD.openColumnsPicker();
+  await wait(500);
+  let cpD = (function () { const bs = doc.querySelectorAll('#modal-root .modal-backdrop'); return bs.length ? bs[bs.length - 1] : null; })();
+  check('D: в окне выбора колонок есть чекбоксы блоков',
+    !!cpD && cpD.querySelectorAll('[data-block-toggle]').length === rpD.GROUP_ORDER.length,
+    cpD ? 'блоков ' + cpD.querySelectorAll('[data-block-toggle]').length : 'окно не открылось');
+  if (cpD) {
+    const bt = cpD.querySelector('[data-block-toggle="comp"]');
+    bt.checked = false;
+    bt.onchange();
+    check('D: выключение блока снимает все его колонки',
+      Array.from(cpD.querySelectorAll('[data-col][data-block="comp"]')).every((cb) => cb.disabled || !cb.checked));
+    bt.checked = true;
+    bt.onchange();
+    check('D: включение блока возвращает его колонки',
+      Array.from(cpD.querySelectorAll('[data-col][data-block="comp"]')).every((cb) => cb.checked));
+    const cD = cpD.querySelector('.modal-close');
+    if (cD) cD.click();
+    await wait(250);
+  }
+
+  // ── массовая панель: отправка и метка сразу группе товаров ──
+  if (dRow) {
+    rpD.selection.add(dRow.nmID);
+    rpD.renderBulk();
+    await wait(300);
+    let bulkD = doc.querySelector('#rp-bulk');
+    check('D: массовая панель умеет включать/выключать отправку и задавать метку',
+      !!bulkD && !!bulkD.querySelector('#rb-allowsend') && !!bulkD.querySelector('#rb-tag'));
+    rpD.selection.clear();
+    rpD.renderBulk();
+    bulkD = null;
+  }
+
+  // ── курсы валют и название магазина на вкладке «Параметры» ──
+  rpD.tab = 'params';
+  rpD.draw();
+  await wait(1000);
+  check('D: курсы валют и название магазина правятся на вкладке «Параметры»',
+    !!doc.querySelector('#pm-rates [data-rate="CNY"]') && !!doc.querySelector('#pm-shopname'));
+  let cnyInp = doc.querySelector('#pm-rates [data-rate="CNY"]');
+  if (cnyInp) {
+    cnyInp.value = '13';
+    doc.querySelector('#pm-shopname').value = 'Магазин Тест';
+    doc.querySelector('#pm-rate-code').value = 'gel';
+    doc.querySelector('#pm-rate-add').click();
+    await wait(250);
+    check('D: своя валюта добавляется в список курсов', !!doc.querySelector('#pm-rates [data-rate="GEL"]'));
+    let gelInpD = doc.querySelector('#pm-rates [data-rate="GEL"]');
+    if (gelInpD) { gelInpD.value = '40'; gelInpD = null; }
+    doc.querySelector('#pm-save').click();
+    await wait(1500);
+    const setD = await window.API.invoke('settings:get');
+    check('D: курс и название магазина сохраняются в настройках',
+      setD.costRates.CNY === 13 && setD.costRates.GEL === 40 && setD.shopName === 'Магазин Тест',
+      JSON.stringify({ CNY: setD.costRates.CNY, GEL: setD.costRates.GEL, name: setD.shopName }));
+    check('D: состояние приложения подхватывает курсы без перезапуска',
+      Number((window.S.state.settings.costRates || {}).CNY) === 13);
+    rpD.tab = 'prices';
+    rpD.draw();
+    await wait(1400);
+    check('D: название магазина видно в шапке репрайсера',
+      !!doc.querySelector('.rp-shopname') && doc.querySelector('.rp-shopname').textContent.includes('Магазин Тест'),
+      doc.querySelector('.rp-shopname') ? doc.querySelector('.rp-shopname').textContent : 'нет элемента');
+    // возвращаем настройки, чтобы не влиять на остальные проверки;
+    // discardEdits сам перерисует таблицу — второй раз этого делать не нужно
+    await window.API.invoke('settings:save', {
+      costRates: { CNY: 12.5, USD: 92, EUR: 100, TRY: 2.7, KZT: 0.18, BYN: 28, UZS: 0.0072, AED: 25, PLN: 23 },
+      shopName: ''
+    });
+    if (window.S.state.settings) window.S.state.settings.shopName = '';
+  }
+  rpD.tab = 'prices';
+  rpD.discardEdits();
+  await wait(800);
+
+  // отпускаем DOM прошлых отрисовок и выгружаем мусор до тяжёлых разделов прогона
+  headRowsD = null; groupThs = null; dTr = null; cpD = null; cnyInp = null; exD = null;
+  if (global.gc) global.gc();
 
   // валидация строки: товар без себестоимости не должен предлагаться к отправке
   const rp = window.Views.repricer;
@@ -1954,11 +2235,13 @@ async function run() {
     rp.discardEdits();
   }
   const savedPage = rp.page;
-  check('репрайсер: размер страницы — 200 строк', productionRepricerPageSize === 200);
+  check('репрайсер: размер страницы — 100 строк (колонок стало больше)', productionRepricerPageSize === 100);
   rp.PAGE_SIZE = productionRepricerPageSize;
-  rp.page = 24;
+  rp.page = 49;
   const syntheticPage = rp.pageOf(Array.from({ length: 5000 }, (_, i) => ({ nmID: i + 1 })));
-  check('репрайсер: 5000 товаров режутся на страницы по 200', syntheticPage.length === 200 && syntheticPage[0].nmID === 4801 && rp.pageInfo.to === 5000);
+  check('репрайсер: 5000 товаров режутся на страницы по 100',
+    syntheticPage.length === 100 && syntheticPage[0].nmID === 4901 && rp.pageInfo.to === 5000,
+    'последняя страница: ' + (syntheticPage[0] || {}).nmID + ' … ' + rp.pageInfo.to);
   rp.pageOf([]);
   check('репрайсер: пустая выборка показывает 0 - 0 из 0', rp.pageInfo.from === 0 && rp.pageInfo.to === 0);
   rp.PAGE_SIZE = 40;
@@ -2242,13 +2525,17 @@ async function run() {
   await wait(200);
 
   // ── возвращаем штатный размер товарной страницы и проверяем настоящую отрисовку ──
+  // перед отрисовкой полного размера страницы (100 строк × 25 колонок) явно выпускаем мусор:
+  // jsdom держит DOM в десятки раз дороже браузера, и запас по памяти тут важен
+  if (global.gc) global.gc();
   window.Views.repricer.PAGE_SIZE = productionRepricerPageSize;
-  window.App.go('repricer');
-  await wait(1600);
+  // страницу сбрасываем ДО перехода: отрисовка раздела сама рисует таблицу,
+  // а второй прогон по тем же строкам в jsdom удваивает пик памяти
   window.Views.repricer.page = 0;
-  window.Views.repricer.renderResults();
-  check('репрайсер: настоящий DOM страницы содержит до 200 товаров',
-    doc.querySelectorAll('#rp-grid tbody tr').length === Math.min(200, window.Views.repricer.filteredResults().length));
+  window.App.go('repricer');
+  await wait(1800);
+  check('репрайсер: настоящий DOM страницы содержит до 100 товаров',
+    doc.querySelectorAll('#rp-grid tbody tr').length === Math.min(100, window.Views.repricer.filteredResults().length));
 
   // ── веб-версия: CSRF-заголовок и видимая кнопка «Выйти» ──
   // В Electron и в dev-сервере tools/serve.js сессии нет — значит и кнопки выхода быть не должно.

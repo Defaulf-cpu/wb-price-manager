@@ -825,6 +825,179 @@ async function tPromoJournal() {
 
 // ───────────────────────── запуск ─────────────────────────
 
+
+// ───────────────────────── 12. Задание D: всё на одном экране ─────────────────────────
+
+/**
+ * Задание D: таблица репрайсера собрана из блоков («Артикул», «Инфо о товаре»,
+ * «Текущая цена», «Новая цена», «Мин цена (в акции)», «Цена (вне акции)»,
+ * «Себестоимость и экономика», «Конкуренты»), и всё это правится в одной строке —
+ * без перехода в другие разделы. Проверяем данные, которые рисуют эти блоки:
+ *  • себестоимость можно вести в валюте закупки (курс — из настроек);
+ *  • без курса валюта не считается молча по 1:1 — строка получает явную ошибку;
+ *  • флаг «Отправка в WB» выключает товар: цена считается, но в кабинет не уходит;
+ *  • метка товара живёт в настройках товара и видна в расчёте;
+ *  • баркод берётся из карточки контент-API (поле skus).
+ */
+async function tSingleScreen() {
+  const { WBClient } = require('../../electron/wb-client');
+
+  // ── баркод из карточки товара ──
+  const card = WBClient.normalizeCard({ nmID: 7, skus: ['1234567890', '0987654321'], vendorCode: 'AB-1' });
+  check('D: баркод берётся из поля skus карточки', card.barcode === '1234567890' && card.skus.length === 2,
+    card.barcode + ' / ' + card.skus.length);
+  const noSkus = WBClient.normalizeCard({ nmID: 8 });
+  check('D: без баркода поле пустое, а не выдуманное', noSkus.barcode === '' && noSkus.skus.length === 0);
+
+  const st = makeStand();
+  await st.service.handlers['data:refresh-all']({ facts: false });
+  const goods = await st.service.handlers['wb:goods']({});
+  const first = (goods.items || [])[0];
+  const nm = String(first.nmID);
+  check('D: стенд с демо-товарами поднят', !!first, 'nmID=' + nm);
+
+  const row = (calc) => (calc.results || []).find((x) => String(x.nmID) === nm);
+
+  // ── блоки результата: данные для колонок одного экрана ──
+  let calc = await st.service.handlers['repricer:calc']({ full: true });
+  let r = row(calc);
+  check('D: расчёт отдаёт блок «Себестоимость»', !!r.cost && typeof r.cost.rub === 'number' && !!r.cost.currency,
+    r.cost && (r.cost.currency + ' ' + r.cost.rub));
+  check('D: в блоке есть слагаемые расходов на единицу',
+    !!r.cost.next && r.cost.next.totalCosts > 0 && typeof r.cost.next.commission === 'number',
+    r.cost.next && ('всего ' + r.cost.next.totalCosts));
+  check('D: считается цена безубыточности', !!r.cost.next && r.cost.next.breakEvenPrice > 0,
+    r.cost.next && String(r.cost.next.breakEvenPrice));
+  check('D: блок СПП/кошелька совпадает с ценой покупателю',
+    !!r.wallet && Math.abs(r.wallet.nextBuyer - r.proposed.buyerPrice) < 0.01,
+    r.wallet && (r.wallet.nextBuyer + ' / ' + r.proposed.buyerPrice));
+  check('D: блок порогов говорит, чем задан пол',
+    !!r.floor && (r.floor.by === 'margin' || r.floor.by === 'corridor') && r.floor.min > 0,
+    r.floor && (r.floor.by + ' ' + r.floor.min));
+  check('D: блок акций отдаёт порог скидки и решение',
+    !!r.promo && typeof r.promo.discountFloor === 'number' && 'chosen' in r.promo);
+  check('D: флаг отправки по умолчанию включён, метка пустая',
+    r.allowSend === true && r.tag === '' && typeof r.barcode === 'string');
+
+  // ── курсы валют и название магазина: настройки приложения ──
+  const set0 = await st.service.handlers['settings:get']();
+  check('D: в настройках есть курсы валют и название магазина',
+    !!set0.costRates && typeof set0.costRates === 'object' && 'shopName' in set0,
+    'валют с курсом: ' + Object.keys(set0.costRates || {}).length);
+  const rates = await st.service.handlers['costs:rates']();
+  check('D: costs:rates отдаёт список валют с ₽ первым',
+    Array.isArray(rates.currencies) && rates.currencies[0] === 'RUB' && rates.currencies.includes('CNY'));
+
+  await st.service.handlers['settings:save']({ costRates: { CNY: 12 }, shopName: 'Тестовый магазин' });
+  const set1 = await st.service.handlers['settings:get']();
+  check('D: курс и название магазина сохраняются',
+    set1.costRates.CNY === 12 && set1.shopName === 'Тестовый магазин', set1.shopName);
+
+  // ── себестоимость в валюте закупки ──
+  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 25, currency: 'CNY' } } });
+  const ov = await st.service.handlers['costs:overrides']();
+  check('D: переопределения пересчитывают валюту в рубли',
+    ov.overrides[nm].costPriceRub === 300 && ov.overrides[nm].costRate === 12 && ov.overrides[nm].costEntered === 25,
+    ov.overrides[nm].costPriceRub + ' ₽ из 25 CNY');
+  const savedCosts = await st.service.handlers['costs:get']();
+  check('D: сохранённое значение остаётся в валюте ввода',
+    savedCosts.items[nm].costPriceRub === 25 && savedCosts.items[nm].currency === 'CNY');
+
+  calc = await st.service.handlers['repricer:calc']({ full: true });
+  r = row(calc);
+  check('D: в расчёте себестоимость — в рублях, с валютой и курсом',
+    r.cost.rub === 300 && r.cost.currency === 'CNY' && r.cost.rate === 12 && r.cost.entered === 25,
+    r.cost.rub + ' ₽');
+  check('D: прибыль считается от рублёвой себестоимости',
+    !!r.cost.next && r.cost.next.cogs === 300, r.cost.next && String(r.cost.next.cogs));
+
+  // ── курс не задан: явная ошибка вместо тихого расчёта 1:1 ──
+  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 25, currency: 'GEL' } } });
+  calc = await st.service.handlers['repricer:calc']({ full: true });
+  r = row(calc);
+  check('D: без курса валюта даёт явную ошибку',
+    !!r.cost.error && /не задан курс GEL/.test(r.cost.error) && r.cost.rub === 0, String(r.cost.error));
+  check('D: ошибка видна в предупреждениях строки',
+    (r.warnings || []).some((w) => /не задан курс GEL/.test(w)));
+  let prop = await st.service.handlers['repricer:proposal']();
+  let blocked = (prop.blocked || []).find((b) => String(b.nmID) === nm);
+  check('D: строка без курса не попадает в предложение',
+    !!blocked && blocked.reasons.some((x) => /не задан курс GEL/.test(x)),
+    blocked && blocked.reasons.join('; '));
+
+  // курс задали — ошибка ушла, строка снова в предложении
+  await st.service.handlers['settings:save']({ costRates: { CNY: 12, GEL: 40 } });
+  calc = await st.service.handlers['repricer:calc']({ full: true });
+  r = row(calc);
+  check('D: после указания курса ошибка снимается', !r.cost.error && r.cost.rub === 1000, r.cost.rub + ' ₽');
+  prop = await st.service.handlers['repricer:proposal']();
+  check('D: после указания курса строка снова в предложении',
+    !(prop.blocked || []).some((b) => String(b.nmID) === nm) &&
+      (prop.items || []).some((x) => String(x.nmID) === nm));
+
+  // ── флаг «Отправка в WB» и метка товара ──
+  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 250, currency: 'RUB' } } });
+  await st.service.handlers['repricer:item-configs:save']({ items: { [nm]: { allowSend: false, tag: 'распродажа' } } });
+  calc = await st.service.handlers['repricer:calc']({ full: true });
+  r = row(calc);
+  check('D: метка и флаг товара видны в расчёте',
+    r.allowSend === false && r.tag === 'распродажа', r.tag);
+  check('D: с выключенной отправкой строка не помечена «к отправке»', r.needSend === false);
+  check('D: предупреждение объясняет, почему товар не уйдёт',
+    (r.warnings || []).some((w) => /Отправка в WB отключена/.test(w)));
+  prop = await st.service.handlers['repricer:proposal']();
+  blocked = (prop.blocked || []).find((b) => String(b.nmID) === nm);
+  check('D: товар с выключенной отправкой помечен в предложении',
+    !!blocked && blocked.notSending === true && /отправка в WB отключена/.test(blocked.reasons.join(' ')),
+    blocked && blocked.reasons.join('; '));
+
+  // товар с выключенной отправкой вообще не попадает в список на отправку
+  const before = (prop.items || []).length;
+  check('D: выключенного товара нет в предложении на отправку',
+    before > 0 && !(prop.items || []).some((x) => String(x.nmID) === nm), 'позиций: ' + before);
+  const partial = await st.service.handlers['repricer:proposal-send']({ source: 'test-d' });
+  check('D: остальные товары отправляются как обычно',
+    partial.ok === true && partial.sent > 0, 'sent=' + partial.sent);
+
+  // ── флаг выключили ПОСЛЕ расчёта: отправка обязана это учесть ──
+  const st2 = makeStand();
+  await st2.service.handlers['data:refresh-all']({ facts: false });
+  await st2.service.handlers['repricer:calc']({ full: true });
+  const prop2 = await st2.service.handlers['repricer:proposal']();
+  const total2 = (prop2.items || []).length;
+  check('D: предложение собрано до выключения флага', total2 > 1, 'позиций: ' + total2);
+  const oneNm = String((prop2.items || [])[0].nmID);
+  await st2.service.handlers['repricer:item-configs:save']({ items: { [oneNm]: { allowSend: false } } });
+  const skipped = await st2.service.handlers['repricer:proposal-send']({ source: 'test-d' });
+  check('D: выключенный после расчёта товар в WB не уходит',
+    skipped.ok === true && skipped.skippedDisabled === 1 && skipped.sent === total2 - 1,
+    'sent=' + skipped.sent + ', пропущено=' + skipped.skippedDisabled);
+
+  // ── все товары с выключенной отправкой: отправка останавливается с понятной причиной ──
+  const st3 = makeStand();
+  await st3.service.handlers['data:refresh-all']({ facts: false });
+  await st3.service.handlers['repricer:calc']({ full: true });
+  const prop3 = await st3.service.handlers['repricer:proposal']();
+  const allOff = {};
+  (prop3.items || []).forEach((x) => { allOff[String(x.nmID)] = { allowSend: false }; });
+  await st3.service.handlers['repricer:item-configs:save']({ items: allOff });
+  let err = null;
+  try { await st3.service.handlers['repricer:proposal-send']({ source: 'test-d' }); }
+  catch (e) { err = e; }
+  check('D: при выключенной отправке у всех товаров отправка не проходит',
+    !!err && err.code === 'SEND_DISABLED', err && (err.code + ': ' + err.message));
+  check('D: причина объясняет, что делать',
+    !!err && /колонк|Отправка/i.test(err.message || ''), err && err.message);
+
+  // ── флаг включили обратно: товар снова уходит в WB ──
+  const backNm = String((prop3.items || [])[0].nmID);
+  await st3.service.handlers['repricer:item-configs:save']({ items: { [backNm]: null } });
+  const back = await st3.service.handlers['repricer:proposal-send']({ source: 'test-d' });
+  check('D: после включения флага отправка снова работает',
+    back.ok === true && back.sent === 1 && back.skippedDisabled === (prop3.items || []).length - 1,
+    'sent=' + back.sent);
+}
+
 (async () => {
   console.log('=== Черновики цен («сохранить без отправки») ===');
   await tDrafts();
@@ -848,6 +1021,8 @@ async function tPromoJournal() {
   await tPromoJournal();
   console.log('\n=== Отстройка от конкурента (%/₽) ===');
   tCompetitorOffset();
+  console.log('\n=== Задание D: всё на одном экране (блоки, валюта, отправка) ===');
+  await tSingleScreen();
 
   fs.rmSync(path.join(ROOT, '.data-test-repricer'), { recursive: true, force: true });
 

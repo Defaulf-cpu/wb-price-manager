@@ -384,3 +384,75 @@ table.grid-table tfoot td {
    базовая цена подставляется из sizes[]. Минимальная — берём худший вариант по марже. */
 .rp-sizeprice { cursor: help; }
 .rp-sizeprice .badge { white-space: nowrap; }
+
+/* ─────────── Задание D: блоки колонок (двухрядная шапка) ───────────
+   Таблица цен репрайсера собрана из блоков, как в Excel-таблице INDEEPA:
+   «Артикул», «Инфо о товаре», «Текущая цена», «Новая цена», «Мин цена (в акции)»,
+   «Цена (вне акции)», «Себестоимость и экономика», «Конкуренты».
+   Верхний ряд шапки — названия блоков (colspan по числу видимых колонок блока),
+   нижний — сами колонки. Оба ряда липкие, поэтому в тридцати колонках
+   заголовки не уезжают при прокрутке. Таблицам без блоков ряд не создаётся. */
+table.grid-table thead tr.rp-head-groups th {
+  top: 0; height: 26px; padding: 3px 10px;
+  text-align: center; text-transform: none; cursor: default;
+  color: var(--text); font-size: 11.5px; font-weight: 700; letter-spacing: .03em;
+  background: var(--bg-3); border-bottom: 1px solid var(--line-2);
+  border-left: 1px solid var(--line-2);
+}
+table.grid-table thead tr.rp-head-groups th.rp-group-empty { border-left: 0; background: var(--bg-3); }
+table.grid-table thead tr.rp-head-groups th.rp-check { border-left: 0; }
+/* ряд колонок прилипает под рядом блоков (26px — высота ряда блоков) */
+table.grid-table thead tr.rp-head-groups + tr th { top: 26px; }
+
+/* ─────────── Задание D: закреплённые колонки ───────────
+   Таблица широкая и прокручивается по горизонтали, поэтому чекбокс и колонка
+   «Товар» закреплены слева: всегда видно, к какому товару относится строка.
+   Фон у закреплённых ячеек свой — иначе под ними просвечивает прокрученный контент. */
+table.grid-table.rp-sticky-first tbody td:nth-child(1),
+table.grid-table.rp-sticky-first tbody td:nth-child(2) {
+  position: sticky; z-index: 2; background: var(--bg-2);
+}
+table.grid-table.rp-sticky-first tbody td:nth-child(1) { left: 0; }
+table.grid-table.rp-sticky-first tbody td:nth-child(2) { left: 34px; box-shadow: 1px 0 0 var(--line); }
+table.grid-table.rp-sticky-first tbody tr:hover td:nth-child(1),
+table.grid-table.rp-sticky-first tbody tr:hover td:nth-child(2) { background: #1a202b; }
+table.grid-table.rp-sticky-first tbody tr.selected td:nth-child(1),
+table.grid-table.rp-sticky-first tbody tr.selected td:nth-child(2) { background: #251b34; }
+table.grid-table.rp-sticky-first tbody tr.row-dirty td:nth-child(1),
+table.grid-table.rp-sticky-first tbody tr.row-dirty td:nth-child(2) { background: #2a2115; }
+table.grid-table.rp-sticky-first thead th.rp-check { position: sticky; left: 0; z-index: 5; }
+table.grid-table.rp-sticky-first thead tr:nth-child(2) th:nth-child(1),
+table.grid-table.rp-sticky-first thead tr:only-child th:nth-child(2) {
+  position: sticky; left: 34px; z-index: 5; box-shadow: 1px 0 0 var(--line-2);
+}
+table.grid-table.rp-sticky-first tfoot td:nth-child(1),
+table.grid-table.rp-sticky-first tfoot td:nth-child(2) { position: sticky; z-index: 3; background: var(--bg-3); }
+table.grid-table.rp-sticky-first tfoot td:nth-child(1) { left: 0; }
+table.grid-table.rp-sticky-first tfoot td:nth-child(2) { left: 34px; }
+
+/* ─────────── Задание D: окно выбора колонок по блокам ─────────── */
+.colblocks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.colblock { border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); }
+.colblock > .checkline { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.colblock .checkline { margin: 0; }
+@media (max-width: 900px) { .colblocks { grid-template-columns: 1fr; } }
+
+/* ─────────── Задание D: ячейки новых колонок репрайсера ─────────── */
+#rp-grid .rp-tag { width: 100px; padding: 3px 6px; font-size: 12px; border-radius: 6px; }
+#rp-grid .rp-sendline { white-space: nowrap; }
+#rp-grid .rp-cost, #rp-grid .rp-costcur { padding: 3px 6px; font-size: 12px; border-radius: 6px; }
+#rp-grid .rp-cost-hint { white-space: normal; max-width: 190px; line-height: 1.3; }
+#rp-grid .rp-cost-hint.neg { color: var(--danger); }
+#rp-grid .grid-table td { min-width: 92px; }
+#rp-grid .grid-table td.rp-product { min-width: 250px; }
+.rp-shopname {
+  margin-left: 10px; padding: 3px 10px; border: 1px solid rgba(160, 60, 255, .35);
+  border-radius: 999px; background: var(--accent-soft); color: #d6b8ff;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+
+/* Задание D: ячейки-блоки пишутся в одну-две строки и переносятся — иначе широкая
+   таблица с тридцатью колонками растягивается на несколько экранов в ширину. */
+#rp-grid .rp-wrap { white-space: normal; max-width: 230px; line-height: 1.35; word-break: break-word; }
+#rp-grid .rp-wrap.neg { color: var(--danger); }
+#rp-grid .rp-wrap .badge { white-space: nowrap; }

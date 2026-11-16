@@ -88,6 +88,23 @@ function createService(store, emit, electron) {
     return (store.loadCosts() || {}).items || {};
   }
 
+  /** Валюты, для которых можно задать курс себестоимости (список для интерфейса). */
+  const COST_CURRENCIES = ['RUB', 'CNY', 'USD', 'EUR', 'TRY', 'KZT', 'BYN', 'UZS', 'AED', 'PLN'];
+
+  /**
+   * Курс валюты себестоимости (задание D): сколько ₽ стоит 1 единица валюты.
+   * Курсы живут в настройках (`settings.costRates`) и правятся на вкладке «Параметры»
+   * репрайсера — рядом с себестоимостью, чтобы не проваливаться в другой раздел.
+   * @returns {number} курс; 1 для ₽; 0 — если курс для валюты не задан
+   */
+  function costRateOf(currency) {
+    const cur = String(currency || '').trim().toUpperCase();
+    if (!cur || cur === 'RUB') return 1;
+    const rates = getSettings().costRates || {};
+    const r = Number(rates[cur]);
+    return Number.isFinite(r) && r > 0 ? r : 0;
+  }
+
   function overridesFor(goods) {
     const costs = costsMap();
     const out = {};
@@ -96,6 +113,8 @@ function createService(store, emit, electron) {
       const c = costs[key] || {};
       out[key] = {
         costPriceRub: c.costPriceRub,
+        // валюта, в которой введена себестоимость (задание D): ₽ — по умолчанию
+        currency: c.currency ? String(c.currency).trim().toUpperCase() : undefined,
         commissionPct: c.commissionPct,
         logisticsRub: c.logisticsRub,
         acceptRub: c.acceptRub,
@@ -115,6 +134,28 @@ function createService(store, emit, electron) {
         updatedAt: c.updatedAt,
         source: c.costPriceRub !== undefined && c.costPriceRub !== null && c.costPriceRub !== '' ? 'user' : 'none'
       };
+      /**
+       * Себестоимость в валюте закупки пересчитываем в рубли: в расчёты и в WB
+       * всегда уходит рублёвое значение, а исходная валюта, курс и введённое
+       * число остаются рядом — их показывает колонка «Себестоимость».
+       * Если курс валюты не задан, себестоимость обнуляется и строка получает
+       * явную ошибку вместо тихого расчёта по курсу 1:1.
+       */
+      const o = out[key];
+      const cur = o.currency;
+      if (cur && cur !== 'RUB') {
+        const rate = costRateOf(cur);
+        o.costCurrency = cur;
+        o.costRate = rate;
+        o.costEntered = o.costPriceRub;
+        if (o.costPriceRub !== undefined && o.costPriceRub !== null && o.costPriceRub !== '') {
+          if (rate > 0) o.costPriceRub = Math.round(Number(o.costPriceRub) * rate * 100) / 100;
+          else {
+            o.costPriceRub = 0;
+            o.costError = 'не задан курс ' + cur + ' — укажите его на вкладке «Параметры»';
+          }
+        }
+      }
     }
     return out;
   }
@@ -1635,6 +1676,16 @@ function createService(store, emit, electron) {
       return { ok: true, config: repricerCfg(), scheduler: schedState };
     },
 
+    /**
+     * Курсы валют себестоимости (задание D). Отдельный канал не нужен для сохранения —
+     * курсы правятся через `settings:save {costRates: {CNY: 13}}`, а этот канал отдаёт
+     * текущие курсы и список валют, чтобы интерфейс не хардкодил справочник.
+     */
+    'costs:rates': async () => {
+      const s = getSettings();
+      return { rates: s.costRates || {}, currencies: COST_CURRENCIES, currency: s.currency || 'RUB' };
+    },
+
     'repricer:item-configs:get': async () => store.loadItemConfigs(),
 
     'repricer:item-configs:save': async (payload) => {
@@ -2787,6 +2838,11 @@ function createService(store, emit, electron) {
     const monthDays = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
     const dayOfMonth = Math.min(d.getDate(), monthDays);
     const settings = getSettings();
+    // баркоды — из кэша карточек (контент-API), если он уже загружен
+    const barcodeByNm = {};
+    (Array.isArray(cache.cards) ? cache.cards : []).forEach((c) => {
+      if (c && c.nmID) barcodeByNm[String(c.nmID)] = String(c.barcode || '');
+    });
 
     return (g.items || []).map((item) => {
       const key = String(item.nmID);
@@ -2834,6 +2890,22 @@ function createService(store, emit, electron) {
           promos: pi ? promosForItem(item, pi) : [],
           promoHold: promoHoldFor(key, exitsPend, promoIndexNow),
           rrp: merged.rrp,
+          // ── данные для блоков таблицы репрайсера (задание D) ──
+          // баркод берём только из уже загруженных карточек: отдельный запрос к WB
+          // ради одной колонки ломал бы лимиты контент-API
+          barcode: barcodeByNm[key] || '',
+          categoryName: item.categoryName || '',
+          volumeLiters: item.volumeLiters,
+          sizesCount: item.sizesCount || 0,
+          brand: item.brand || '',
+          plannedPrice: Number(item.plannedPrice) > 0 ? Number(item.plannedPrice) : undefined,
+          costCurrency: ov.costCurrency || String(ov.currency || item.currency || 'RUB'),
+          costRate: Number(ov.costRate || 1),
+          costEntered: ov.costEntered !== undefined ? ov.costEntered : p.costPriceRub,
+          costError: ov.costError || null,
+          // «Отправка в WB» и метка товара — из настроек товара (колонки таблицы)
+          allowSend: merged.allowSend !== false,
+          tag: merged.tag ? String(merged.tag) : '',
           // фактическая средняя СПП по продажам — это и есть «прогнозная СПП» для акций
           sppFactAvg: Number(stats.avgSppPct || 0),
           factCosts: fact || null,
@@ -2949,6 +3021,9 @@ function createService(store, emit, electron) {
       out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
     }
     if (!(Number(r.corridor && r.corridor.min) > 0)) out.push('не задан порог минимальной цены');
+    // себестоимость введена в валюте, курс которой не задан: считать цену нельзя
+    const costErr = (r.cost && r.cost.error) || r.costError;
+    if (costErr) out.push(String(costErr));
     return out;
   }
 
@@ -2964,6 +3039,20 @@ function createService(store, emit, electron) {
     const drafts = store.loadPriceDrafts() || {};
     (results || []).forEach((r) => {
       if (!r || r.error) return;
+      /**
+       * «Отправка в WB» выключена для товара (колонка в таблице репрайсера).
+       * Цена при этом рассчитана и видна — строка попадает в список blocked
+       * с понятной причиной, чтобы продавец видел, почему товар не ушёл.
+       */
+      if (r.allowSend === false) {
+        blocked.push({
+          nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
+          reasons: ['отправка в WB отключена для товара'],
+          sellerPrice: r.proposed && r.proposed.sellerPrice,
+          notSending: true
+        });
+        return;
+      }
       const blockers = proposalBlockers(r, drafts);
       if (blockers.length) {
         blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
@@ -3019,7 +3108,13 @@ function createService(store, emit, electron) {
         deltaProfitMonth: r.delta ? r.delta.profitMonth : 0,
         quarantine: !!r.quarantine,
         warnings: r.warnings || [],
-        limitedBy: r.limitedBy || ''
+        limitedBy: r.limitedBy || '',
+        // флаг и метка дублируются в предложение: отправка проверяет их ещё раз,
+        // даже если предложение сохранено давно, а флаг выключили позже
+        allowSend: r.allowSend !== false,
+        tag: r.tag || '',
+        costCurrency: (r.cost && r.cost.currency) || 'RUB',
+        costRub: (r.cost && r.cost.rub) || 0
       }));
     const saved = store.saveProposals({
       at,
@@ -3093,6 +3188,19 @@ function createService(store, emit, electron) {
     if (!prop.items.length) {
       throw new WBError('Нет сохранённого предложения: сначала нажмите «Пересчитать цены».', { code: 'NO_PROPOSAL' });
     }
+    /**
+     * Товары с выключенным флагом «Отправка в WB» в кабинет не уходят.
+     * Обычно их нет в предложении (фильтр стоит уже при сохранении), но предложение
+     * могло быть сохранено до того, как флаг выключили, — проверяем здесь.
+     */
+    const itemCfgNow = store.loadItemConfigs() || {};
+    const isDisabled = (x) => x.allowSend === false || (itemCfgNow[String(x.nmID)] || {}).allowSend === false;
+    const disabled = prop.items.filter(isDisabled);
+    prop.items = prop.items.filter((x) => !isDisabled(x));
+    const sentList = prop.items;
+    if (!prop.items.length) {
+      throw new WBError('Отправка в WB выключена для всех товаров предложения: включите флаг в колонке «Отправка».', { code: 'SEND_DISABLED' });
+    }
     const v = await validateProposal(prop);
     if (!v.ok) {
       store.saveProposals(Object.assign({}, prop, { phase: 'stale', staleCount: (v.stale || []).length, note: v.reason }));
@@ -3107,15 +3215,18 @@ function createService(store, emit, electron) {
     const res = await sendPrices(results, source || 'repricer-proposal');
     const remaining = ids ? saved.items.filter((x) => !ids.has(String(x.nmID))) : [];
     store.saveProposals(Object.assign({}, prop, {
-      items: remaining.length ? remaining : prop.items,
+      // отправленные позиции и товары с выключенной отправкой остаются в предложении:
+      // по ним видно, что ушло в WB, а что продавец оставил под контролем вручную
+      items: remaining.length ? remaining : sentList.concat(disabled),
       phase: remaining.length ? 'proposed' : 'sent',
       sentAt: new Date().toISOString(),
       staleCount: v.stale.length,
       sendAt: null,
-      note: 'Отправлено ' + (res.sent || 0) + ' цен' + (v.stale.length ? ', пропущено устаревших: ' + v.stale.length : '')
+      note: 'Отправлено ' + (res.sent || 0) + ' цен' + (v.stale.length ? ', пропущено устаревших: ' + v.stale.length : '') +
+        (disabled.length ? ', не отправлено (флаг «Отправка» выключен): ' + disabled.length : '')
     }));
     notify('repricer', { type: 'proposal-sent', count: res.sent || 0, stale: (v.stale || []).length });
-    return Object.assign({ ok: true, stale: v.stale, staleReason: v.reason }, res);
+    return Object.assign({ ok: true, stale: v.stale, staleReason: v.reason, skippedDisabled: disabled.length }, res);
   }
 
   async function sendPrices(results, source) {

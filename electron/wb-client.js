@@ -1226,7 +1226,14 @@ class WBClient {
       volumeLiters: volumeCm3 ? r2(volumeCm3 / 1000) : undefined,
       dimensions: dims,
       photo: photoUrl(photos),
-      photos
+      photos,
+      /**
+       * Баркоды товара: контент-API WB отдаёт их массивом `skus` (первый — основной).
+       * В демо-данных баркодов нет, поэтому поле может быть пустым — интерфейс
+       * показывает прочерк и не выдумывает значение.
+       */
+      skus: (Array.isArray(c.skus) ? c.skus : []).map((x) => String(x)).filter(Boolean),
+      barcode: String((Array.isArray(c.skus) && c.skus[0]) || c.barcode || '')
     };
   }
 }

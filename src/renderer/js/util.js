@@ -8,10 +8,29 @@ window.U = (function () {
     return Number.isFinite(n) ? n : (def === undefined ? 0 : def);
   }
 
+  /**
+   * Форматтеры чисел кешируются по числу знаков.
+   *
+   * `toLocaleString` создаёт объект `Intl.NumberFormat` на КАЖДЫЙ вызов, а в таблице
+   * репрайсера таких вызовов десятки тысяч на одну отрисовку: деньги, проценты и штуки
+   * есть почти в каждой ячейке, а колонок в таблице тридцать. Без кеша прокрутка
+   * широкой таблицы тормозит, а память расходуется на одинаковые форматтеры.
+   */
+  const numFormats = new Map();
+
+  function numOf(digits) {
+    let f = numFormats.get(digits);
+    if (!f) {
+      f = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+      numFormats.set(digits, f);
+    }
+    return f;
+  }
+
   function fmt(n, digits) {
     const d = digits === undefined ? 0 : digits;
     const v = num(n);
-    return v.toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d });
+    return numOf(d).format(v);
   }
 
   function money(n, digits) {

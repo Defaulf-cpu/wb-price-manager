@@ -96,6 +96,7 @@ Views.repricer = {
     const rs = this.rstate;
     const cfg = rs.config;
     const sched = rs.scheduler;
+    const sett2 = S.state.settings || {};
 
     host.innerHTML = `
       <div class="card" style="margin-bottom:12px">
@@ -149,10 +150,11 @@ Views.repricer = {
       <div class="row wrap" style="gap:8px;margin-bottom:10px;align-items:center">
         <div class="seg" id="rp-seg">
           ${[['all', 'Все'], ['tosend', 'Только с изменением'], ['mine', 'Своя цена'], ['errors', 'Только ошибки'],
-             ['loss', 'Только убыточные'], ['warn', 'С предупреждениями']]
+             ['loss', 'Только убыточные'], ['warn', 'С предупреждениями'], ['nosend', 'Не отправлять']]
             .map(([id, label]) => `<button class="seg-btn ${this.itemFilter.seg === id ? 'active' : ''}" data-seg="${id}">${label}</button>`).join('')}
         </div>
         <span class="hint" id="rp-seg-count"></span>
+        ${sett2.shopName ? `<b class="rp-shopname" title="Название магазина — задаётся на вкладке «Параметры»">${U.esc(sett2.shopName)}</b>` : ''}
       </div>
       <div id="rp-grid">${this.results.length ? '' : '<div class="card muted">Нажмите «Пересчитать цены», чтобы репрайсер предложил новые цены по вашим стратегиям.</div>'}</div>
       <div class="bulkbar" id="rp-bulk" style="display:none"></div>
@@ -254,37 +256,10 @@ Views.repricer = {
       const was = btn.textContent;
       btn.textContent = 'Собираем файл…';
       try {
-        const headers = ['нм-код', 'Артикул', 'Название', 'Выгодность', 'Стратегия',
-          'Цена сейчас', 'Скидка сейчас %', 'Цена покупателю сейчас',
-          'Новая цена', 'Новая скидка %', 'Цена покупателю станет',
-          'Изменение ₽', 'Изменение %', 'Прибыль сейчас', 'Прибыль станет',
-          'Маржа сейчас %', 'Маржа станет %', 'Δ прибыли за месяц',
-          'Минимальный порог', 'Базовая цена', 'Остаток', 'Оборачиваемость дн',
-          'Конкурент', 'Цена конкурента', 'План продаж шт', 'Выполнение плана %',
-          'Отправлять', 'Ограничение', 'Ошибки данных', 'Предупреждения'];
-        const rows = list.map((r) => {
-          const pl = (r.context && r.context.plan) || null;
-          const comp = r.context && r.context.competitor;
-          return [
-            r.nmID, r.vendorCode || '', r.title || '',
-            (this.valueStatus(r) || {}).label || '', r.strategyTitle || r.strategy || '',
-            U.num(r.current && r.current.basePrice), U.num(r.current && r.current.discount),
-            U.num(r.current && r.current.buyerPrice),
-            U.num(r.proposed && r.proposed.basePrice), U.num(r.proposed && r.proposed.discount),
-            U.num(r.proposed && r.proposed.buyerPrice),
-            U.num(r.delta && r.delta.abs), U.num(r.delta && r.delta.pct),
-            U.num(r.current && r.current.profit), U.num(r.proposed && r.proposed.profit),
-            U.num(r.current && r.current.marginPct), U.num(r.proposed && r.proposed.marginPct),
-            Math.round(U.num(r.delta && r.delta.profitMonth)),
-            U.num(r.corridor && r.corridor.min), U.num(r.corridor && r.corridor.max),
-            U.num(r.context && r.context.stock),
-            U.num(r.context && r.context.turnoverDays) >= 999 ? '' : Math.round(U.num(r.context && r.context.turnoverDays)),
-            comp ? (comp.name || comp.id || '') : '', U.num(r.context && r.context.competitorPrice),
-            pl ? U.num(pl.planQty) : '', pl ? Math.round(U.num(pl.ratio) * 1000) / 10 : '',
-            r.needSend ? 'да' : 'нет', r.limitedBy || '',
-            this.rowErrors(r).join('; '), (r.warnings || []).join('; ')
-          ];
-        });
+        // выгрузка повторяет блоки колонок экрана (задание D): файл читается так же, как таблица
+        const ex = this.buildExport(list);
+        const headers = ex.headers;
+        const rows = ex.rows;
         const res = await API.invoke('xlsx:build', {
           rows, headers, sheetName: 'Репрайсер',
           fileName: 'repricer-' + new Date().toISOString().slice(0, 10) + '.xlsx'
@@ -300,20 +275,17 @@ Views.repricer = {
     };
 
     $('#rp-export').onclick = () => {
-      if (!this.results.length) return App.toast('Сначала выполните пересчёт', 'warn');
-      const csv = U.toCsv(this.results.map((r) => ({
-        'нм-код': r.nmID, 'Артикул': r.vendorCode, 'Название': r.title, 'Стратегия': r.strategyTitle,
-        'Текущая цена до скидки': r.current.basePrice, 'Текущая скидка %': r.current.discount, 'Текущая цена со скидкой': r.current.sellerPrice,
-        'Новая цена до скидки': r.proposed.basePrice, 'Новая скидка %': r.proposed.discount, 'Новая цена со скидкой': r.proposed.sellerPrice,
-        'Изменение %': r.delta.pct, 'Прибыль сейчас': r.current.profit, 'Прибыль станет': r.proposed.profit,
-        'Маржа сейчас %': r.current.marginPct, 'Маржа станет %': r.proposed.marginPct,
-        'Δ прибыли за месяц': r.delta.profitMonth,
-        'Минимальный порог': r.corridor.min, 'Базовая цена': r.corridor.max,
-        'Отправлять': r.needSend ? 'да' : 'нет', 'Ограничение': r.limitedBy || '',
-        'Предупреждения': (r.warnings || []).join('; '), 'Пояснение': (r.notes || []).join(' | ')
-      })));
+      const list = this.filteredResults();
+      if (!list.length) return App.toast('Сначала выполните пересчёт', 'warn');
+      // те же блоки и колонки, что и в Excel-выгрузке
+      const ex = this.buildExport(list);
+      const csv = U.toCsv(ex.rows.map((row) => {
+        const o = {};
+        ex.headers.forEach((h, i) => { o[h] = row[i]; });
+        return o;
+      }));
       API.exportCsv(`repricer-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.csv`, csv);
-      App.toast('Расчёт выгружен в CSV', 'ok');
+      App.toast('Расчёт выгружен в CSV: ' + U.fmt(list.length) + ' строк, ' + ex.headers.length + ' колонок', 'ok', 6000);
     };
 
     this.drawTiles();
@@ -502,39 +474,84 @@ Views.repricer = {
    * По умолчанию показаны самые нужные, плотные — скрыты.
    */
   COLUMNS: [
-    { id: 'item', title: 'Товар', always: true },
-    { id: 'value', title: 'Выгодность' },
-    { id: 'strategy', title: 'Стратегия' },
-    { id: 'floor', title: 'Пол / потолок' },
-    { id: 'priceNow', title: 'Цена на МП', always: true },
-    { id: 'myPrice', title: 'Моя цена', always: true },
-    { id: 'buyerNow', title: 'Цена покупателю сейчас' },
-    { id: 'priceNext', title: 'Новая цена', always: true },
-    { id: 'buyerNext', title: 'Цена покупателю станет' },
-    { id: 'promos', title: 'Акции' },
-    { id: 'plan', title: 'План продаж' },
-    { id: 'delta', title: 'Изменение', always: true },
-    { id: 'profit', title: 'Прибыль/шт' },
-    { id: 'margin', title: 'Маржа' },
-    { id: 'profitMonth', title: 'Δ прибыли/мес' },
-    { id: 'corridor', title: 'Коридор' },
-    { id: 'stock', title: 'Остаток / оборач.' },
-    { id: 'competitor', title: 'Конкурент' },
-    { id: 'offset', title: 'Отстройка от конкурента' },
-    { id: 'status', title: 'Статус' },
-    { id: 'why', title: '', always: true }
+    // ── блок «Артикул» ──
+    { id: 'item', title: 'Товар', always: true, group: 'article' },
+    { id: 'vendorCode', title: 'Артикул продавца', group: 'article' },
+    { id: 'barcode', title: 'Баркод', group: 'article' },
+    { id: 'allowSend', title: 'Отправка в WB', group: 'article' },
+    { id: 'tag', title: 'Метка', group: 'article' },
+    // ── блок «Инфо о товаре» ──
+    { id: 'info', title: 'Инфо о товаре', group: 'info' },
+    { id: 'stock', title: 'Остаток / оборач.', group: 'info' },
+    { id: 'plan', title: 'План продаж', group: 'info' },
+    // ── блок «Текущая цена» ──
+    { id: 'priceNow', title: 'Цена на МП', always: true, group: 'now' },
+    { id: 'myPrice', title: 'Моя цена', always: true, group: 'now' },
+    { id: 'buyerNow', title: 'Цена покупателю сейчас', group: 'now' },
+    { id: 'value', title: 'Выгодность', group: 'now' },
+    // ── блок «Новая цена» ──
+    { id: 'priceNext', title: 'Новая цена', always: true, group: 'next' },
+    { id: 'buyerNext', title: 'Цена покупателю станет', group: 'next' },
+    { id: 'delta', title: 'Изменение', always: true, group: 'next' },
+    { id: 'strategy', title: 'Стратегия', group: 'next' },
+    { id: 'status', title: 'Статус', group: 'next' },
+    { id: 'why', title: '', always: true, group: 'next' },
+    // ── блок «Мин цена (в акции)» ──
+    { id: 'floor', title: 'Мин цена / базовая', group: 'minpromo' },
+    { id: 'promoMin', title: 'Мин цена в акции', group: 'minpromo' },
+    { id: 'promos', title: 'Акции', group: 'minpromo' },
+    // ── блок «Цена (вне акции)» ──
+    { id: 'restore', title: 'Цена вне акции', group: 'outpromo' },
+    { id: 'corridor', title: 'Коридор', group: 'outpromo' },
+    // ── блок «Себестоимость и экономика» ──
+    { id: 'cost', title: 'Себестоимость', group: 'cost' },
+    { id: 'costDetail', title: 'Расходы на единицу', group: 'cost' },
+    { id: 'breakEven', title: 'Безубыточность', group: 'cost' },
+    { id: 'profit', title: 'Прибыль/шт', group: 'cost' },
+    { id: 'margin', title: 'Маржа', group: 'cost' },
+    { id: 'profitMonth', title: 'Δ прибыли/мес', group: 'cost' },
+    // ── блок «Конкуренты» ──
+    { id: 'competitor', title: 'Конкурент', group: 'comp' },
+    { id: 'offset', title: 'Отстройка от конкурента', group: 'comp' }
   ],
   /**
-   * По умолчанию показываем ВСЁ, что нужно для решения: текущие и новые цены (в т.ч. цену
-   * покупателю с СПП), акции, конкурентов с отстройкой, план продаж, пороги, прибыль и маржу.
-   * Скрыт только «Коридор» — он дублирует «Пол / потолок».
+   * Блоки колонок — верхний ряд шапки таблицы (задание D, как в Excel-таблице
+   * репрайсера INDEEPA): «Артикул», «Инфо о товаре», «Текущая цена», «Новая цена»,
+   * «Мин цена (в акции)», «Цена (вне акции)», «Себестоимость и экономика», «Конкуренты».
+   * Блок виден, если видна хотя бы одна его колонка.
    */
-  DEFAULT_COLUMNS: ['item', 'value', 'strategy', 'floor', 'priceNow', 'myPrice', 'buyerNow', 'priceNext',
-    'buyerNext', 'promos', 'plan', 'delta', 'profit', 'margin', 'profitMonth', 'stock',
-    'competitor', 'offset', 'status', 'why'],
-  /** Компактный набор — для быстрого просмотра на небольшом экране. */
-  COMPACT_COLUMNS: ['item', 'value', 'strategy', 'priceNow', 'priceNext', 'delta',
-    'profit', 'margin', 'status', 'why'],
+  GROUP_TITLES: {
+    article: 'Артикул',
+    info: 'Инфо о товаре',
+    now: 'Текущая цена',
+    next: 'Новая цена',
+    minpromo: 'Мин цена (в акции)',
+    outpromo: 'Цена (вне акции)',
+    cost: 'Себестоимость и экономика',
+    comp: 'Конкуренты'
+  },
+  GROUP_ORDER: ['article', 'info', 'now', 'next', 'minpromo', 'outpromo', 'cost', 'comp'],
+  /**
+   * По умолчанию показываем всё, что нужно для решения по цене: блоки «Артикул»,
+   * «Инфо о товаре», «Текущая цена», «Новая цена», «Мин цена (в акции)»,
+   * «Цена (вне акции)», «Себестоимость» и «Конкуренты».
+   * Скрыты колонки, которые дублируют соседей или утяжеляют строку: «Артикул продавца»
+   * (артикул и бренд уже в колонке «Товар»), «Расходы на единицу» и «Безубыточность»
+   * (состав расходов и точка безубыточности есть в кнопке «почему») и «Коридор»
+   * (дублирует пороги).
+   * Все они включаются в один клик в окне «Колонки» — целиком блоком или по отдельности.
+   */
+  DEFAULT_COLUMNS: ['item', 'allowSend', 'tag', 'info', 'stock', 'plan',
+    'priceNow', 'myPrice', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'delta',
+    'strategy', 'status', 'why', 'floor', 'promoMin', 'promos', 'restore',
+    'cost', 'profit', 'margin', 'profitMonth',
+    'competitor', 'offset'],
+  /**
+   * Компактный набор — по одной-две ключевые колонки из каждого блока,
+   * для небольшого экрана. Обязательные колонки всегда внутри.
+   */
+  COMPACT_COLUMNS: ['item', 'allowSend', 'priceNow', 'myPrice', 'value', 'priceNext',
+    'delta', 'strategy', 'floor', 'cost', 'profit', 'margin', 'status', 'why'],
   COLS_KEY: 'wb.repricer.columns',
 
   /** Какие колонки показывать: из localStorage, иначе набор по умолчанию. */
@@ -553,27 +570,47 @@ Views.repricer = {
     } catch (e) { /* приватный режим браузера — не критично */ }
   },
 
-  /** Окно выбора колонок. Обязательные (товар, цены, изменение) выключить нельзя. */
+  /**
+   * Окно выбора колонок: список сгруппирован по блокам, у каждого блока свой
+   * чекбокс «включить весь блок» (задание D — блоки как в таблице INDEEPA).
+   * Обязательные колонки (товар, текущая и новая цена, изменение, «почему»)
+   * выключить нельзя — без них таблица теряет смысл.
+   */
   openColumnsPicker() {
     const vis = this.visibleCols();
     const body = U.el('div');
+    const blocks = this.GROUP_ORDER.map((gid) => {
+      const cols = this.colsOfGroup(gid);
+      const on = cols.some((c) => c.always || vis.has(c.id));
+      const all = cols.every((c) => c.always || vis.has(c.id));
+      return `<div class="card colblock" data-block="${gid}" style="padding:8px 10px">
+          <label class="checkline" style="margin:0 0 4px">
+            <input type="checkbox" data-block-toggle="${gid}" ${on ? 'checked' : ''} ${all ? 'data-all="1"' : ''} />
+            <b>${U.esc(this.GROUP_TITLES[gid] || gid)}</b>
+            <span class="tiny muted">${cols.length} кол.</span>
+          </label>
+          <div class="grid g2" style="gap:4px">
+            ${cols.map((c) => `<label class="checkline tiny" style="margin:0">
+                <input type="checkbox" data-col="${c.id}" data-block="${gid}"
+                  ${c.always ? 'checked disabled' : (vis.has(c.id) ? 'checked' : '')} />
+                ${U.esc(c.title || 'Действия')}${c.always ? ' <span class="muted">всегда</span>' : ''}
+              </label>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
     body.innerHTML = `
-      <div class="alert info">Колонок в таблице много — оставьте только нужные.
-        Товар, текущая цена, новая цена, изменение и кнопка «почему» показаны всегда.</div>
-      <div class="grid g2" style="gap:6px;margin-top:10px">
-        ${this.COLUMNS.map((c) => `<label class="checkline" style="margin:0">
-            <input type="checkbox" data-col="${c.id}" ${c.always ? 'checked disabled' : (vis.has(c.id) ? 'checked' : '')} />
-            ${U.esc(c.title || 'Действия')}${c.always ? ' <span class="tiny muted">всегда</span>' : ''}
-          </label>`).join('')}
-      </div>
+      <div class="alert info">Колонки разложены по блокам — как в таблице репрайсера INDEEPA.
+        Включайте блок целиком или отдельные колонки: товар, текущая цена, новая цена,
+        изменение и кнопка «почему» показаны всегда.</div>
+      <div class="colblocks">${blocks}</div>
       <div class="row wrap" style="gap:8px;margin-top:12px">
-        <button class="btn btn-sm" id="cp-compact">Компактный набор (10 колонок)</button>
+        <button class="btn btn-sm" id="cp-compact">Компактный набор (${this.COMPACT_COLUMNS.length} колонок)</button>
         <button class="btn btn-sm" id="cp-full">Все колонки</button>
         <button class="btn btn-sm btn-ghost" id="cp-default">Как по умолчанию</button>
       </div>`;
     UI.modal({
       title: 'Колонки таблицы цен',
-      size: 'sm',
+      size: 'md',
       content: body,
       buttons: [
         { label: 'Отмена', class: 'btn-ghost' },
@@ -586,27 +623,45 @@ Views.repricer = {
             });
             this.saveVisibleCols(next);
             this.renderResults();
-            App.toast('Показывается колонок: ' + next.size + ' из ' + this.COLUMNS.length, 'ok', 4000);
+            App.toast('Показывается колонок: ' + next.size + ' из ' + this.COLUMNS.length +
+              ', блоков: ' + this.visibleGroupIds().length, 'ok', 5000);
           } }
       ]
     });
-    body.querySelector('#cp-compact').onclick = () => {
+    /** Чекбокс блока включает/выключает все его колонки (обязательные не трогаем). */
+    body.querySelectorAll('[data-block-toggle]').forEach((bt) => {
+      bt.onchange = () => {
+        const gid = bt.getAttribute('data-block-toggle');
+        body.querySelectorAll('[data-col][data-block="' + gid + '"]').forEach((cb) => {
+          if (cb.disabled) return;
+          cb.checked = bt.checked;
+        });
+      };
+    });
+    /** Чекбокс колонки поддерживает состояние чекбокса блока. */
+    body.querySelectorAll('[data-col]').forEach((cb) => {
+      cb.onchange = () => {
+        const gid = cb.getAttribute('data-block');
+        const bt = body.querySelector('[data-block-toggle="' + gid + '"]');
+        if (!bt) return;
+        const list = Array.from(body.querySelectorAll('[data-col][data-block="' + gid + '"]'));
+        bt.checked = list.some((x) => x.checked || x.disabled);
+      };
+    });
+    const applySet = (ids) => {
       body.querySelectorAll('[data-col]').forEach((cb) => {
         const col = this.COLUMNS.find((c) => c.id === cb.getAttribute('data-col'));
         if (col && col.always) return;
-        cb.checked = this.COMPACT_COLUMNS.includes(cb.getAttribute('data-col'));
+        cb.checked = ids.includes(cb.getAttribute('data-col'));
       });
+      body.querySelectorAll('[data-block-toggle]').forEach((bt) => { bt.onchange && bt.onchange(); });
     };
+    body.querySelector('#cp-compact').onclick = () => applySet(this.COMPACT_COLUMNS);
     body.querySelector('#cp-full').onclick = () => {
       body.querySelectorAll('[data-col]').forEach((cb) => { cb.checked = true; });
+      body.querySelectorAll('[data-block-toggle]').forEach((bt) => { bt.checked = true; });
     };
-    body.querySelector('#cp-default').onclick = () => {
-      body.querySelectorAll('[data-col]').forEach((cb) => {
-        const col = this.COLUMNS.find((c) => c.id === cb.getAttribute('data-col'));
-        if (col && col.always) return;
-        cb.checked = this.DEFAULT_COLUMNS.includes(cb.getAttribute('data-col'));
-      });
-    };
+    body.querySelector('#cp-default').onclick = () => applySet(this.DEFAULT_COLUMNS);
   },
 
   /** Оставляет только видимые колонки (обязательные — всегда). */
@@ -614,7 +669,27 @@ Views.repricer = {
     const vis = this.visibleCols();
     return cols.map((c, i) => ({ c, def: this.COLUMNS[i] }))
       .filter((x) => (x.def && x.def.always) || vis.has(x.def ? x.def.id : ''))
-      .map((x) => x.c);
+      .map((x) => {
+        // блок и id колонки берём из справочника: порядок массива обязан совпадать с COLUMNS
+        const c = Object.assign({}, x.c);
+        if (x.def) {
+          if (x.def.group) c.group = x.def.group;
+          if (x.def.id) c.colId = x.def.id;
+        }
+        return c;
+      });
+  },
+
+  /** Колонки справочника, входящие в блок. */
+  colsOfGroup(gid) {
+    return this.COLUMNS.filter((c) => c.group === gid);
+  },
+
+  /** Видимые колонки блока (обязательные считаются видимыми всегда). */
+  visibleGroupIds() {
+    const vis = this.visibleCols();
+    return this.GROUP_ORDER.filter((gid) => this.colsOfGroup(gid)
+      .some((c) => c.always || vis.has(c.id)));
   },
 
   /**
@@ -654,7 +729,286 @@ Views.repricer = {
     // поэтому ругаться «не задана базовая цена» при живом черновике нельзя (как на сервере)
     const draftBase = U.num(((S.state.priceDrafts || {})[String(r.nmID)] || {}).basePrice);
     if (!(base > 0) && !(draftBase > 0)) out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
+    /**
+     * Себестоимость в валюте закупки без курса: сервер не берёт такую строку в
+     * предложение, поэтому клиентская проверка обязана показать ту же причину.
+     */
+    const costErr = (r.cost && r.cost.error) || (S.state.overrides || {})[String(r.nmID)] && (S.state.overrides || {})[String(r.nmID)].costError;
+    if (costErr) out.push(String(costErr));
     return out;
+  },
+
+  /** Валюты, в которых можно вести себестоимость: ₽ + все валюты с курсом из настроек. */
+  costCurrencies() {
+    const rates = (S.state.settings && S.state.settings.costRates) || {};
+    return Array.from(new Set(['RUB'].concat(Object.keys(rates))));
+  },
+
+  /** Курс валюты себестоимости из настроек (задание D): для ₽ всегда 1, 0 — курс не задан. */
+  costRate(cur) {
+    const c = String(cur || 'RUB').trim().toUpperCase();
+    if (!c || c === 'RUB') return 1;
+    const rates = (S.state.settings && S.state.settings.costRates) || {};
+    const r = Number(rates[c]);
+    return Number.isFinite(r) && r > 0 ? r : 0;
+  },
+
+  /** Подпись к цене покупателю: какие скидки (СПП и кошелёк) в ней учтены. */
+  walletNote(r, which) {
+    const w = r.wallet || null;
+    if (!w) return '';
+    const parts = [];
+    if (U.num(w.sppPct) > 0) parts.push('СПП ' + U.pct(w.sppPct, 1));
+    if (U.num(w.walletPct) > 0) parts.push('кошелёк ' + U.pct(w.walletPct, 1));
+    if (!parts.length) return '';
+    const buyer = which === 'next' ? w.nextBuyer : w.nowBuyer;
+    return ` <span title="Цена покупателю ${U.money(buyer)} = цена продавца − ${parts.join(' − ')}">· ${parts.join(' + ')}</span>`;
+  },
+
+  /** Баркод товара: из карточки контент-API (в демо-данных баркодов нет). */
+  barcodeCellHtml(r) {
+    const card = (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
+    const list = Array.isArray(card.skus) && card.skus.length ? card.skus : [];
+    const main = String(r.barcode || card.barcode || list[0] || '');
+    if (!main) return '<span class="muted tiny">нет в карточке</span>';
+    return `<div class="tiny rp-wrap">${U.esc(main)}${list.length > 1 ? ' · баркодов: ' + list.length : ''}</div>`;
+  },
+
+  /** Блок «Инфо о товаре»: категория, объём, число размеров, бренд и признаки товара. */
+  itemInfoCellHtml(r) {
+    const item = this.itemsByNm.get(String(r.nmID)) || {};
+    const card = (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
+    const vol = U.num(item.volumeLiters || card.volumeLiters);
+    const sizes = Math.round(U.num(item.sizesCount || 0));
+    const rows = [];
+    if (item.categoryName || card.subjectName) rows.push(U.esc(item.categoryName || card.subjectName));
+    if (vol > 0) rows.push('объём ' + vol.toFixed(2) + ' л');
+    if (sizes > 0) rows.push('размеров: ' + sizes);
+    const badges = [];
+    if (item.editableSizePrice) badges.push(UI.badge('цены по размерам', 'info'));
+    if (item.inPromo) badges.push(UI.badge('в акции', 'warn'));
+    if (item.isBadTurnover) badges.push(UI.badge('плохая оборач.', 'warn'));
+    return `<div class="tiny rp-wrap">${rows.join(' · ') || '—'}${badges.length ? ' ' + badges.join(' ') : ''}</div>`;
+  },
+
+  /**
+   * Блок «Мин цена (в акции)»: порог скидки, который требует акция, и цена,
+   * которая получится при этом пороге. Ниже этой цены WB сам выведет товар из акции.
+   */
+  promoMinCellHtml(r) {
+    const p = r.promo || {};
+    const actions = p.actions || r.promoActions || [];
+    const floorPct = U.num(p.discountFloor);
+    const base = U.num(r.current && r.current.basePrice);
+    const curDisc = U.num(r.current && r.current.discount);
+    if (!floorPct && !actions.length && !p.inPromo) return '<span class="muted tiny">акций нет</span>';
+    const minSeller = floorPct > 0 && base > 0 ? Math.round(base * (1 - floorPct / 100) * 100) / 100 : 0;
+    const chosen = p.chosen || r.promoChosen || null;
+    const labels = { join: 'входим в акцию', exit: 'выходим из акции', stay: 'остаёмся в акции', warn: 'риск вывода', hold: 'удержание' };
+    const out = [];
+    if (floorPct > 0) out.push(`порог скидки <b>${U.pct(floorPct, 1)}</b> → мин цена ${U.money(minSeller)}`);
+    else out.push('порог скидки не задан');
+    if (curDisc > 0) out.push('сейчас скидка ' + U.pct(curDisc, 1));
+    if (chosen && chosen.type) out.push(UI.badge(labels[chosen.type] || chosen.type, chosen.type === 'warn' ? 'warn' : 'info'));
+    if (U.num(p.plannedPrice) > 0) {
+      out.push('цена WB ' + U.money(p.plannedPrice) +
+        (U.num(p.plannedDiscount) > 0 ? ' (−' + U.pct(p.plannedDiscount, 0) + ')' : ''));
+    }
+    if (actions.length) out.push('акций доступно: ' + actions.length);
+    return `<div class="tiny rp-wrap">${out.join(' · ')}</div>`;
+  },
+
+  /**
+   * Блок «Цена (вне акции)»: базовая цена сейчас и после расчёта, цена восстановления
+   * после выхода из акции и порог удержания скидки (чтобы WB не вернул товар в автоакцию).
+   */
+  restoreCellHtml(r) {
+    const p = r.promo || {};
+    const rp = p.restorePair;
+    const out = [`база ${U.money(r.current && r.current.basePrice)} → <b>${U.money(r.proposed && r.proposed.basePrice)}</b>`];
+    if (rp) out.push(`после акции ${U.money(rp.sellerPrice)} (скидка ${U.pct(rp.discount, 0)})`);
+    else if (!p.inPromo) out.push('товар вне акции');
+    if (U.num(p.holdDiscountMax) > 0) out.push(`удержание: скидка ниже ${U.pct(p.holdDiscountMax, 0)}`);
+    return `<div class="tiny rp-wrap">${out.join(' · ')}</div>`;
+  },
+
+  /**
+   * Блок «Себестоимость»: значение правится прямо в строке, валюта выбирается рядом,
+   * а под полем видно, сколько это в рублях по курсу из настроек. Так себестоимость
+   * живёт на одном экране с ценой — проваливаться в другой раздел не нужно.
+   */
+  costCellHtml(r) {
+    const c = r.cost || {};
+    const nm = String(r.nmID);
+    const pend = (this.pendingEdits.get(nm) || {}).cost || {};
+    const saved = (S.state.costs || {})[nm] || {};
+    const ov = (S.state.overrides || {})[nm] || {};
+    const hasSaved = saved.costPriceRub !== undefined && saved.costPriceRub !== null && saved.costPriceRub !== '';
+    const entered = pend.costPriceRub !== undefined ? U.num(pend.costPriceRub)
+      : (hasSaved ? U.num(saved.costPriceRub)
+        : (c.entered !== null && c.entered !== undefined ? U.num(c.entered) : U.num(ov.costPriceRub)));
+    const cur = String(pend.currency || saved.currency || c.currency || ov.currency || ov.costCurrency || 'RUB').trim().toUpperCase();
+    const rate = this.costRate(cur);
+    const rub = cur === 'RUB' ? entered : (rate > 0 ? Math.round(entered * rate * 100) / 100 : 0);
+    const src = ((r.current || {}).costSources || {}).costPriceRub || '';
+    const srcLabel = { manual: 'вручную', fact: 'факт WB', category: 'справочник', settings: 'настройки', none: 'не задана' }[src] || '';
+    return `<div class="row" style="gap:4px;align-items:center">
+        <input type="number" class="num rp-cost" data-nm="${nm}" min="0" step="0.01" style="width:82px" value="${entered || ''}" placeholder="0" />
+        <select class="rp-costcur" data-nm="${nm}" style="width:76px"
+          title="Валюта закупки: значение пересчитается в рубли по курсу из настроек">
+          ${this.costCurrencies().map((x) => `<option value="${x}" ${x === cur ? 'selected' : ''}>${U.esc(x)}</option>`).join('')}
+        </select>
+      </div>
+      ${c.error ? `<div class="rp-validation neg tiny">ОШИБКА: ${U.esc(c.error)}</div>` : ''}
+      <div class="tiny rp-wrap ${c.error || (cur !== 'RUB' && !(rate > 0)) ? 'neg' : 'muted'}"><span class="rp-cost-hint">${cur !== 'RUB' && !c.error
+        ? (rate > 0 ? '= ' + U.money(rub) + ' по курсу ' + U.num(rate) + ' · ' : 'не задан курс ' + U.esc(cur) + ' · ')
+        : ''}</span><span class="rp-cost-rub">${U.money(rub)}</span> / шт${srcLabel ? ' · ' + U.esc(srcLabel) : ''}</div>`;
+  },
+
+  /** Слагаемые расходов на единицу — из расчёта юнит-экономики по новой цене. */
+  costDetailCellHtml(r) {
+    const e = (r.cost && r.cost.next) || null;
+    if (!e) return '<span class="muted tiny">нет расчёта</span>';
+    const parts = [];
+    const add = (label, v) => { if (U.num(v) > 0) parts.push(label + ' ' + U.money(v)); };
+    add('себест.', e.cogs); add('комиссия', e.commission); add('логистика', e.logistics);
+    add('хранение', e.storage); add('приёмка', e.accept); add('упаковка', e.packaging);
+    add('эквайринг', e.acquiring); add('реклама', e.ad); add('налог', e.tax);
+    return `<div class="tiny rp-wrap">${parts.join(' · ') || 'нет данных'} · <b>всего ${U.money(e.totalCosts)}</b> (${U.pct(e.pctCosts, 1)} от цены)</div>`;
+  },
+
+  /** Точка безубыточности и цена под целевую маржу — сразу виден запас по цене. */
+  breakEvenCellHtml(r) {
+    const e = (r.cost && r.cost.next) || null;
+    if (!e) return '<span class="muted tiny">нет расчёта</span>';
+    const be = U.num(e.breakEvenPrice);
+    const minM = U.num(e.minPriceForMargin);
+    const seller = U.num(r.proposed && r.proposed.sellerPrice);
+    const zapas = be > 0 && seller > 0 ? ((seller - be) / be) * 100 : 0;
+    const out = ['безубыточность <b>' + (be > 0 ? U.money(be) : '—') + '</b>'];
+    if (minM > 0) out.push('под целевую маржу ' + U.money(minM));
+    if (be > 0) out.push(`<span class="${zapas >= 0 ? 'pos' : 'neg'}">запас ${U.signed(Math.round(zapas * 10) / 10, 1)}%</span>`);
+    return `<div class="tiny rp-wrap">${out.join(' · ')}</div>`;
+  },
+
+  /**
+   * Спецификация выгрузки (Excel и CSV): те же блоки колонок, что и на экране
+   * репрайсера (задание D). Каждая строка — [блок, колонка, функция значения].
+   * Заголовок в файле получается вида «Новая цена · Новая скидка, %», поэтому
+   * выгрузку можно читать так же, как таблицу, и фильтровать по блоку.
+   */
+  exportSpec() {
+    const B = {
+      art: 'Артикул', info: 'Инфо о товаре', now: 'Текущая цена', next: 'Новая цена',
+      minp: 'Мин цена (в акции)', outp: 'Цена (вне акции)', cost: 'Себестоимость',
+      comp: 'Конкуренты', svc: 'Служебное'
+    };
+    const item = (r) => (this.itemsByNm || new Map()).get(String(r.nmID)) || {};
+    const card = (r) => (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
+    const cost = (r) => r.cost || {};
+    const econ = (r) => (r.cost && r.cost.next) || {};
+    const promo = (r) => r.promo || {};
+    const plan = (r) => (r.context && r.context.plan) || null;
+    const comp = (r) => (r.context && r.context.competitor) || null;
+    /** Минимальная цена участия в акции: базовая цена минус порог скидки акции. */
+    const promoMinPrice = (r) => {
+      const base = U.num(r.current && r.current.basePrice);
+      const floorPct = U.num(promo(r).discountFloor);
+      return base > 0 && floorPct > 0 ? Math.round(base * (1 - floorPct / 100) * 100) / 100 : '';
+    };
+    const turn = (r) => (U.num(r.context && r.context.turnoverDays) >= 999
+      ? '' : Math.round(U.num(r.context && r.context.turnoverDays)));
+
+    return [
+      [B.art, 'нм-код', (r) => r.nmID],
+      [B.art, 'Артикул продавца', (r) => r.vendorCode || item(r).vendorCode || ''],
+      [B.art, 'Название', (r) => r.title || ''],
+      [B.art, 'Баркод', (r) => r.barcode || card(r).barcode || ''],
+      [B.art, 'Отправка в WB', (r) => (r.allowSend === false ? 'нет' : 'да')],
+      [B.art, 'Метка', (r) => String(this.rowConfig(r.nmID).tag || r.tag || '')],
+      [B.info, 'Категория', (r) => item(r).categoryName || card(r).subjectName || ''],
+      [B.info, 'Бренд', (r) => item(r).brand || card(r).brand || ''],
+      [B.info, 'Объём, л', (r) => U.num(item(r).volumeLiters || card(r).volumeLiters) || ''],
+      [B.info, 'Размеров', (r) => U.num(item(r).sizesCount) || ''],
+      [B.info, 'Остаток, шт', (r) => U.num(r.context && r.context.stock)],
+      [B.info, 'Оборачиваемость, дн', turn],
+      [B.info, 'Продаж в день', (r) => Math.round(U.num(r.context && r.context.salesPerDay) * 100) / 100],
+      [B.info, 'План продаж, шт', (r) => (plan(r) ? U.num(plan(r).planQty) : '')],
+      [B.info, 'Выполнение плана, %', (r) => (plan(r) ? Math.round(U.num(plan(r).ratio) * 1000) / 10 : '')],
+      [B.now, 'Базовая цена сейчас, ₽', (r) => U.num(r.current && r.current.basePrice)],
+      [B.now, 'Скидка сейчас, %', (r) => U.num(r.current && r.current.discount)],
+      [B.now, 'Цена продавцу сейчас, ₽', (r) => U.num(r.current && r.current.sellerPrice)],
+      [B.now, 'Цена покупателю сейчас, ₽', (r) => U.num(r.current && r.current.buyerPrice)],
+      [B.now, 'СПП, %', (r) => U.num((r.wallet || {}).sppPct)],
+      [B.now, 'Скидка кошелька, %', (r) => U.num((r.wallet || {}).walletPct)],
+      [B.now, 'Выгодность', (r) => (this.valueStatus(r) || {}).label || ''],
+      [B.next, 'Новая базовая цена, ₽', (r) => U.num(r.proposed && r.proposed.basePrice)],
+      [B.next, 'Новая скидка, %', (r) => U.num(r.proposed && r.proposed.discount)],
+      [B.next, 'Новая цена продавцу, ₽', (r) => U.num(r.proposed && r.proposed.sellerPrice)],
+      [B.next, 'Новая цена покупателю, ₽', (r) => U.num(r.proposed && r.proposed.buyerPrice)],
+      [B.next, 'Изменение, ₽', (r) => U.num(r.delta && r.delta.abs)],
+      [B.next, 'Изменение, %', (r) => U.num(r.delta && r.delta.pct)],
+      [B.next, 'Стратегия', (r) => r.strategyTitle || r.strategy || ''],
+      [B.next, 'Режим цены', (r) => (r.proposed && r.proposed.priceMode) || ''],
+      [B.minp, 'Порог скидки акции, %', (r) => U.num(promo(r).discountFloor) || ''],
+      [B.minp, 'Мин цена в акции, ₽', promoMinPrice],
+      [B.minp, 'Минимальный порог, ₽', (r) => U.num(r.corridor && r.corridor.min)],
+      [B.minp, 'Порог задан вручную, ₽', (r) => U.num((r.floor || {}).minPriceSet) || ''],
+      [B.minp, 'Чем задан пол', (r) => ((r.floor || {}).by === 'margin' ? 'минимальной маржой' : 'порогом мин. цены')],
+      [B.minp, 'В акции сейчас', (r) => (promo(r).inPromo ? 'да' : 'нет')],
+      [B.minp, 'Решение по акции', (r) => ((promo(r).chosen || {}).type || '')],
+      [B.minp, 'Цена WB в акции, ₽', (r) => U.num(promo(r).plannedPrice) || ''],
+      [B.outp, 'Базовая цена станет, ₽', (r) => U.num(r.proposed && r.proposed.basePrice)],
+      [B.outp, 'Цена после акции, ₽', (r) => U.num((promo(r).restorePair || {}).sellerPrice) || ''],
+      [B.outp, 'Скидка после акции, %', (r) => U.num((promo(r).restorePair || {}).discount) || ''],
+      [B.outp, 'Порог удержания скидки, %', (r) => U.num(promo(r).holdDiscountMax) || ''],
+      [B.outp, 'Потолок коридора, ₽', (r) => U.num(r.corridor && r.corridor.max)],
+      [B.cost, 'Себестоимость (в валюте)', (r) => (cost(r).entered === null || cost(r).entered === undefined ? '' : U.num(cost(r).entered))],
+      [B.cost, 'Валюта себестоимости', (r) => cost(r).currency || 'RUB'],
+      [B.cost, 'Курс валюты', (r) => U.num(cost(r).rate) || 1],
+      [B.cost, 'Себестоимость, ₽', (r) => U.num(cost(r).rub)],
+      [B.cost, 'Ошибка себестоимости', (r) => cost(r).error || ''],
+      [B.cost, 'Комиссия, ₽', (r) => U.num(econ(r).commission)],
+      [B.cost, 'Логистика, ₽', (r) => U.num(econ(r).logistics)],
+      [B.cost, 'Хранение, ₽', (r) => U.num(econ(r).storage)],
+      [B.cost, 'Приёмка, ₽', (r) => U.num(econ(r).accept)],
+      [B.cost, 'Упаковка, ₽', (r) => U.num(econ(r).packaging)],
+      [B.cost, 'Эквайринг, ₽', (r) => U.num(econ(r).acquiring)],
+      [B.cost, 'Реклама, ₽', (r) => U.num(econ(r).ad)],
+      [B.cost, 'Налог, ₽', (r) => U.num(econ(r).tax)],
+      [B.cost, 'Всего расходов, ₽', (r) => U.num(econ(r).totalCosts)],
+      [B.cost, 'Расходы, % от цены', (r) => U.num(econ(r).pctCosts)],
+      [B.cost, 'Цена безубыточности, ₽', (r) => U.num(econ(r).breakEvenPrice) || ''],
+      [B.cost, 'Цена под целевую маржу, ₽', (r) => U.num(econ(r).minPriceForMargin) || ''],
+      [B.cost, 'Прибыль сейчас, ₽', (r) => U.num(r.current && r.current.profit)],
+      [B.cost, 'Прибыль станет, ₽', (r) => U.num(r.proposed && r.proposed.profit)],
+      [B.cost, 'Маржа сейчас, %', (r) => U.num(r.current && r.current.marginPct)],
+      [B.cost, 'Маржа станет, %', (r) => U.num(r.proposed && r.proposed.marginPct)],
+      [B.cost, 'Δ прибыли за месяц, ₽', (r) => Math.round(U.num(r.delta && r.delta.profitMonth))],
+      [B.comp, 'Конкурент', (r) => (comp(r) ? (comp(r).name || comp(r).id || '') : '')],
+      [B.comp, 'Цена конкурента, ₽', (r) => U.num(r.context && r.context.competitorPrice) || ''],
+      [B.svc, 'Отправлять', (r) => (r.needSend ? 'да' : 'нет')],
+      [B.svc, 'Ограничение', (r) => r.limitedBy || ''],
+      [B.svc, 'Ошибки данных', (r) => this.rowErrors(r).join('; ')],
+      [B.svc, 'Предупреждения', (r) => (r.warnings || []).join('; ')],
+      [B.svc, 'Пояснение', (r) => (r.notes || []).join(' | ')]
+    ];
+  },
+
+  /** Заголовки «Блок · Колонка» и значения по строкам — для Excel и CSV. */
+  buildExport(list) {
+    if (!this.itemsByNm) this.itemsByNm = new Map((S.state.items || []).map((it) => [String(it.nmID), it]));
+    if (!this.cardsByNm) this.cardsByNm = new Map((S.state.cards || []).map((c) => [String(c.nmID), c]));
+    const spec = this.exportSpec();
+    return {
+      spec,
+      headers: spec.map((x) => x[0] + ' · ' + x[1]),
+      rows: (list || []).map((r) => spec.map((x) => {
+        let v;
+        try { v = x[2](r); } catch (e) { v = ''; }
+        return v === undefined || v === null ? '' : v;
+      }))
+    };
   },
 
   /**
@@ -729,7 +1083,15 @@ Views.repricer = {
   },
 
   /** Размер страницы таблицы цен: тысячи строк с десятками полей ввода вешают браузер. */
-  PAGE_SIZE: 200,
+  /**
+   * Строк на странице таблицы цен.
+   *
+   * Раньше было 200 — но после задания D колонок стало 25 вместо 20, и каждая
+   * ячейка несёт ввод или разбор цифр. Страница в 100 строк остаётся «всё на одном
+   * экране» по смыслу (расчёт и выгрузка по-прежнему идут по всем товарам), зато
+   * таблица не тормозит при прокрутке на слабых машинах.
+   */
+  PAGE_SIZE: 100,
   page: 0,
   /** Страница таблицы «Параметры товаров» (там 10 полей ввода на строку — ещё тяжелее). */
   ST_PAGE_SIZE: 100,
@@ -1187,8 +1549,24 @@ Views.repricer = {
       }[f.tile];
       if (test) list = list.filter(test);
     }
+    // метка товара (колонка «Метка») — свой фильтр: по ней удобно вести группы товаров
+    if (f.tag) {
+      const t = String(f.tag).toLowerCase();
+      list = list.filter((r) => String(this.rowConfig(r.nmID).tag || r.tag || '').toLowerCase() === t);
+    }
+    // «не отправлять» — отдельный признак: строки, которые остаются только для контроля
+    if (f.seg === 'nosend') list = list.filter((r) => r.allowSend === false);
     const q = (f.q || '').toLowerCase();
-    if (q) list = list.filter((r) => String(r.nmID).includes(q) || String(r.vendorCode || '').toLowerCase().includes(q) || String(r.title || '').toLowerCase().includes(q));
+    if (q) {
+      list = list.filter((r) => {
+        const card = (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
+        return String(r.nmID).includes(q) ||
+          String(r.vendorCode || '').toLowerCase().includes(q) ||
+          String(r.title || '').toLowerCase().includes(q) ||
+          String(this.rowConfig(r.nmID).tag || r.tag || '').toLowerCase().includes(q) ||
+          String(r.barcode || card.barcode || '').toLowerCase().includes(q);
+      });
+    }
     return list;
   },
 
@@ -1200,6 +1578,8 @@ Views.repricer = {
       corridor: {}, context: {}, delta: {}, warnings: []
     }, r) : r);
     this.itemsByNm = new Map((S.state.items || []).map((it) => [String(it.nmID), it]));
+    // карточки (контент-API) нужны для баркода и объёма товара — без отдельного запроса к WB
+    this.cardsByNm = new Map((S.state.cards || []).map((c) => [String(c.nmID), c]));
     const pageRows = this.pageOf(list);
     const st = S.state;
     this.selection = this.selection || new Set();
@@ -1209,6 +1589,7 @@ Views.repricer = {
       // колонки фильтруются по выбору пользователя (кнопка «Колонки»):
       // порядок массива обязан совпадать со справочником this.COLUMNS
       columns: this.filterCols([
+        // ══ блок «Артикул» ══
         { title: 'Товар', cls: 'rp-product', render: (r) => {
             const item = this.itemsByNm.get(String(r.nmID)) || {};
             const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
@@ -1216,33 +1597,42 @@ Views.repricer = {
             return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
               <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
           } },
+        { title: 'Артикул продавца', render: (r) => {
+            const item = this.itemsByNm.get(String(r.nmID)) || {};
+            return `<div class="tiny rp-wrap"><b>${U.esc(r.vendorCode || item.vendorCode || '—')}</b> · нм-код ${r.nmID}${item.brand ? ' · ' + U.esc(item.brand) : ''}</div>`;
+          } },
+        { title: 'Баркод', render: (r) => this.barcodeCellHtml(r) },
+        { title: 'Отправка в WB', render: (r) => {
+            const cfg = this.rowConfig(r.nmID);
+            const on = cfg.allowSend !== false && r.allowSend !== false;
+            return `<label class="checkline tiny rp-sendline" title="Если выключить — цена рассчитается и будет видна, но в WB не уйдёт">
+                <input type="checkbox" class="rp-allowsend" data-nm="${r.nmID}" ${on ? 'checked' : ''} />
+                ${on ? '<span class="ok">отправляем</span>' : '<span class="neg">не отправлять</span>'}
+              </label>`;
+          } },
+        { title: 'Метка', render: (r) => {
+            const cfg = this.rowConfig(r.nmID);
+            const pend = (this.pendingEdits.get(String(r.nmID)) || {}).config || {};
+            const val = pend.tag !== undefined ? pend.tag : (cfg.tag || r.tag || '');
+            return `<input type="text" class="cellinput rp-tag" data-nm="${r.nmID}" maxlength="24"
+                placeholder="нет" value="${U.esc(val)}"
+                title="Своя метка товара: по ней фильтрует список и работают массовые правила" />`;
+          } },
+        // ══ блок «Инфо о товаре» ══
+        { title: 'Инфо о товаре', render: (r) => this.itemInfoCellHtml(r) },
+        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
+        { title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
+        // ══ блок «Текущая цена» ══
+        { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
+        { title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
+        { title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
+            ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП${this.walletNote(r, 'now')}</div>`
+            : '<span class="muted tiny">нет данных</span>' },
         { title: 'Выгодность', render: (r) => {
             const v = this.valueStatus(r);
             return `${UI.badge(v.label, v.kind)}<div class="tiny muted" title="${U.esc(v.hint)}">${U.esc(v.hint)}</div>`;
           } },
-        { title: 'Стратегия', render: (r) => {
-            const cfg = this.rowConfig(r.nmID);
-            const cur = cfg.strategy || '';
-            return `<select class="rp-strategy" data-nm="${r.nmID}" style="width:170px">
-                <option value="">как в общих настройках</option>
-                ${(this.rstate.strategies || []).map((s) => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${U.esc(s.name)}</option>`).join('')}
-              </select>
-              <div class="tiny muted" style="margin-top:2px">сейчас: ${U.esc(r.strategyTitle || r.strategy)}</div>
-              <label class="tiny muted">Себестоимость <input type="number" class="num rp-cost" data-nm="${r.nmID}" min="0" step="0.01" style="width:82px" value="${(this.pendingEdits.get(String(r.nmID)) || {}).cost?.costPriceRub ?? U.num((this.cogsByNm || {})[String(r.nmID)])}" /></label>
-              ${this.rowErrors(r).length ? `<div class="rp-validation neg tiny">ОШИБКА: ${U.esc(this.rowErrors(r).join('; '))}</div>` : ''}`;
-          } },
-        { title: 'Пол / потолок', num: true, render: (r) => {
-            const cfg = this.rowConfig(r.nmID);
-            return `<input type="number" step="10" class="num rp-minprice" data-nm="${r.nmID}" value="${cfg.minPrice || ''}"
-                placeholder="${U.num(r.corridor.min)}" style="width:96px" title="Минимальная цена: ниже неё репрайсер не опустится" />
-              <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
-              <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
-          } },
-        { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
-        { title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
-        { title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
-            ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП</div>`
-            : '<span class="muted tiny">нет данных</span>' },
+        // ══ блок «Новая цена» ══
         { title: 'Новая цена', num: true, render: (r) => {
             /**
              * Если по товару сохранена своя цена, в WB уйдёт именно она, а не расчёт
@@ -1257,20 +1647,22 @@ Views.repricer = {
               <div class="tiny muted">репрайсер предлагал ${U.money(r.proposed.sellerPrice)} — не отправится</div>`;
           } },
         { title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
-            ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП</div>`
+            ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП${this.walletNote(r, 'next')}</div>`
             : '<span class="muted tiny">—</span>' },
-        { title: 'Акции', render: (r) => this.promoCellHtml(r) },
-        { title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
         { title: 'Изменение', num: true, render: (r) => `<span class="${r.delta.abs > 0 ? 'pos' : (r.delta.abs < 0 ? 'neg' : 'muted')}">${U.signed(r.delta.abs)} ₽<br>${U.signed(r.delta.pct, 1)}%</span>` },
-        { title: 'Прибыль/шт', num: true, render: (r) => `<span class="muted">${U.money(r.current.profit)}</span> → <b class="${U.profitClass(r.proposed.profit)}">${U.money(r.proposed.profit)}</b>` },
-        { title: 'Маржа', num: true, render: (r) => `<span class="muted">${U.pct(r.current.marginPct)}</span> → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>` },
-        { title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
-        { title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
-        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
-        { title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
-        { title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) },
+        { title: 'Стратегия', render: (r) => {
+            const cfg = this.rowConfig(r.nmID);
+            const cur = cfg.strategy || '';
+            return `<select class="rp-strategy" data-nm="${r.nmID}" style="width:170px">
+                <option value="">как в общих настройках</option>
+                ${(this.rstate.strategies || []).map((s) => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${U.esc(s.name)}</option>`).join('')}
+              </select>
+              <div class="tiny muted" style="margin-top:2px">сейчас: ${U.esc(r.strategyTitle || r.strategy)}</div>
+              ${this.rowErrors(r).length ? `<div class="rp-validation neg tiny">ОШИБКА: ${U.esc(this.rowErrors(r).join('; '))}</div>` : ''}`;
+          } },
         { title: 'Статус', render: (r) => {
             const b = [];
+            if (r.allowSend === false) b.push(UI.badge('отправка выключена', 'danger'));
             if (r.quarantine) b.push(UI.badge('карантин', 'danger'));
             if (r.limitedBy === 'step') b.push(UI.badge('лимит шага', 'warn'));
             if (r.limitedBy === 'day') b.push(UI.badge('суточный лимит', 'warn'));
@@ -1279,8 +1671,33 @@ Views.repricer = {
             if (r.limitedBy === 'below-min') b.push(UI.badge('поднят до порога', 'info'));
             return b.join(' ');
           } },
-        { title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` }
+        { title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` },
+        // ══ блок «Мин цена (в акции)» ══
+        { title: 'Мин цена / базовая', num: true, render: (r) => {
+            const cfg = this.rowConfig(r.nmID);
+            return `<input type="number" step="10" class="num rp-minprice" data-nm="${r.nmID}" value="${cfg.minPrice || ''}"
+                placeholder="${U.num(r.corridor.min)}" style="width:96px" title="Минимальная цена: ниже неё репрайсер не опустится" />
+              <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
+              <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
+          } },
+        { title: 'Мин цена в акции', num: true, render: (r) => this.promoMinCellHtml(r) },
+        { title: 'Акции', render: (r) => this.promoCellHtml(r) },
+        // ══ блок «Цена (вне акции)» ══
+        { title: 'Цена вне акции', num: true, render: (r) => this.restoreCellHtml(r) },
+        { title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
+        // ══ блок «Себестоимость и экономика» ══
+        { title: 'Себестоимость', num: true, render: (r) => this.costCellHtml(r) },
+        { title: 'Расходы на единицу', num: true, render: (r) => this.costDetailCellHtml(r) },
+        { title: 'Безубыточность', num: true, render: (r) => this.breakEvenCellHtml(r) },
+        { title: 'Прибыль/шт', num: true, render: (r) => `<span class="muted">${U.money(r.current.profit)}</span> → <b class="${U.profitClass(r.proposed.profit)}">${U.money(r.proposed.profit)}</b>` },
+        { title: 'Маржа', num: true, render: (r) => `<span class="muted">${U.pct(r.current.marginPct)}</span> → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>` },
+        { title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
+        // ══ блок «Конкуренты» ══
+        { title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
+        { title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) }
       ]),
+      // верхний ряд шапки — блоки колонок (задание D)
+      groupTitles: this.GROUP_TITLES,
       rows: pageRows,
       tall: true,
       select: {
@@ -1297,7 +1714,11 @@ Views.repricer = {
         return '';
       }
     });
-    if (this.density === 'compact') grid.el.querySelector('table').classList.add('dense');
+    const tbl = grid.el.querySelector('table');
+    if (this.density === 'compact') tbl.classList.add('dense');
+    // первый и второй столбцы (чекбокс и товар) закреплены: таблица широкая,
+    // и при горизонтальной прокрутке должно быть видно, к какому товару относится строка
+    tbl.classList.add('rp-sticky-first');
     host.appendChild(grid.el);
 
     this.drawPager(host);
@@ -1315,7 +1736,8 @@ Views.repricer = {
     if (segCount) {
       const labels = {
         all: 'все товары', tosend: 'к отправке', mine: 'со своей ценой',
-        errors: 'с незаполненными данными', loss: 'убыточные', warn: 'с предупреждениями'
+        errors: 'с незаполненными данными', loss: 'убыточные', warn: 'с предупреждениями',
+        nosend: 'с выключенной отправкой'
       };
       segCount.textContent = U.fmt(list.length) + ' ' + (labels[this.itemFilter.seg] || 'товаров') +
         (this.density === 'compact' ? ' · плотный режим' : '');
@@ -1339,12 +1761,15 @@ Views.repricer = {
      * Изменения КОПЯТСЯ и применяются одной кнопкой «Сохранить» (как «Отменить/Сохранить»
      * в INDEEPA): один пересчёт на пачку правок вместо пересчёта на каждую ячейку.
      */
-    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku, .rp-use-sku, .rp-off-logic').forEach((inp) => {
+    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku, .rp-use-sku, .rp-off-logic, .rp-allowsend, .rp-tag').forEach((inp) => {
       inp.onclick = (e) => e.stopPropagation();
       inp.onchange = () => {
         const nm = inp.getAttribute('data-nm');
         const patch = {};
         if (inp.classList.contains('rp-strategy')) patch.strategy = inp.value || null;
+        // «Отправка в WB»: false обязан дойти до настроек товара, поэтому не чистится как пустое значение
+        else if (inp.classList.contains('rp-allowsend')) patch.allowSend = !!inp.checked;
+        else if (inp.classList.contains('rp-tag')) patch.tag = String(inp.value || '').trim() || null;
         else if (inp.classList.contains('rp-minprice')) {
           const v = U.num(inp.value);
           patch.minPrice = v > 0 ? v : null;
@@ -1385,8 +1810,41 @@ Views.repricer = {
         }
       };
     });
-    host.querySelectorAll('.rp-cost').forEach((inp) => {
-      inp.onchange = () => this.stageEdit(inp.dataset.nm, 'cost', { costPriceRub: Math.max(0, U.num(inp.value)) });
+    /**
+     * Себестоимость и её валюта правятся в строке (задание D). Значение в валюте
+     * закупки сервис пересчитает в рубли по курсу из настроек; курс правится
+     * на вкладке «Параметры» — там же показываем подсказку, если курса нет.
+     */
+    host.querySelectorAll('.rp-cost, .rp-costcur').forEach((inp) => {
+      inp.onclick = (e) => e.stopPropagation();
+      inp.onchange = () => {
+        const patch = {};
+        if (inp.classList.contains('rp-cost')) patch.costPriceRub = Math.max(0, U.num(inp.value));
+        else patch.currency = String(inp.value || 'RUB').toUpperCase();
+        this.stageEdit(inp.dataset.nm, 'cost', patch);
+        // подпись «= N ₽ по курсу» обновляем сразу, не дожидаясь сохранения и пересчёта:
+        // реагируем и на смену валюты, и на правку самого числа
+        {
+          const cell = inp.closest('td');
+          if (!cell) return;
+          const nm = String(inp.dataset.nm);
+          const pend = (this.pendingEdits.get(nm) || {}).cost || {};
+          const curEl = cell.querySelector('.rp-costcur');
+          const cur = String((curEl && curEl.value) || 'RUB').trim().toUpperCase();
+          const rate = this.costRate(cur);
+          const numEl = cell.querySelector('.rp-cost');
+          const entered = numEl ? U.num(numEl.value) : U.num(pend.costPriceRub);
+          const rub = cur === 'RUB' ? entered : (rate > 0 ? Math.round(entered * rate * 100) / 100 : 0);
+          const hint = cell.querySelector('.rp-cost-hint');
+          if (hint) {
+            hint.className = 'tiny rp-cost-hint ' + (cur === 'RUB' || rate > 0 ? 'muted' : 'neg');
+            hint.textContent = cur === 'RUB' ? ''
+              : (rate > 0 ? '= ' + U.money(rub) + ' по курсу ' + U.num(rate) : 'не задан курс ' + cur);
+          }
+          const rubEl = cell.querySelector('.rp-cost-rub');
+          if (rubEl) rubEl.textContent = U.money(rub);
+        }
+      };
     });
 
     // добавить конкурента прямо из строки — без перехода в другой раздел
@@ -1416,6 +1874,14 @@ Views.repricer = {
         </select></div>
       <div class="fld"><span>Мин. цена, ₽</span>
         <input type="number" step="10" class="num" id="rb-minprice" style="width:110px" placeholder="— не менять —" /></div>
+      <div class="fld"><span>Отправка в WB</span>
+        <select id="rb-allowsend" style="width:150px" title="Флаг «Отправка в WB» сразу всем выбранным товарам">
+          <option value="">— не менять —</option>
+          <option value="1">включить</option>
+          <option value="0">выключить</option>
+        </select></div>
+      <div class="fld"><span>Метка</span>
+        <input type="text" id="rb-tag" style="width:130px" maxlength="24" placeholder="— не менять —" /></div>
       <button class="btn btn-sm" id="rb-apply-params">Применить параметры</button>
       <button class="btn btn-ghost btn-sm" id="rb-clear-params">Сбросить личные настройки</button>
       <div class="grow"></div>
@@ -1435,14 +1901,21 @@ Views.repricer = {
       const strategy = bulk.querySelector('#rb-strategy').value;
       const minRaw = bulk.querySelector('#rb-minprice').value;
       const minPrice = minRaw === '' ? null : U.num(minRaw);
-      if (!strategy && !(minPrice > 0)) {
-        App.toast('Выберите стратегию или укажите минимальную цену', 'warn');
+      const sendRaw = bulk.querySelector('#rb-allowsend').value;
+      const tagRaw = bulk.querySelector('#rb-tag').value;
+      const tagSet = tagRaw !== '';
+      const tag = tagSet ? String(tagRaw).trim() : null;
+      if (!strategy && !(minPrice > 0) && sendRaw === '' && !tagSet) {
+        App.toast('Выберите стратегию, минимальную цену, режим отправки или метку', 'warn');
         return;
       }
       btn.disabled = true;
       const patch = {};
       if (strategy) patch.strategy = strategy;
       if (minPrice > 0) patch.minPrice = minPrice;
+      // false обязан дойти до настроек товара: чистка пустых значений его не убирает
+      if (sendRaw !== '') patch.allowSend = sendRaw === '1';
+      if (tagSet) patch.tag = tag || null;
       this.selection.forEach((nmID) => this.stageEdit(nmID, 'config', patch));
       await this.commitEdits(btn);
       this.selection.clear();
@@ -2620,6 +3093,12 @@ Views.repricer = {
     const d = c.defaults;
 
     const opt = (v, cur, label) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${label}</option>`;
+    // курсы валют себестоимости и название магазина живут в настройках приложения,
+    // а не в параметрах репрайсера (сохраняются каналом settings:save)
+    const sett = S.state.settings || {};
+    const rates = sett.costRates || {};
+    const KNOWN = ['CNY', 'USD', 'EUR', 'TRY', 'KZT', 'BYN', 'UZS', 'AED', 'PLN', 'GEL', 'KRW', 'VND'];
+    const rateCodes = Array.from(new Set(KNOWN.concat(Object.keys(rates))));
 
     host.innerHTML = `
       <div class="grid g2">
@@ -2682,6 +3161,29 @@ Views.repricer = {
               Репрайсер может отменять скидки (устанавливать скидку 0%)</label>
             <p class="hint" style="margin-top:6px">При запрете смены цены до скидки репрайсер управляет только процентом скидки — шаг изменения получается целым процентом.
               Это ограничение Wildberries: цена «рубль в рубль» достижима только при разрешении менять цену до скидки.</p>
+          </div>
+
+          <div class="card">
+            <h2>Себестоимость и курсы валют</h2>
+            <label class="field">Название магазина
+              <input type="text" id="pm-shopname" maxlength="60" value="${U.esc(sett.shopName || '')}"
+                placeholder="например, ИП Иванов · товары для дома" /></label>
+            <p class="hint">Показывается в шапке репрайсера и попадает в выгрузку — удобно, когда кабинетов несколько.</p>
+            <p class="hint" style="margin-top:8px">Сама себестоимость задаётся <b>прямо в таблице цен</b> (колонка «Себестоимость»,
+              блок «Себестоимость и экономика»), там же выбирается валюта закупки.
+              Ниже — курсы: сколько ₽ стоит 1 единица валюты. Без курса валюта считается незаданной:
+              строка получает явную ошибку и в WB не отправляется.</p>
+            <div class="grid g3" style="gap:10px;margin-top:8px" id="pm-rates">
+              ${rateCodes.map((code) => `<label class="field">1 ${U.esc(code)} = … ₽
+                  <input type="number" class="num" data-rate="${U.esc(code)}" min="0" step="0.0001"
+                    value="${U.num(rates[code]) || ''}" placeholder="курс не задан" /></label>`).join('')}
+            </div>
+            <div class="row wrap" style="gap:8px;margin-top:10px;align-items:flex-end">
+              <label class="field" style="width:170px">Своя валюта (код, 3 буквы)
+                <input type="text" id="pm-rate-code" maxlength="3" placeholder="например, GEL" /></label>
+              <button class="btn btn-sm" id="pm-rate-add">Добавить валюту</button>
+              <span class="hint">Для ₽ курс не нужен: себестоимость в рублях берётся как есть.</span>
+            </div>
           </div>
         </div>
 
@@ -2826,12 +3328,46 @@ Views.repricer = {
           }
         }
       };
+      /**
+       * Курсы валют и название магазина — настройки приложения, поэтому сохраняются
+       * своим каналом рядом с параметрами репрайсера: себестоимость правится в таблице
+       * цен, а курс — здесь же, на одном экране (задание D).
+       */
+      const newRates = {};
+      host.querySelectorAll('#pm-rates [data-rate]').forEach((inp) => {
+        const code = String(inp.getAttribute('data-rate') || '').trim().toUpperCase();
+        const v = U.num(inp.value);
+        if (code && code !== 'RUB' && v > 0) newRates[code] = v;
+      });
+      const shopName = String(host.querySelector('#pm-shopname').value || '').trim();
+      await API.invoke('settings:save', { costRates: newRates, shopName });
+      if (S.state.settings) {
+        S.state.settings.costRates = newRates;
+        S.state.settings.shopName = shopName;
+      }
+
       const res = await API.invoke('repricer:save', patch);
       if (res.config.limits.maxChangePerDayPct !== patch.limits.maxChangePerDayPct) {
         App.toast('Суточный лимит увеличен до лимита за обновление (' + res.config.limits.maxChangePerDayPct + '%)', 'warn', 5000);
-      } else App.toast('Параметры репрайсера сохранены', 'ok');
+      } else App.toast('Параметры сохранены, валют с курсом: ' + Object.keys(newRates).length, 'ok', 5000);
       this.rstate = await API.invoke('repricer:state');
       this.draw();
+    };
+
+    /** Своя валюта: добавляем поле курса, значение уйдёт в настройки вместе с остальными. */
+    host.querySelector('#pm-rate-add').onclick = () => {
+      const codeInp = host.querySelector('#pm-rate-code');
+      const code = String(codeInp.value || '').trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(code)) { App.toast('Код валюты — три латинские буквы, например GEL', 'warn'); return; }
+      if (code === 'RUB') { App.toast('Для ₽ курс не нужен', 'warn'); return; }
+      const grid = host.querySelector('#pm-rates');
+      if (grid.querySelector('[data-rate="' + code + '"]')) { App.toast('Валюта ' + code + ' уже в списке', 'warn'); return; }
+      const label = U.el(`<label class="field">1 ${U.esc(code)} = … ₽
+          <input type="number" class="num" data-rate="${U.esc(code)}" min="0" step="0.0001" value="" placeholder="курс не задан" /></label>`);
+      grid.appendChild(label);
+      codeInp.value = '';
+      label.querySelector('input').focus();
+      App.toast('Валюта ' + code + ' добавлена — укажите курс и сохраните параметры', 'ok', 5000);
     };
 
     host.querySelector('#pm-reset').onclick = () => {

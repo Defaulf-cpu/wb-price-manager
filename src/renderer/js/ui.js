@@ -148,12 +148,33 @@ window.UI = (function () {
     const tbl = U.el('<table class="grid-table"></table>');
     wrap.appendChild(tbl);
 
+    /**
+     * Шапка таблицы. Если хотя бы у одной колонки задан `group`, над рядом
+     * заголовков колонок рисуется ряд блоков — как в таблице цен INDEEPA
+     * («Артикул», «Инфо о товаре», «Текущая цена», «Новая цена»,
+     * «Мин цена (в акции)», «Цена (вне акции)», «Себестоимость»…).
+     * Блок занимает colspan по числу своих ВИДИМЫХ колонок, колонки без блока
+     * получают пустую ячейку такой же ширины — поэтому ряды всегда совпадают,
+     * а `thead tr:last-child th` по-прежнему даёт точный список колонок.
+     * Названия блоков передаются в `o.groupTitles` ({ id: 'Название' }).
+     * Таблицам без групп поведение не меняется: ряд блоков не создаётся.
+     */
     function renderHead() {
       const thead = document.createElement('thead');
       const tr = document.createElement('tr');
+      const hasGroups = cols.some((c) => c && c.group);
+      const trTop = hasGroups ? document.createElement('tr') : null;
+      if (trTop) {
+        trTop.className = 'rp-head-groups';
+        thead.appendChild(trTop);
+      }
+      thead.appendChild(tr);
       if (o.select) {
         const th = document.createElement('th');
         th.style.width = '34px';
+        th.className = 'rp-check';
+        // чекбокс «выбрать все» занимает оба ряда шапки
+        if (trTop) th.rowSpan = 2;
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         const all = o.rows.length > 0 && o.rows.every((r) => o.select.get(r));
@@ -165,7 +186,26 @@ window.UI = (function () {
           renderBody();
         };
         th.appendChild(cb);
-        tr.appendChild(th);
+        (trTop || tr).appendChild(th);
+      }
+      if (trTop) {
+        let i = 0;
+        while (i < cols.length) {
+          const g = cols[i] && cols[i].group;
+          let j = i;
+          while (j < cols.length && ((cols[j] && cols[j].group) || null) === (g || null)) j++;
+          const th = document.createElement('th');
+          th.colSpan = j - i;
+          if (g) {
+            th.className = 'rp-group';
+            th.setAttribute('data-group', String(g));
+            th.textContent = (o.groupTitles && o.groupTitles[String(g)]) || String(g);
+          } else {
+            th.className = 'rp-group rp-group-empty';
+          }
+          trTop.appendChild(th);
+          i = j;
+        }
       }
       cols.forEach((c) => {
         const th = document.createElement('th');
@@ -182,9 +222,9 @@ window.UI = (function () {
           }
           th.onclick = () => o.sort.onSort(c.key);
         }
+        if (c.group) th.setAttribute('data-group', String(c.group));
         tr.appendChild(th);
       });
-      thead.appendChild(tr);
       return thead;
     }
 
