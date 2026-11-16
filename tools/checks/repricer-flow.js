@@ -248,6 +248,105 @@ async function tBlockedItems() {
     'blocked=' + (prop2.blocked || []).length + ', всего позиций ' + (prop2.items || []).length);
 }
 
+// ─────── 2c. Товар с поразмерными ценами: WB не отдаёт price на уровне товара ───────
+
+/**
+ * Реальный формат ответа WB для товаров с `editableSizePrice: true` (а также для любого
+ * товара с включённой опцией «Разные цены для размеров»): поля `price` на уровне товара
+ * НЕТ, цены лежат только в `sizes[]`. Раньше нормализация давала `price: 0`, и репрайсер
+ * писал «не задана базовая цена», хотя в кабинете и в «Цены и скидки» цена есть.
+ */
+async function tSizePricedGoods() {
+  calls.length = 0;
+  const st = makeStand({ live: true });
+  routes = {
+    '/api/v2/list/goods/filter': () => res(200, {
+      data: {
+        total: 3,
+        goods: [
+          // поразмерные цены: price отсутствует вовсе, часть размеров без цены
+          { nmID: 3333333, vendorCode: 'ART-SIZE', brand: 'Тест', subjectName: 'Одежда',
+            discount: 20, clubDiscount: 0, editableSizePrice: true, currencyIsoCode4217: 'RUB',
+            sizes: [
+              { sizeID: 11, techSizeName: '42', price: 900, discountedPrice: 720 },
+              { sizeID: 12, techSizeName: '44', price: 800, discountedPrice: 640 },
+              { sizeID: 13, techSizeName: '46', price: 0, discountedPrice: 0 }
+            ] },
+          // цены нет ни на товаре, ни в размерах — здесь блокировка честная
+          { nmID: 4444444, vendorCode: 'ART-NOPRICE', brand: 'Тест', subjectName: 'Одежда',
+            discount: 0, editableSizePrice: false, sizes: [{ sizeID: 21, techSizeName: 'ONE SIZE', price: 0 }] },
+          // обычный товар: price на месте — подстановка из размеров сработать не должна
+          { nmID: 5555555, vendorCode: 'ART-NORMAL', brand: 'Тест', subjectName: 'Одежда',
+            price: 1200, discount: 10, discountedPrice: 1080, editableSizePrice: false,
+            sizes: [{ sizeID: 31, techSizeName: 'ONE SIZE', price: 1200, discountedPrice: 1080 }] }
+        ]
+      }
+    }),
+    '/api/v1/calendar/promotions/nomenclatures': () => res(200, { data: { nomenclatures: [] } }),
+    '/api/v1/calendar/promotions': () => res(200, { data: { promotions: [] } }),
+    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0, nmID: 0, updatedAt: '' } })
+  };
+
+  const g = await st.service.handlers['wb:goods']({ force: true });
+  const byId = {};
+  (g.items || []).forEach((it) => { byId[String(it.nmID)] = it; });
+  const sized = byId['3333333'] || {};
+  const noprice = byId['4444444'] || {};
+  const normal = byId['5555555'] || {};
+
+  check('поразмерные цены: базовая цена взята из sizes[] (минимальная из живых)',
+    Number(sized.price) === 800, 'price=' + sized.price);
+  check('поразмерные цены: признак источника и вилка цен дошли до товара',
+    sized.priceFromSizes === true && Number(sized.sizePriceMin) === 800 && Number(sized.sizePriceMax) === 900,
+    JSON.stringify({ from: sized.priceFromSizes, min: sized.sizePriceMin, max: sized.sizePriceMax }));
+  check('поразмерные цены: цена со скидкой посчитана, а не осталась нулём',
+    Number(sized.discountedPrice) === 640, 'discountedPrice=' + sized.discountedPrice);
+  check('обычный товар: цена из WB, подстановка из размеров не сработала',
+    Number(normal.price) === 1200 && !normal.priceFromSizes, 'price=' + normal.price);
+  check('товар без цены вовсе: price остался нулём — ничего не выдумываем',
+    Number(noprice.price) === 0 && !noprice.priceFromSizes, 'price=' + noprice.price);
+
+  // себестоимость задаём всем, чтобы в блокировках осталась только тема базовой цены
+  await st.service.handlers['costs:save']({ items: {
+    3333333: { costPriceRub: 300 }, 4444444: { costPriceRub: 300 }, 5555555: { costPriceRub: 300 }
+  } });
+  await st.service.handlers['repricer:item-configs:save']({ items: {
+    3333333: { minPrice: 500 }, 4444444: { minPrice: 500 }, 5555555: { minPrice: 500 }
+  } });
+  const calc = await st.service.handlers['repricer:calc']({ full: true });
+  const row = {};
+  (calc.results || []).forEach((r) => { row[String(r.nmID)] = r; });
+
+  check('репрайсер: у товара с поразмерными ценами базовая цена видна в расчёте',
+    Number(((row['3333333'] || {}).current || {}).basePrice) === 800,
+    'basePrice=' + ((row['3333333'] || {}).current || {}).basePrice);
+  check('репрайсер: в контекст строки попал признак «цена по размерам» с вилкой',
+    !!((row['3333333'] || {}).context || {}).priceFromSizes &&
+    Number(((row['3333333'] || {}).context || {}).sizePriceMax) === 900,
+    JSON.stringify((row['3333333'] || {}).context || {}).slice(0, 140));
+
+  const prop = await st.service.handlers['repricer:proposal']();
+  const reasonsOf = (nm, p) => (((p || prop).blocked || []).find((x) => Number(x.nmID) === nm) || {}).reasons || [];
+  check('репрайсер: товар с поразмерными ценами больше НЕ блокируется',
+    !reasonsOf(3333333).some((t) => /базовая цена/i.test(t)) &&
+    (prop.items || []).some((x) => Number(x.nmID) === 3333333),
+    'причины: ' + JSON.stringify(reasonsOf(3333333)));
+  check('репрайсер: товар без цены заблокирован честной подписью с подсказкой',
+    reasonsOf(4444444).some((t) => /базовая цена в WB не задана/.test(t) && /кабинет|свою цену/.test(t)),
+    'причины: ' + JSON.stringify(reasonsOf(4444444)));
+
+  // цену сохранили вручную в «Цены и скидки» — значит базовая задана, блокировать не за что
+  await st.service.handlers['prices:draft-save']({ items: { 4444444: { basePrice: 1500, discount: 15 } } });
+  await st.service.handlers['repricer:calc']({ full: true });
+  const prop2 = await st.service.handlers['repricer:proposal']();
+  check('репрайсер: сохранённая вручную цена снимает блокировку по базовой цене',
+    !reasonsOf(4444444, prop2).some((t) => /базовая цена/i.test(t)),
+    'причины: ' + JSON.stringify(reasonsOf(4444444, prop2)));
+  check('репрайсер: товар с ручной ценой ушёл в предложение с ценой пользователя',
+    (prop2.items || []).some((x) => Number(x.nmID) === 4444444 && Number(x.basePrice) === 1500),
+    'в items: ' + JSON.stringify((prop2.items || []).map((x) => [x.nmID, x.basePrice])));
+}
+
 // ───────────────────────── 3. Устаревшее предложение не затирает чужие правки ─────────────────────────
 
 async function tStaleProposal() {
@@ -733,6 +832,8 @@ async function tPromoJournal() {
   await tTwoPhase();
   console.log('\n=== Валидация строк (товары без данных не отправляются) ===');
   await tBlockedItems();
+  console.log('\n=== Поразмерные цены (WB не отдаёт price товара) ===');
+  await tSizePricedGoods();
   console.log('\n=== Устаревшее предложение ===');
   await tStaleProposal();
   console.log('\n=== Карточка товара ===');

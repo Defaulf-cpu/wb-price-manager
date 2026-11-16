@@ -1136,6 +1136,9 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       stock: num(ctx.stock), salesPerDay: num(ctx.salesPerDay), turnoverDays: num(ctx.turnoverDays),
       sppForecastPct: promoPlan.sppForecastPct,
       inPromo: !!ctx.inPromo, promoPrice: promoPrice, competitor: comp ? comp.source : null,
+      // цена подставлена из sizes[] — товар с поразмерными ценами (WB не отдаёт price целиком)
+      priceFromSizes: !!ctx.priceFromSizes,
+      sizePriceMin: num(ctx.sizePriceMin) || 0, sizePriceMax: num(ctx.sizePriceMax) || 0,
       competitorPrice: comp ? comp.price : null,
       plan: planProgress(marginCtx, I),
       marginMode: C.marginMode,

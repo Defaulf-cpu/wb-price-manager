@@ -378,3 +378,9 @@ table.grid-table tfoot td {
 #rp-grid .grid-table td { vertical-align: top; }
 #rp-grid .rowtitle { min-width: 0; }
 #rp-grid .rp-product .trunc { max-width: 240px; }
+
+/* ── Репрайсер: пометка «цена по размерам» ─────────────────────────────────
+   У товаров с поразмерными ценами WB не отдаёт price на уровне товара, поэтому
+   базовая цена подставляется из sizes[]. Минимальная — берём худший вариант по марже. */
+.rp-sizeprice { cursor: help; }
+.rp-sizeprice .badge { white-space: nowrap; }

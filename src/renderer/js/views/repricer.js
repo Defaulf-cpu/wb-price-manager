@@ -650,8 +650,27 @@ Views.repricer = {
     const floor = U.num(cfg.minPrice) || U.num(r.corridor && r.corridor.min);
     if (!(floor > 0)) out.push('не задан порог минимальной цены');
     const base = U.num(r.current && r.current.basePrice);
-    if (!(base > 0)) out.push('не задана базовая цена');
+    // цена, сохранённая вручную в «Цены и скидки», задаст базовую при отправке —
+    // поэтому ругаться «не задана базовая цена» при живом черновике нельзя (как на сервере)
+    const draftBase = U.num(((S.state.priceDrafts || {})[String(r.nmID)] || {}).basePrice);
+    if (!(base > 0) && !(draftBase > 0)) out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
     return out;
+  },
+
+  /**
+   * Пометка «цена по размерам». У товаров с поразмерными ценами (editableSizePrice: true)
+   * WB не отдаёт цену на уровне товара — только sizes[].price, поэтому базовая цена
+   * подставлена из размеров (минимальная). Продавец обязан видеть, откуда взялась цифра
+   * и что отправка изменит цену всех размеров сразу.
+   */
+  sizePriceNote(r) {
+    const c = r.context || {};
+    if (!c.priceFromSizes) return '';
+    const min = U.num(c.sizePriceMin);
+    const max = U.num(c.sizePriceMax);
+    const spread = max > min ? ` (от ${U.money(min)} до ${U.money(max)})` : '';
+    const title = `WB не отдаёт цену товара целиком: цены заданы по размерам. В расчёт взята минимальная цена размера${spread}. Отправка изменит цену всех размеров — поразмерная отправка делается отдельным режимом.`;
+    return `<div class="tiny"><span class="rp-sizeprice" title="${U.esc(title)}">${UI.badge('цена по размерам', 'warn')}</span></div>`;
   },
 
   /**
@@ -1219,7 +1238,7 @@ Views.repricer = {
               <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
               <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
           } },
-        { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>` },
+        { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
         { title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
         { title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
             ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП</div>`

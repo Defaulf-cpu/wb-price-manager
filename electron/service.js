@@ -2811,6 +2811,10 @@ function createService(store, emit, electron) {
           vendorCode: item.vendorCode,
           title: item.title,
           basePrice: Number(item.price),
+          // цена подставлена из sizes[] (товар с поразмерными ценами) — интерфейс это покажет
+          priceFromSizes: !!item.priceFromSizes,
+          sizePriceMin: Number(item.sizePriceMin) || 0,
+          sizePriceMax: Number(item.sizePriceMax) || 0,
           discount: Number(item.discount),
           sellerPrice: seller,
           buyerPrice: seller * (1 - Number(p.sppPct || 0) / 100),
@@ -2926,13 +2930,24 @@ function createService(store, emit, electron) {
    *
    * @returns {string[]} причины (пустой массив = строка готова)
    */
-  function proposalBlockers(r) {
+  function proposalBlockers(r, drafts) {
     const out = [];
     // движок отдаёт не значение себестоимости, а её источник: 'none' = не задана нигде
     const src = (r.current && r.current.costSources) || {};
     if (src.costPriceRub === 'none') out.push('не задана себестоимость');
     else if (r.current && r.current.costPriceRub !== undefined && !(Number(r.current.costPriceRub) > 2)) out.push('себестоимость должна быть больше 2 ₽');
-    if (!(Number(r.current && r.current.basePrice) > 0)) out.push('не задана базовая цена');
+    /**
+     * Базовой цены в ответе WB может не быть: продавец её ещё не задал либо товар
+     * с поразмерными ценами (тогда цена подставляется из sizes[] — см. normalizeGood).
+     * Если цена сохранена вручную (черновик «Цены и скидки»), она и задаст базовую при
+     * отправке — блокировать такую строку нельзя: репрайсер спорил с разделом, где цена
+     * уже задана, и продавец видел «не задана базовая цена» при живой цене.
+     */
+    const draft = (drafts || {})[String(r.nmID)];
+    const hasDraftBase = !!(draft && Number(draft.basePrice) > 0);
+    if (!(Number(r.current && r.current.basePrice) > 0) && !hasDraftBase) {
+      out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
+    }
     if (!(Number(r.corridor && r.corridor.min) > 0)) out.push('не задан порог минимальной цены');
     return out;
   }
@@ -2949,7 +2964,7 @@ function createService(store, emit, electron) {
     const drafts = store.loadPriceDrafts() || {};
     (results || []).forEach((r) => {
       if (!r || r.error) return;
-      const blockers = proposalBlockers(r);
+      const blockers = proposalBlockers(r, drafts);
       if (blockers.length) {
         blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
           reasons: blockers, sellerPrice: r.proposed && r.proposed.sellerPrice });
@@ -2968,7 +2983,7 @@ function createService(store, emit, electron) {
         return;
       }
       if (!r.needSend || !r.proposed) return;
-      const why = proposalBlockers(r);
+      const why = proposalBlockers(r, drafts);
       if (why.length) {
         blocked.push({
           nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',

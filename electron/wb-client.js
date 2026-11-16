@@ -574,9 +574,24 @@ class WBClient {
 
   static normalizeGood(g) {
     const sizes = Array.isArray(g.sizes) ? g.sizes : [];
-    const price = Number(g.price || 0);
+    /**
+     * Базовая цена товара. У товаров с поразмерными ценами (`editableSizePrice: true`,
+     * а также у любого товара с включённой опцией «Разные цены для размеров») WB
+     * НЕ отдаёт `price` на уровне товара — цена лежит только в `sizes[].price`.
+     * Раньше это давало `price: 0`, и репрайсер честно, но неверно писал
+     * «не задана базовая цена», хотя в кабинете цена есть.
+     * Берём минимальную цену размера (расчёт по худшей цене — осторожнее по марже)
+     * и помечаем источник, чтобы интерфейс сказал, откуда взялась цифра.
+     */
+    const sizePrices = sizes.map((s) => Number(s.price) || 0).filter((p) => p > 0);
+    const rawPrice = Number(g.price || 0);
+    const priceFromSizes = !(rawPrice > 0) && sizePrices.length > 0;
+    const price = rawPrice > 0 ? rawPrice : (priceFromSizes ? Math.min.apply(null, sizePrices) : 0);
+    const sizePriceMax = sizePrices.length ? Math.max.apply(null, sizePrices) : 0;
     const discount = Number(g.discount || 0);
-    const discounted = Number(pick(g, ['discountedPrice'], price * (1 - discount / 100)));
+    // `discountedPrice` WB может отдать нулём даже при живой цене — тогда считаем сами
+    const rawDiscounted = Number(pick(g, ['discountedPrice'], 0) || 0);
+    const discounted = rawDiscounted > 0 ? rawDiscounted : price * (1 - discount / 100);
     const volumeCm3 = Number(pick(g, ['volume', 'volumeCm3'], 0) || 0);
     const name = pick(g, ['subjectName', 'subject', 'categoryName'], '') || '';
     return {
@@ -586,6 +601,9 @@ class WBClient {
       categoryName: name,
       title: [g.brand, name, g.vendorCode].filter(Boolean).join(' · '),
       price,
+      priceFromSizes,
+      sizePriceMin: priceFromSizes ? price : undefined,
+      sizePriceMax: priceFromSizes ? sizePriceMax : undefined,
       discount,
       discountedPrice: r2(discounted),
       clubDiscount: Number(g.clubDiscount || 0),
