@@ -24,7 +24,22 @@ Views.itemcard = {
       size: 'lg',
       dismissable: true,
       content: UI.loading('Читаем данные товара из WB и кэша приложения…'),
-      buttons: [{ label: 'Закрыть' }]
+      buttons: [
+        /**
+         * Ссылка для тех, кто привык к старым разделам: карточка остаётся модальным
+         * окном, но товар можно открыть в «Ценах и скидках» — таблица отфильтруется
+         * по этому нм-коду.
+         */
+        { label: 'Открыть в разделе', class: 'btn-ghost', onClick: () => {
+            modal.close();
+            S.state.filters = S.state.filters || {};
+            S.state.filters.q = String(id);
+            S.state.filters.flag = 'all';
+            App.go('prices');
+            App.toast('Товар ' + id + ' отфильтрован в «Ценах и скидках»', 'ok', 4000);
+          } },
+        { label: 'Закрыть' }
+      ]
     });
     const body = modal.body || document.querySelector('#modal-root .modal-body');
 

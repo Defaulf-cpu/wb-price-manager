@@ -3,11 +3,33 @@
 /** Себестоимость и расходы: ручное заполнение, CSV-импорт/экспорт, шаблоны по категориям. */
 window.Views = window.Views || {};
 
+/**
+ * base64 → строка UTF-8 без внешних зависимостей. TextDecoder есть и в Chromium,
+ * и в Node; запасной путь — старый escape/unescape для очень старых сборок.
+ */
+function decodeBase64Text(b64) {
+  const bin = atob(String(b64 || ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(bytes);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  try { return decodeURIComponent(escape(out)); } catch (e) { return out; }
+}
+
 Views.costs = {
   title: 'Себестоимость',
   subtitle: 'Ваши данные: закупка, упаковка, реклама — заполняются один раз',
 
-  render(container) {
+  /** Раздел «Себестоимость» — та же панель, что открывается вкладкой репрайсера. */
+  render(container) { this.mount(container); },
+
+  /**
+   * Панель себестоимости в произвольном контейнере: раздел «Себестоимость» и вложенная
+   * вкладка «Себестоимость» репрайсера используют один и тот же код, поэтому данные
+   * и поведение не расходятся. Запись идёт существующим каналом costs:save.
+   */
+  mount(container) {
     const st = S.state;
     this.container = container;
     this.q = this.q || '';
@@ -28,7 +50,7 @@ Views.costs = {
           <select id="c-cat" style="width:200px"><option value="">Все категории</option></select>
           <label class="checkline"><input type="checkbox" id="c-missing" ${this.onlyMissing ? 'checked' : ''} /> только незаполненные</label>
           <div class="grow"></div>
-          <button class="btn btn-sm" id="c-import">Импорт CSV</button>
+          <button class="btn btn-sm" id="c-import" title="CSV или XLSX: колонки «нм-код», «Себестоимость», «Комиссия %»…">Импорт CSV / XLSX</button>
           <button class="btn btn-sm" id="c-template">Скачать шаблон CSV</button>
           <button class="btn btn-sm btn-ghost" id="c-export">Экспорт текущих</button>
         </div>
@@ -65,8 +87,9 @@ Views.costs = {
 
   refresh() {
     const st = S.state;
-    this.container = document.getElementById('view');
-    const host = this.container && this.container.querySelector('#c-grid');
+    // container задаёт вызвавший экран: раздел «Себестоимость» или вкладка репрайсера
+    const root = this.container || document.getElementById('view');
+    const host = root && root.querySelector('#c-grid');
     if (!host) return;
     host.innerHTML = '';
     const rows = this.list();
@@ -312,9 +335,37 @@ Views.costs = {
     App.toast('Шаблон выгружен — заполните колонки и загрузите обратно', 'ok');
   },
 
+  /**
+   * Импорт себестоимости: CSV разбираем здесь, XLSX отдаём главному процессу.
+   * В браузерном окне нет zlib, поэтому ZIP с XML не раскрыть; зато в `electron/service.js`
+   * уже есть свой читатель `xlsx-lite` — тот же, что разбирает список товаров акции.
+   */
   async importCsv() {
-    const text = await API.importCsv();
-    if (!text) { App.toast('Файл не выбран', 'warn'); return; }
+    const file = await API.importFile({
+      title: 'Импорт себестоимости',
+      extensions: ['csv', 'xlsx', 'txt'],
+      filterName: 'Таблицы (CSV, XLSX)'
+    });
+    if (!file || !file.base64) { App.toast('Файл не выбран', 'warn'); return; }
+
+    if (/\.xlsx$/i.test(String(file.fileName || ''))) {
+      let res;
+      try {
+        res = await API.invoke('costs:import', { base64: file.base64, fileName: file.fileName });
+      } catch (e) {
+        App.toast('Не удалось прочитать XLSX: ' + (e && e.message ? e.message : e), 'err', 6000);
+        return;
+      }
+      S.state.costs = (await API.invoke('costs:get')).items || {};
+      await S.loadGoods(true);
+      S.invalidate();
+      App.toast(`Импортировано значений из XLSX: ${res.updated}`, 'ok');
+      this.refresh();
+      return;
+    }
+
+    const text = decodeBase64Text(file.base64).replace(/^\uFEFF/, '');
+    if (!text) { App.toast('Файл пустой', 'warn'); return; }
     const parsed = U.parseCsv(text);
     if (!parsed.length) { App.toast('В файле нет строк', 'warn'); return; }
 

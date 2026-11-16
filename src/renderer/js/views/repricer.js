@@ -25,13 +25,14 @@ Views.repricer = {
     container.innerHTML = `
       <div class="tabs" id="rp-tabs">
         <div class="tab" data-t="prices">Товары</div>
-        <div class="tab" data-t="promos">Акции</div>
-        <div class="tab" data-t="strategies">Параметры товаров (массово)</div>
+        <div class="tab" data-t="rules">Массовые правила</div>
+        <div class="tab" data-t="costs">Себестоимость</div>
         <div class="tab" data-t="competitors">Конкуренты</div>
-        <div class="tab" data-t="params">Параметры репрайсера</div>
+        <div class="tab" data-t="promos">Акции</div>
         <div class="tab" data-t="journal-prices">Журнал изменения цен</div>
         <div class="tab" data-t="journal-promos">Журнал участия в акциях</div>
-        <div class="tab" data-t="runs">История запусков</div>
+        <div class="tab" data-t="schedule">Расписание</div>
+        <div class="tab" data-t="params">Параметры</div>
       </div>
       <div id="rp-host">${UI.loading('Загружаем настройки репрайсера…')}</div>
     `;
@@ -74,17 +75,32 @@ Views.repricer = {
 
   async draw() {
     const host = this.container.querySelector('#rp-host');
+    /**
+     * Вложенные панели (себестоимость, календарь акций) держат ссылку на свой контейнер,
+     * а через неё — весь отрисованный DOM. При смене вкладки этот DOM уже откреплён,
+     * но жил бы в памяти: таблица себестоимости на 200+ строк и календарь акций заметно
+     * раздувают кучу. Обнуляем ссылки перед перерисовкой — mount() поставит их заново.
+     */
+    if (window.Views && Views.costs) Views.costs.container = null;
+    if (window.Views && Views.promos) Views.promos.container = null;
     host.innerHTML = UI.loading();
     try {
       await this.loadState();
+      /**
+       * Всё рабочее место — внутри репрайсера: таблица товаров, массовые правила,
+       * себестоимость, конкуренты, акции, журналы, расписание и параметры. Отдельные
+       * разделы приложения остаются на месте и используют те же функции (RULES,
+       * Views.costs.mount, Views.promos.mount), поэтому дублей поведения нет.
+       */
       if (this.tab === 'prices') this.tabPrices(host);
-      else if (this.tab === 'promos') this.tabPromos(host);
-      else if (this.tab === 'strategies') this.tabStrategies(host);
+      else if (this.tab === 'rules') await this.tabRules(host);
+      else if (this.tab === 'costs') this.tabCosts(host);
       else if (this.tab === 'competitors') this.tabCompetitors(host);
-      else if (this.tab === 'params') this.tabParams(host);
+      else if (this.tab === 'promos') this.tabPromos(host);
       else if (this.tab === 'journal-prices') this.tabJournal(host, 'prices');
       else if (this.tab === 'journal-promos') this.tabJournal(host, 'promos');
-      else this.tabRuns(host);
+      else if (this.tab === 'schedule') await this.tabSchedule(host);
+      else await this.tabParams(host);
     } catch (e) {
       host.innerHTML = `<div class="card"><div class="alert danger">${U.esc(e.message)}</div></div>`;
     }
@@ -116,7 +132,7 @@ Views.repricer = {
             </select>
             <input type="number" id="rp-interval" class="num" style="width:90px" min="5" max="1440" value="${cfg.schedule.intervalMinutes}" title="Интервал, минут" />
             <button class="btn btn-primary" id="rp-calc">Пересчёт (фаза 1)</button>
-            <button class="btn btn-ok" id="rp-send" disabled>Отправить предложение в WB (фаза 2)</button>
+            <button class="btn btn-ok" id="rp-send" disabled title="Отправить цены в WB после подтверждения">Обновить цены (отправить)</button>
           </div>
         </div>
         <div class="alert info" style="margin-top:12px">
@@ -2062,6 +2078,169 @@ Views.repricer = {
 
   // ══════════════════════ ВКЛАДКА: АКЦИИ ══════════════════════
 
+  // ══════════════════════ ВКЛАДКА: МАССОВЫЕ ПРАВИЛА ══════════════════════
+
+  /**
+   * Массовые правила переценки. Сам движок живёт в общем модуле RULES (его же
+   * использует раздел «Цены и скидки»), поэтому типы правил, округление,
+   * минимальная цена и проверка карантина считаются одинаково.
+   *
+   * Отправки в WB здесь принципиально нет: план пишется в черновики цен
+   * (prices:draft-save), а в маркетплейс цены уходят только из вкладки «Товары»
+   * кнопкой «Обновить цены (отправить)».
+   */
+  async tabRules(host) {
+    const st = S.state;
+    if (!this.rulesRule) this.rulesRule = RULES.normalize(st.priceRule);
+    const rule = this.rulesRule;
+
+    host.innerHTML = `
+      <div class="card" style="margin-bottom:12px">
+        <div class="spread wrap">
+          <h2 style="margin:0">Массовые правила переценки</h2>
+          <span class="row wrap" style="gap:6px">
+            ${UI.badge('движок RULES — общий с «Ценами и скидками»', 'info')}
+            ${UI.badge('в WB отсюда не отправляем', 'warn')}
+          </span>
+        </div>
+        <p class="hint">Правило применяется к выбранной области, сначала показывается предпросмотр
+          (старые и новые цены, прибыль, маржа, риски), и только потом цены записываются
+          в черновик приложения. В Wildberries они уйдут из вкладки «Товары» после подтверждения.</p>
+        <div class="row wrap" style="margin-top:10px;gap:8px;align-items:flex-end">
+          <label class="field" style="width:230px">Область применения
+            <select id="rr-scope">
+              <option value="all">Все товары</option>
+              <option value="filtered">Под текущим фильтром</option>
+              <option value="selected">Выбранные в таблице</option>
+              <option value="loss">Убыточные</option>
+              <option value="low">С низкой маржой</option>
+              <option value="illiquid">Неликвид (90+ дней)</option>
+            </select>
+          </label>
+          <label class="field" style="width:300px">Правило
+            <select id="rr-type">
+              ${RULES.TYPES.map((t) => `<option value="${t.id}">${U.esc(t.label)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="field" style="width:130px">Значение
+            <input id="rr-value" type="number" step="any" class="num" value="${rule.value}" title="${U.esc(RULES.valueTitle(rule.type))}" />
+          </label>
+          <label class="field" style="width:120px">Округление до, ₽
+            <input id="rr-round" type="number" step="1" min="0" class="num" value="${rule.roundTo || 0}" />
+          </label>
+          <label class="field" style="width:120px">Не ниже, ₽
+            <input id="rr-min" type="number" step="1" min="0" class="num" value="${rule.minPrice || 0}" />
+          </label>
+          <button class="btn btn-primary" id="rr-preview">Рассчитать предпросмотр</button>
+          <button class="btn btn-ok" id="rr-save" disabled title="Сохранить новые цены в данных приложения — в WB ничего не уходит">Записать в черновики цен</button>
+        </div>
+        <div id="rr-info" class="hint" style="margin-top:8px"></div>
+      </div>
+      <div id="rr-preview-host"></div>
+      <div class="card" style="margin-top:14px">
+        <h2 style="margin:0 0 6px">Назначить параметры всем выбранным</h2>
+        <p class="hint" style="margin:0">Стратегия, минимальная цена и себестоимость — то, что раньше было
+          отдельной вкладкой «Параметры товаров (массово)». Правки копятся и сохраняются одной кнопкой.</p>
+      </div>
+      <div id="rr-strategies"></div>
+    `;
+
+    const $ = (id) => host.querySelector(id);
+    $('#rr-type').value = rule.type;
+    $('#rr-type').onchange = (e) => {
+      rule.type = e.target.value;
+      $('#rr-value').title = RULES.valueTitle(rule.type);
+      this.rulesPlan = null;
+      $('#rr-save').disabled = true;
+    };
+    $('#rr-value').oninput = (e) => { rule.value = U.num(e.target.value); };
+    $('#rr-round').oninput = (e) => { rule.roundTo = U.num(e.target.value); };
+    $('#rr-min').oninput = (e) => { rule.minPrice = U.num(e.target.value); };
+
+    const info = (text) => { const el = $('#rr-info'); if (el) el.innerHTML = text; };
+
+    $('#rr-preview').onclick = () => {
+      const scope = $('#rr-scope').value;
+      const rows = scope === 'all' ? S.getRows() : RULES.scopeRows(scope, { editing: null });
+      const settings = Object.assign({}, st.settings, { maxPriceChangePct: st.settings.maxPriceChangePct });
+      const result = RULES.buildPlan({ rows, rule, edits: null, settings });
+      this.rulesPlan = result;
+      const box = $('#rr-preview-host');
+      box.innerHTML = `
+        <div class="grid g4" style="margin-bottom:10px">
+          <div class="card stat"><span class="label">Товаров в области</span><span class="value">${result.plan.length}</span></div>
+          <div class="card stat"><span class="label">Изменится цен</span><span class="value">${result.changed.length}</span></div>
+          <div class="card stat"><span class="label">С предупреждениями</span><span class="value ${result.risky.length ? 'warnc' : 'pos'}">${result.risky.length}</span></div>
+          <div class="card stat"><span class="label">Δ прибыли на единицу</span><span class="value ${U.profitClass(result.deltaProfit)}">${U.signed(result.deltaProfit)} ₽</span></div>
+        </div>
+        <div id="rr-table"></div>`;
+      const tbl = UI.table({
+        columns: [
+          { title: 'Товар', render: (p) => `<div class="rowtitle"><b class="trunc">${U.esc(p.title)}</b><span class="tiny muted">${p.nmID} · ${U.esc(p.vendorCode)}</span></div>` },
+          { title: 'Было: цена / скидка', num: true, render: (p) => `${U.money(p.oldSeller)} / ${U.pct(p.oldDisc, 0)}` },
+          { title: 'Станет: цена / скидка', num: true, render: (p) => `<b>${U.money(p.newSeller)}</b> / ${U.pct(p.newDisc, 0)}` },
+          { title: 'Изменение', num: true, render: (p) => `<span class="${p.changePct < 0 ? 'neg' : 'pos'}">${U.signed(p.changePct, 1)}%</span>` },
+          { title: 'Прибыль/шт', num: true, render: (p) => `<span class="muted">${U.money(p.oldProfit)}</span> → <b class="${U.profitClass(p.newProfit)}">${U.money(p.newProfit)}</b>` },
+          { title: 'Маржа', num: true, render: (p) => `<span class="muted">${U.pct(p.oldMargin)}</span> → <b class="${U.profitClass(p.newMargin)}">${U.pct(p.newMargin)}</b>` },
+          { title: 'Риски', render: (p) => p.warnings.length ? p.warnings.map((w) => UI.badge(w, /карантин|убыток/.test(w) ? 'danger' : 'warn')).join(' ') : UI.badge('ок', 'ok') }
+        ],
+        rows: result.plan.slice(0, 400),
+        empty: 'В выбранной области нет товаров'
+      });
+      box.querySelector('#rr-table').appendChild(tbl.el);
+      $('#rr-save').disabled = !result.changed.length;
+      info(result.changed.length
+        ? `Готово к записи: <b>${result.changed.length}</b> товаров. Нажмите «Записать в черновики цен» — в WB ничего не уйдёт.`
+        : 'Правило ничего не меняет: выберите другой тип или значение.');
+      App.toast('Предпросмотр готов: изменится ' + result.changed.length + ' товаров', 'ok', 4000);
+    };
+
+    $('#rr-save').onclick = async (e) => {
+      const plan = this.rulesPlan;
+      if (!plan || !plan.changed.length) { App.toast('Сначала рассчитайте предпросмотр', 'warn'); return; }
+      const btn = e.target;
+      btn.disabled = true;
+      const was = btn.textContent;
+      btn.textContent = 'Записываем…';
+      try {
+        const items = {};
+        plan.changed.forEach((p) => {
+          items[String(p.nmID)] = { basePrice: Math.round(p.newBase), discount: Math.round(p.newDisc), note: 'массовое правило' };
+        });
+        const res = await API.invoke('prices:draft-save', { items });
+        await S.loadDrafts();
+        info(`Записано в черновики: <b>${res.count}</b> товаров. В WB ничего не отправлено — отправка из вкладки «Товары».`);
+        App.toast('Черновики обновлены: ' + res.count + ' поз. В WB не отправлено.', 'ok', 7000);
+      } catch (err) {
+        App.toast(err.message, 'err', 8000);
+      } finally {
+        btn.textContent = was;
+        btn.disabled = false;
+      }
+    };
+
+    // массовое назначение стратегии/порога — прежняя вкладка «Параметры товаров (массово)»
+    await this.tabStrategies(host.querySelector('#rr-strategies'));
+  },
+
+  // ══════════════════════ ВКЛАДКА: СЕБЕСТОИМОСТЬ ══════════════════════
+
+  /**
+   * Себестоимость и расходы прямо в репрайсере: та же панель, что в разделе
+   * «Себестоимость» (Views.costs.mount). Запись — costs:save, импорт — costs:import.
+   */
+  tabCosts(host) {
+    host.innerHTML = `
+      <div class="card" style="margin-bottom:12px">
+        <b>Себестоимость и расходы</b>
+        <span class="hint" style="margin-left:8px">Ввод, массовое заполнение и импорт CSV/XLSX работают так же,
+        как в разделе «Себестоимость»: значения сохраняются сразу и сразу видны в таблице товаров.</span>
+      </div>
+      <div id="rp-costs-host"></div>
+    `;
+    Views.costs.mount(host.querySelector('#rp-costs-host'));
+  },
+
   async tabPromos(host) {
     const rs = this.rstate;
     const cfg = rs.config;
@@ -2187,6 +2366,23 @@ Views.repricer = {
 
     if (this.promoRows.length) { this.drawPromoSummary(); this.renderPromoGrid(); }
     await this.renderPending();
+
+    /**
+     * Календарь акций — тот же компонент, что в разделе «Акции»
+     * (Views.promos.mount): карточки акций, вход/выход выбранными товарами,
+     * импорт состава файлом из кабинета и прямая ссылка на акцию.
+     * К WB за составом не ходим: метод nomenclatures отвечает HTTP 422.
+     */
+    const calHead = document.createElement('div');
+    calHead.className = 'card';
+    calHead.style.marginTop = '14px';
+    calHead.innerHTML = `<div class="spread wrap"><b>Календарь акций Wildberries</b>
+      <span class="hint">состав загружается файлом из кабинета; к WB за составом не обращаемся</span></div>`;
+    host.appendChild(calHead);
+    const cal = document.createElement('div');
+    cal.id = 'pa-calendar';
+    host.appendChild(cal);
+    Views.promos.mount(cal);
   },
 
   drawPromoSummary() {
@@ -2885,6 +3081,7 @@ Views.repricer = {
         <div class="row wrap" style="margin-top:10px">
           ${UI.badge('товаров с конкурентами: ' + withComps.length, 'info')}
           ${UI.badge('всего записей: ' + Object.values(comps).reduce((s, l) => s + l.length, 0))}
+          <span id="cp-watch-status" class="hint">Автозапросы к витрине выключены: кнопка «С витрины» делает один разовый запрос.</span>
         </div>
       </div>
       <div id="cp-grid"></div>
@@ -2995,7 +3192,7 @@ Views.repricer = {
               return `<span class="${diff > 0 ? 'neg' : 'pos'}">${U.signed(diff, 1)}%</span>`;
             } },
           { title: 'Прибыль/шт', num: true, render: (r) => `<span class="${U.profitClass(r.profit)}">${U.money(r.profit)}</span>` },
-          { title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-cp="${r.nmID}">изменить</button>` }
+          { title: '', render: (r) => `<span class="row wrap" style="gap:4px"><button class="btn btn-xs btn-ghost" data-cp="${r.nmID}">изменить</button><button class="btn btn-xs btn-ghost" data-watch="${r.nmID}" title="Обновить с витрины: разовый запрос к витрине WB — цена конкурента с учётом СПП">С витрины</button></span>` }
         ],
         rows: list.slice(0, 500),
         tall: true,
@@ -3005,11 +3202,67 @@ Views.repricer = {
       gh.querySelectorAll('[data-cp]').forEach((b) => {
         b.onclick = (e) => { e.stopPropagation(); this.openCompetitors(Number(b.dataset.cp)); };
       });
+      gh.querySelectorAll('[data-watch]').forEach((b) => {
+        b.onclick = (e) => { e.stopPropagation(); this.refreshCompetitorFromShowcase(Number(b.dataset.watch), host); };
+      });
     };
 
     host.querySelector('#cp-q').oninput = U.debounce(drawGrid, 220);
     host.querySelector('#cp-only').onchange = drawGrid;
     drawGrid();
+  },
+
+  /**
+   * Один разовый запрос к витрине WB по товару (канал pricewatch:fetch, force).
+   * Автозапросы не включаем: настройка priceWatchAutoFetch остаётся как была.
+   * Если витрина отвечает 403/HTML или включён демо-режим, честно пишем
+   * «заблокировано, введите вручную» — выдуманных цен не подставляем.
+   */
+  async refreshCompetitorFromShowcase(nmID, host) {
+    const status = host && host.querySelector('#cp-watch-status');
+    const say = (text, kind) => { if (status) status.innerHTML = UI.badge(text, kind || ''); };
+    say('Запрашиваем витрину WB…', 'info');
+    try {
+      const res = await API.invoke('pricewatch:fetch', { nmIDs: [nmID], force: true });
+      const first = ((res && res.results) || [])[0] || {};
+      const blocked = !!first.code && first.code !== 'OK';
+      if (!res || res.ok === false || blocked) {
+        const why = (res && res.message) || first.message || (res && res.blocked ? 'доступ заблокирован (403/HTML)' : 'данные не получены');
+        const text = 'заблокировано, введите вручную: ' + why;
+        say(text, 'warn');
+        App.toast('Витрина: ' + why + '. Введите цену конкурента вручную.', 'warn', 9000);
+        return;
+      }
+      const price = U.num(first.shelfPrice || first.price);
+      if (!(price > 0)) {
+        say('витрина не вернула цену — введите вручную', 'warn');
+        App.toast('Витрина не вернула цену — введите цену конкурента вручную', 'warn', 7000);
+        return;
+      }
+
+      const key = String(nmID);
+      const list = ((this.rstate.competitors || {})[key] || []).slice();
+      const existing = list.find((c) => c && c.source === 'watch');
+      if (existing) {
+        existing.price = price;
+        existing.stock = 1;
+        existing.enabled = true;
+        existing.updatedAt = new Date().toISOString();
+      } else {
+        list.push({
+          id: key + '-watch', name: 'Витрина WB', price, stock: 1,
+          enabled: true, source: 'watch', updatedAt: new Date().toISOString()
+        });
+      }
+      await API.invoke('repricer:competitors:save', { items: { [key]: list } });
+      this.rstate = await API.invoke('repricer:state');
+      say('витрина: ' + U.money(price) + ' — конкурент обновлён', 'ok');
+      App.toast('Цена с витрины: ' + U.money(price) + ' — сохранена в конкурентах', 'ok', 6000);
+      this.draw();
+    } catch (e) {
+      say('заблокировано, введите вручную: ' + e.message, 'warn');
+      App.toast('Витрина недоступна (' + e.message + '). Введите цену конкурента вручную.', 'warn', 9000);
+    }
   },
 
   openCompetitors(nmID) {
@@ -3078,6 +3331,90 @@ Views.repricer = {
     });
   },
 
+  // ══════════════════════ ВКЛАДКА: РАСПИСАНИЕ ══════════════════════
+
+  /**
+   * Расписание пересчёта и отправки: интервал, двухфазный цикл, задержка отправки,
+   * автоотправка. Сохраняется существующим каналом repricer:save. Здесь же —
+   * история запусков, которая раньше была отдельной вкладкой.
+   */
+  async tabSchedule(host) {
+    const rs = this.rstate;
+    const c = rs.config;
+    const sched = rs.scheduler || {};
+    const opt = (v, cur, label) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${label}</option>`;
+
+    host.innerHTML = `
+      <div class="card" style="margin-bottom:12px">
+        <div class="spread wrap">
+          <h2 style="margin:0">Расписание</h2>
+          <span class="hint">${sched.enabled && sched.nextRunAt ? 'Следующий пересчёт: <b>' + U.date(sched.nextRunAt, true) + '</b>' : 'Планировщик выключен'}</span>
+        </div>
+        <p class="hint">Расписание применяется ко всем товарам. Параметры маржинальности, лимитов и коридора — на вкладке «Параметры».</p>
+        <label class="checkline" style="margin-top:10px"><input type="checkbox" id="ps-enabled" ${c.enabled ? 'checked' : ''} />
+          <b>Автообновление цен включено</b></label>
+        <div class="grid g3" style="gap:10px;margin-top:10px">
+          <label class="field">Как часто пересчитывать
+            <select id="ps-mode">
+              ${opt('hourly', c.schedule.mode, 'Ежечасно (рекомендуется)')}
+              ${opt('interval', c.schedule.mode, 'Каждые N минут')}
+              ${opt('daily', c.schedule.mode, 'Раз в сутки в выбранный час')}
+            </select>
+          </label>
+          <label class="field">Интервал, минут
+            <input type="number" class="num" id="ps-interval" value="${c.schedule.intervalMinutes}" min="5" max="1440" /></label>
+          <label class="field">Час пересчёта (для «раз в сутки»)
+            <input type="number" class="num" id="ps-hour" value="${c.schedule.hourOfDay}" min="0" max="23" /></label>
+          <label class="field">Через сколько отправлять предложение, мин
+            <input type="number" class="num" id="ps-senddelay" value="${U.num(c.schedule.sendDelayMinutes, 40)}" min="1" max="1440" /></label>
+        </div>
+        <label class="checkline" style="margin-top:12px"><input type="checkbox" id="ps-twophase" ${c.schedule.twoPhase !== false ? 'checked' : ''} />
+          <b>Двухфазный цикл: сначала показать предложение, потом отправить</b></label>
+        <label class="checkline" style="margin-top:8px"><input type="checkbox" id="ps-autosend" ${c.schedule.autoSend ? 'checked' : ''} />
+          <b>Автоматически отправлять предложение в WB</b> (без подтверждения, по расписанию фазы 2)</label>
+        <p class="hint" style="margin-top:6px">Сначала лучше держать автоотправку выключенной: репрайсер считает цены и показывает
+          предложение, а цены уходят в WB вручную из вкладки «Товары». Если двухфазный цикл выключить,
+          автоотправка уйдёт в WB сразу после пересчёта — как раньше.</p>
+        <div class="row wrap" style="margin-top:12px">
+          <button class="btn btn-primary" id="ps-save">Сохранить расписание</button>
+          <span class="hint">Сохранение — существующим каналом repricer:save.</span>
+        </div>
+      </div>
+      <div id="ps-runs-host"></div>
+    `;
+
+    const $ = (id) => host.querySelector(id);
+    $('#ps-save').onclick = async (e) => {
+      const btn = e.target;
+      btn.disabled = true;
+      const was = btn.textContent;
+      btn.textContent = 'Сохраняем…';
+      try {
+        await API.invoke('repricer:save', {
+          enabled: $('#ps-enabled').checked,
+          schedule: {
+            mode: $('#ps-mode').value,
+            intervalMinutes: U.num($('#ps-interval').value, 60),
+            hourOfDay: U.num($('#ps-hour').value, 9),
+            twoPhase: $('#ps-twophase').checked,
+            autoSend: $('#ps-autosend').checked,
+            sendDelayMinutes: U.num($('#ps-senddelay').value, 40),
+            sendIntervalMinutes: 0
+          }
+        });
+        this.rstate = await API.invoke('repricer:state');
+        App.toast('Расписание сохранено', 'ok', 4000);
+        this.draw();
+      } catch (err) {
+        App.toast(err.message, 'err', 7000);
+        btn.disabled = false;
+        btn.textContent = was;
+      }
+    };
+
+    await this.tabRuns(host.querySelector('#ps-runs-host'));
+  },
+
   // ══════════════════════ ВКЛАДКА: ПАРАМЕТРЫ ══════════════════════
 
   async tabParams(host) {
@@ -3106,34 +3443,13 @@ Views.repricer = {
                   ${opt('wallet', c.marginMode, 'От цены с СПП + WB-кошелёк')}
                 </select>
               </label>
-              <label class="field">Расписание пересчёта
-                <select id="pm-mode">
-                  ${opt('hourly', c.schedule.mode, 'Ежечасно (рекомендуется)')}
-                  ${opt('interval', c.schedule.mode, 'Каждые N минут')}
-                  ${opt('daily', c.schedule.mode, 'Раз в сутки в выбранный час')}
-                </select>
-              </label>
-              <label class="field">Интервал пересчёта, минут<input type="number" class="num" id="pm-interval" value="${c.schedule.intervalMinutes}" min="5" max="1440" /></label>
-              <label class="field">Час пересчёта (для «раз в сутки»)<input type="number" class="num" id="pm-hour" value="${c.schedule.hourOfDay}" min="0" max="23" /></label>
               <label class="field">Скидка WB-кошелька, %<input type="number" class="num" id="pm-wallet" value="${c.priceEdit.walletPct}" step="0.5" /></label>
-              <label class="field">Через сколько отправлять предложение, мин<input type="number" class="num" id="pm-senddelay" value="${U.num(c.schedule.sendDelayMinutes, 40)}" min="1" max="1440" /></label>
             </div>
 
             <div class="alert info" style="margin-top:12px">
-              <b>Двухфазный автоцикл.</b> Фаза 1 (каждые ${U.num(c.schedule.intervalMinutes, 40)} мин) — репрайсер пересчитывает цены
-              и <b>показывает</b>, что хочет поставить: установленные цены при этом не меняются.
-              Фаза 2 (через ${U.num(c.schedule.sendDelayMinutes, 40)} мин после расчёта) — предложение уходит в WB,
-              и только если включена автоотправка. Перед отправкой цены перечитываются из кабинета: позиции,
-              которые изменились без приложения, пропускаются — чужие правки не затираются.
+              Расписание пересчёта, двухфазный цикл, задержка и автоотправка переехали на вкладку
+              <b>«Расписание»</b> — там же история запусков.
             </div>
-
-            <label class="checkline" style="margin-top:12px"><input type="checkbox" id="pm-twophase" ${c.schedule.twoPhase !== false ? 'checked' : ''} />
-              <b>Двухфазный цикл: сначала показать предложение, потом отправить</b></label>
-            <label class="checkline" style="margin-top:8px"><input type="checkbox" id="pm-autosend" ${c.schedule.autoSend ? 'checked' : ''} />
-              <b>Автоматически отправлять предложение в WB</b> (без подтверждения, по расписанию фазы 2)</label>
-            <p class="hint" style="margin-top:6px">Рекомендуем сначала держать автоотправку выключенной: репрайсер будет считать цены
-              и показывать предложение, а отправлять вы будете вручную из вкладки «Товары».
-              Если двухфазный цикл выключить, автоотправка уйдёт в WB сразу после пересчёта — как раньше.</p>
           </div>
 
           <div class="card">
@@ -3270,15 +3586,6 @@ Views.repricer = {
     host.querySelector('#pm-save').onclick = async () => {
       const patch = {
         marginMode: host.querySelector('#pm-marginmode').value,
-        schedule: {
-          mode: host.querySelector('#pm-mode').value,
-          intervalMinutes: U.num(host.querySelector('#pm-interval').value, 60),
-          hourOfDay: U.num(host.querySelector('#pm-hour').value, 9),
-          autoSend: host.querySelector('#pm-autosend').checked,
-          twoPhase: host.querySelector('#pm-twophase').checked,
-          sendDelayMinutes: U.num(host.querySelector('#pm-senddelay').value, 40),
-          sendIntervalMinutes: 0
-        },
         priceEdit: {
           canChangeBasePrice: host.querySelector('#pm-baseprice').value,
           canCancelDiscount: host.querySelector('#pm-canceldisc').checked,
@@ -3588,7 +3895,7 @@ Views.repricer = {
               <td class="num">${r.summary ? r.summary.warnings : '—'}</td>
               <td>${r.autoSend ? UI.badge('да', 'danger') : UI.badge('нет')}</td>
               <td>${r.demo ? UI.badge('демо') : UI.badge('WB API', 'live')}</td>
-            </tr>`).join('')}</tbody></table>` : '<div class="muted small" style="padding:8px">Пересчётов ещё не было — нажмите «Пересчитать цены» на вкладке «Новые цены».</div>'}
+            </tr>`).join('')}</tbody></table>` : '<div class="muted small" style="padding:8px">Пересчётов ещё не было — нажмите «Пересчёт» на вкладке «Товары».</div>'}
         </div>
       </div>
       <div class="card pad0">

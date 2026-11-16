@@ -358,7 +358,7 @@ async function run() {
   window.App.go('repricer');
   await wait(800);
   const rpTabs = doc.querySelectorAll('#rp-tabs .tab').length;
-  check('репрайсер: вкладки построены', rpTabs === 8, rpTabs + ' вкладок');
+  check('репрайсер: вкладки построены', rpTabs === 9, rpTabs + ' вкладок');
   check('репрайсер: есть журнал изменения цен',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал изменения цен/.test(t.textContent)));
   check('репрайсер: есть журнал участия в акциях',
@@ -448,11 +448,11 @@ async function run() {
   const histCount = Object.keys(hist || {}).length;
   check('репрайсер: история цен заполнена после отправки', histCount > 0, histCount + ' артикулов');
 
-  // вкладка «Товары и стратегии»: массовое назначение стратегии
-  window.Views.repricer.tab = 'strategies';
+  // «Массовые правила»: там же массовое назначение стратегии (прежняя отдельная вкладка)
+  window.Views.repricer.tab = 'rules';
   window.App.go('repricer');
   await wait(400);
-  window.Views.repricer.tab = 'strategies';
+  window.Views.repricer.tab = 'rules';
   await window.Views.repricer.draw();
   await wait(900);
   const stRows = doc.querySelectorAll('#st-grid tbody tr').length;
@@ -569,18 +569,29 @@ async function run() {
   await wait(700);
   check('репрайсер: параметры отрисованы', /Режим расчёта маржинальности/.test(doc.getElementById('view').innerHTML));
   check('репрайсер: есть режимы расчёта маржи', doc.querySelectorAll('#pm-marginmode option').length === 3);
-  check('репрайсер: есть автоотправка цен', !!doc.querySelector('#pm-autosend'));
+  check('репрайсер: расписание и отправка вынесены на свою вкладку',
+    !doc.querySelector('#pm-autosend') && !doc.querySelector('#pm-twophase'));
   doc.querySelector('#pm-step').value = '12';
   doc.querySelector('#pm-day').value = '5';
   doc.querySelector('#pm-marginmode').value = 'forpay';
-  doc.querySelector('#pm-autosend').checked = true;
   doc.querySelector('#pm-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await wait(1200);
   const savedCfg = (await service.handlers['repricer:state']()).config;
   check('репрайсер: лимит шага сохранён', savedCfg.limits.maxChangePerUpdatePct === 12, String(savedCfg.limits.maxChangePerUpdatePct));
   check('репрайсер: суточный лимит подтянут до лимита обновления', savedCfg.limits.maxChangePerDayPct === 12, String(savedCfg.limits.maxChangePerDayPct));
   check('репрайсер: режим маржи сохранён', savedCfg.marginMode === 'forpay');
-  check('репрайсер: автоотправка сохранена', savedCfg.schedule.autoSend === true);
+
+  // автоотправка переехала на вкладку «Расписание» и сохраняется оттуда
+  window.Views.repricer.tab = 'schedule';
+  await window.Views.repricer.draw();
+  await wait(900);
+  check('репрайсер: автоотправка на вкладке «Расписание»', !!doc.querySelector('#ps-autosend'));
+  if (doc.querySelector('#ps-autosend')) {
+    doc.querySelector('#ps-autosend').checked = true;
+    doc.querySelector('#ps-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(1300);
+    check('репрайсер: автоотправка сохранена', (await service.handlers['repricer:state']()).config.schedule.autoSend === true);
+  }
 
   // планировщик
   const schedOn = await service.handlers['repricer:scheduler']({ enabled: true });
@@ -594,8 +605,8 @@ async function run() {
   const byStrat = res2.summary.byStrategy || {};
   check('репрайсер: учтены стратегии товаров', Object.keys(byStrat).length >= 2, JSON.stringify(byStrat).slice(0, 120));
 
-  // вкладка «История запусков»
-  window.Views.repricer.tab = 'runs';
+  // история запусков переехала на вкладку «Расписание»
+  window.Views.repricer.tab = 'schedule';
   window.Views.repricer.rstate = await service.handlers['repricer:state']();
   await window.Views.repricer.draw();
   await wait(700);
@@ -732,9 +743,11 @@ async function run() {
     check('цены: правило по умолчанию выключено (не «−5%»)', /priceRule:\s*\{\s*type:\s*'none'/.test(stSrc));
     check('цены: ручные правки хранятся в общем состоянии, а не в поле вьюхи',
       /S\.state\.priceEdits/.test(prSrc) && /get editing\(\)/.test(prSrc));
+    const rulesSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'renderer', 'js', 'rules.js'), 'utf8');
     check('цены: правило применяется только там, где нет ручной правки',
-      /const ruleActive = rule\.type && rule\.type !== 'none';/.test(prSrc) &&
-      /\(!manual && ruleActive\)\s*\?\s*EC\.applyRule/.test(prSrc));
+      /const ruleActive = rule\.type && rule\.type !== 'none';/.test(rulesSrc) &&
+      /\(!manual && ruleActive\)\s*\?\s*EC\.applyRule/.test(rulesSrc) &&
+      /RULES\.buildPlan/.test(prSrc));
     check('цены: при ручном вводе область сама переключается на «изменённые вручную»',
       /sel\.value = 'edited'/.test(prSrc));
     check('цены: заблокированная кнопка объясняет причину',
@@ -1621,9 +1634,9 @@ async function run() {
     'позиций ' + (prop.items || []).length + ', sendAt ' + (prop.sendAt || '—'));
   check('репрайсер: установленные цены не затёрты пересчётом',
     (await service.handlers['tasks:history']()).length === 0 || prop.phase !== 'sent', 'phase=' + prop.phase);
-  const paramsTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Параметры репрайсера/.test(t.textContent));
-  if (paramsTab) { paramsTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(900); }
-  check('репрайсер: двухфазный цикл настраивается', !!doc.getElementById('pm-twophase') && !!doc.getElementById('pm-senddelay'));
+  const scheduleTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /^Расписание$/.test(t.textContent.trim()));
+  if (scheduleTab) { scheduleTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(1200); }
+  check('репрайсер: двухфазный цикл настраивается', !!doc.getElementById('ps-twophase') && !!doc.getElementById('ps-senddelay'));
   check('репрайсер: объяснены фазы расчёта и отправки', /Фаза 1|сначала показать предложение/i.test(doc.getElementById('view').textContent));
 
   // ── акции: состав из файла, а не из WB (метод nomenclatures отвечает 422) ──
@@ -2170,6 +2183,197 @@ async function run() {
   headRowsD = null; groupThs = null; dTr = null; cpD = null; cnyInp = null; exD = null;
   if (global.gc) global.gc();
 
+  // ═════════════ ЗАДАНИЕ Е: одно рабочее место — всё внутри репрайсера ═════════════
+  const eClick = async (id, ms) => {
+    const t = doc.querySelector(`#rp-tabs [data-t="${id}"]`);
+    if (t) { t.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(ms || 1400); }
+    return !!t;
+  };
+  const eOrigCfg = (await service.handlers['repricer:state']()).config;
+
+  window.App.go('repricer');
+  await wait(900);
+  const eTabs = Array.from(doc.querySelectorAll('#rp-tabs .tab')).map((t) => t.textContent.trim());
+  check('Е: в репрайсере девять вложенных вкладок', eTabs.length === 9, eTabs.join(' | '));
+  check('Е: порядок и названия вкладок как в задании',
+    eTabs.join('|') === 'Товары|Массовые правила|Себестоимость|Конкуренты|Акции|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
+    eTabs.join('|'));
+  check('Е: отдельных вкладок «Параметры товаров» и «История запусков» больше нет',
+    !eTabs.some((t) => /Параметры товаров|История запусков/i.test(t)));
+
+  // общий модуль правил
+  check('Е: модуль RULES загружен до вьюх', !!window.RULES && typeof window.RULES.buildPlan === 'function');
+  check('Е: типы массовых правил сохранены', window.RULES.TYPES.length === 8 &&
+    window.RULES.TYPES.map((t) => t.id).join(',') === 'none,delta-pct,delta-price,set-price,set-discount,set-base,set-target-margin,set-profit',
+    window.RULES.TYPES.map((t) => t.id).join(','));
+  check('Е: «Цены и скидки» строят правило общим модулем',
+    String(window.Views.prices.scopeRows).includes('RULES.scopeRows') &&
+    String(window.Views.prices.preview).includes('RULES.buildPlan'));
+  const ePlan = window.RULES.buildPlan({
+    rows: window.S.getRows().slice(0, 3),
+    rule: { type: 'set-discount', value: 35, roundTo: 0, minPrice: 0 },
+    edits: null
+  });
+  check('Е: план правила считается и содержит риски', ePlan.plan.length === 3 &&
+    ePlan.plan.every((p) => Math.abs(p.newDisc - 35) < 2 && Array.isArray(p.warnings)),
+    'строк ' + ePlan.plan.length + ', скидки ' + ePlan.plan.map((p) => p.newDisc).join(', '));
+
+  // ── «Массовые правила» ──
+  check('Е: вкладка «Массовые правила» открывается', await eClick('rules', 1800));
+  check('Е: на вкладке есть выбор правила и области', !!doc.getElementById('rr-type') && !!doc.getElementById('rr-scope'));
+  check('Е: в правилах все восемь типов', doc.querySelectorAll('#rr-type option').length === 8,
+    doc.querySelectorAll('#rr-type option').length + ' вариантов');
+  check('Е: массовое назначение параметров товаров здесь же', !!doc.getElementById('st-grid'));
+  if (global.gc) global.gc();
+  doc.querySelector('#rr-type').value = 'set-discount';
+  doc.querySelector('#rr-type').dispatchEvent(new window.Event('change', { bubbles: true }));
+  doc.querySelector('#rr-value').value = '35';
+  doc.querySelector('#rr-value').dispatchEvent(new window.Event('input', { bubbles: true }));
+  doc.querySelector('#rr-scope').value = 'loss';
+  const eTasksBefore = (await service.handlers['tasks:history']()).length;
+  doc.querySelector('#rr-preview').click();
+  await wait(900);
+  const ePreviewRows = doc.querySelectorAll('#rr-preview-host tbody tr').length;
+  check('Е: предпросмотр правила рисует план', ePreviewRows > 0, ePreviewRows + ' строк');
+  check('Е: кнопка записи в черновик активировалась', doc.getElementById('rr-save') && !doc.getElementById('rr-save').disabled);
+  doc.getElementById('rr-save').click();
+  await wait(1600);
+  const eDrafts = await service.handlers['prices:draft-load']();
+  check('Е: правило пишет цены в черновик каналом prices:draft-save',
+    Object.keys(eDrafts.items || {}).length > 0, 'черновиков ' + Object.keys(eDrafts.items || {}).length);
+  check('Е: из массовых правил в WB ничего не отправлено',
+    (await service.handlers['tasks:history']()).length === eTasksBefore);
+  await service.handlers['prices:draft-clear']({});
+  await window.S.loadDrafts();
+
+  // ── «Себестоимость» ──
+  check('Е: вкладка «Себестоимость» открывается', await eClick('costs', 1800));
+  check('Е: таблица себестоимости отрисована', !!doc.getElementById('c-grid') &&
+    doc.querySelectorAll('#c-grid tbody tr').length > 0,
+    doc.querySelectorAll('#c-grid tbody tr').length + ' строк');
+  const eCostInput = doc.querySelector('#c-grid tbody tr input.cellinput');
+  check('Е: поле себестоимости редактируется в строке', !!eCostInput);
+  const eCostKey = eCostInput ? eCostInput.closest('tr').querySelector('[data-open]').getAttribute('data-open') : null;
+  const eCostBefore = eCostKey ? (await service.handlers['costs:get']()).items[eCostKey] : null;
+  if (eCostInput) {
+    eCostInput.value = '777';
+    eCostInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(1500);
+  }
+  const eCosts = await service.handlers['costs:get']();
+  check('Е: себестоимость сохраняется каналом costs:save',
+    Object.values(eCosts.items || {}).some((c) => Number(c.costPriceRub) === 777));
+  check('Е: массовое заполнение доступно', !!doc.getElementById('cb-apply') && !!doc.getElementById('cb-field'));
+  check('Е: импорт CSV/XLSX и шаблон доступны', !!doc.getElementById('c-import') && !!doc.getElementById('c-template'));
+  const eImportLabel = ((doc.getElementById('c-import') || {}).textContent || '').trim();
+  check('Е: импорт себестоимости подписан «CSV / XLSX»', /XLSX/i.test(eImportLabel), eImportLabel);
+  if (eCostKey) {
+    // XLSX — это ZIP с XML: в окне его не разобрать, файл читает главный процесс (xlsx-lite)
+    const { buildXlsx } = require(path.join(ROOT, 'electron', 'xlsx-write'));
+    const eXlsx = buildXlsx([[eCostKey, 321.5]], { headers: ['нм-код', 'Себестоимость'] });
+    const eImp = await service.handlers['costs:import']({ base64: eXlsx.toString('base64'), fileName: 'costs.xlsx' });
+    const eAfterXlsx = (await service.handlers['costs:get']()).items[eCostKey] || {};
+    check('Е: себестоимость импортируется из XLSX каналом costs:import',
+      eImp.updated > 0 && Math.abs(Number(eAfterXlsx.costPriceRub) - 321.5) < 0.01,
+      'обновлено ' + eImp.updated + ', себестоимость ' + eAfterXlsx.costPriceRub);
+  }
+  if (global.gc) global.gc();
+  if (eCostKey) await service.handlers['costs:save']({ items: { [eCostKey]: eCostBefore || null } });
+
+  // ── «Конкуренты» ──
+  check('Е: вкладка «Конкуренты» открывается', await eClick('competitors', 1600));
+  check('Е: у конкурентов есть кнопка «Обновить с витрины»',
+    !!doc.querySelector('[data-watch]') &&
+    /Обновить с витрины/.test(doc.querySelector('[data-watch]').getAttribute('title') || ''),
+    doc.querySelector('[data-watch]') ? doc.querySelector('[data-watch]').textContent.trim() : 'нет кнопки');
+  const eWatchBefore = await service.handlers['pricewatch:get']();
+  check('Е: автозапросы к витрине по умолчанию выключены', eWatchBefore.autoFetch === false, String(eWatchBefore.autoFetch));
+  doc.querySelector('[data-watch]').click();
+  await wait(1200);
+  const eWatchStatus = (doc.getElementById('cp-watch-status') || {}).textContent || '';
+  check('Е: недоступная витрина даёт честный статус «введите вручную»',
+    /вручную/.test(eWatchStatus) && /заблокировано|демо|недоступн/i.test(eWatchStatus), eWatchStatus.slice(0, 90));
+  check('Е: разовый запрос не включил автозапросы', (await service.handlers['pricewatch:get']()).autoFetch === false);
+  if (global.gc) global.gc();
+
+  // ── «Акции» ──
+  check('Е: вкладка «Акции» открывается', await eClick('promos', 2200));
+  check('Е: календарь акций встроен в репрайсер', !!doc.getElementById('promo-cards') &&
+    doc.querySelectorAll('#promo-cards .card').length > 0,
+    doc.querySelectorAll('#promo-cards .card').length + ' карточек');
+  check('Е: решения по акциям и очередь возврата на месте', !!doc.getElementById('pa-grid') && !!doc.getElementById('pa-pending'));
+  check('Е: у акции есть загрузка состава файлом', !!doc.querySelector('#promo-cards [data-upload]'));
+  check('Е: ссылка на акцию формируется по шаблону WB',
+    /dp-promo-calendar\?action=123/.test(window.U.promoCabinetUrl({ id: 123 })));
+  if (global.gc) global.gc();
+
+  // ── «Расписание» ──
+  check('Е: вкладка «Расписание» открывается', await eClick('schedule', 1600));
+  check('Е: интервал, цикл и задержка на одной вкладке',
+    !!doc.getElementById('ps-mode') && !!doc.getElementById('ps-twophase') && !!doc.getElementById('ps-senddelay'));
+  check('Е: автоотправка настраивается там же', !!doc.getElementById('ps-autosend'));
+  check('Е: история запусков внутри расписания',
+    /Запуски репрайсера/.test((doc.getElementById('ps-runs-host') || {}).innerHTML || ''));
+  doc.getElementById('ps-interval').value = '55';
+  doc.getElementById('ps-save').click();
+  await wait(1600);
+  check('Е: расписание сохраняется каналом repricer:save',
+    Number((await service.handlers['repricer:state']()).config.schedule.intervalMinutes) === 55,
+    String((await service.handlers['repricer:state']()).config.schedule.intervalMinutes));
+
+  // ── «Параметры» ──
+  check('Е: вкладка «Параметры» открывается', await eClick('params', 1600));
+  check('Е: лимиты шага и суток на месте', !!doc.getElementById('pm-step') && !!doc.getElementById('pm-day'));
+  check('Е: коридор и целевые маржи на месте',
+    !!doc.getElementById('pm-defminmargin') && !!doc.getElementById('pm-defmargin'));
+  check('Е: расписание убрано из параметров, дублей нет',
+    !doc.getElementById('pm-mode') && !doc.getElementById('pm-twophase') && !doc.getElementById('ps-mode'));
+  doc.getElementById('pm-step').value = '17';
+  doc.getElementById('pm-save').click();
+  await wait(1800);
+  check('Е: параметры сохраняются каналом repricer:save',
+    Number((await service.handlers['repricer:state']()).config.limits.maxChangePerUpdatePct) === 17);
+
+  // вернуть исходные настройки, чтобы не влиять на следующие сценарии
+  await service.handlers['repricer:save']({
+    enabled: eOrigCfg.enabled,
+    limits: eOrigCfg.limits,
+    schedule: eOrigCfg.schedule
+  });
+  window.Views.repricer.rstate = await service.handlers['repricer:state']();
+
+  // ── панель инструментов на «Товарах» ──
+  await eClick('prices', 2000);
+  const eBar = ['rp-calc', 'rp-send', 'rp-export-xlsx', 'rp-export', 'rp-import', 'rp-edits-reset',
+    'rp-edits-commit', 'rp-cols', 'rp-density', 'rp-seg', 'rp-q'];
+  const eMissing = eBar.filter((id) => !doc.getElementById(id));
+  check('Е: панель инструментов собрана на одной странице', eMissing.length === 0,
+    eMissing.length ? 'нет: ' + eMissing.join(', ') : eBar.length + ' элементов');
+  check('Е: кнопка отправки подписана «Обновить цены»',
+    /Обновить цены/.test((doc.getElementById('rp-send') || {}).textContent || ''));
+  check('Е: пересчёт и отправка разделены',
+    !!doc.getElementById('rp-calc') && !!doc.getElementById('rp-send') && doc.getElementById('rp-calc') !== doc.getElementById('rp-send'));
+
+  // ── карточка товара: «Открыть в разделе» ──
+  const eFirst = window.S.getRows()[0];
+  await window.Views.itemcard.open(eFirst.nmID);
+  await wait(1200);
+  const eCardModal = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
+  const eOpenBtn = eCardModal ? Array.from(eCardModal.querySelectorAll('.modal-foot .btn')).find((b) => /Открыть в разделе/.test(b.textContent)) : null;
+  check('Е: в карточке товара есть ссылка «Открыть в разделе»', !!eOpenBtn);
+  if (eOpenBtn) {
+    eOpenBtn.click();
+    await wait(1000);
+    check('Е: ссылка открывает «Цены и скидки» с фильтром по товару',
+      window.S.state.view === 'prices' && String(window.S.state.filters.q) === String(eFirst.nmID) && !!doc.getElementById('grid-host'),
+      'view=' + window.S.state.view + ', q=' + window.S.state.filters.q);
+    await wait(600);
+    window.S.state.filters.q = '';
+  }
+  window.App.go('repricer');
+  await wait(1200);
+  if (global.gc) global.gc();
+
   // валидация строки: товар без себестоимости не должен предлагаться к отправке
   const rp = window.Views.repricer;
   const invalid = rp.invalidResults ? rp.invalidResults() : [];
@@ -2330,8 +2534,8 @@ async function run() {
   }
 
   // себестоимость и расходы правятся прямо в репрайсере (просил перенести из «Себестоимости»)
-  const stTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Параметры товаров/.test(t.textContent));
-  if (stTab) { stTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(1800); }
+  const stTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Массовые правила/.test(t.textContent));
+  if (stTab) { stTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(2200); }
   const stHtml = doc.getElementById('view').innerHTML;
   check('репрайсер: себестоимость редактируется в параметрах товара', /Себестоимость/.test(stHtml));
   check('репрайсер: там же упаковка, комиссия и логистика',
