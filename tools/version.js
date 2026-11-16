@@ -108,7 +108,20 @@ const MARKERS = [
   ['tools/uitest.js', 'productionRepricerPageSize', 'штатный размер страницы проверяется отдельно'],
   ['package.json', '--expose-gc', 'UI-прогон с управляемой сборкой мусора'],
   ['README.md', 'по 200 строк', 'README: страница товаров по 200 строк'],
-  ['docs/TASKS-for-agents.md', 'ЗАКРЫТО — промт оставлен как спецификация', 'задание C закрыто']
+  ['docs/TASKS-for-agents.md', 'ЗАКРЫТО — промт оставлен как спецификация', 'задание C закрыто'],
+  ['electron/wb-client.js', 'priceFromSizes', 'базовая цена из sizes[] у товаров с поразмерными ценами'],
+  ['electron/service.js', 'базовая цена в WB не задана', 'честная подпись и исключение для сохранённой цены'],
+  ['electron/repricer-engine.js', 'priceFromSizes: !!ctx.priceFromSizes', 'признак поразмерной цены в контексте расчёта'],
+  ['src/renderer/js/views/repricer.js', 'sizePriceNote', 'бейдж «цена по размерам» в репрайсере'],
+  ['tools/checks/repricer-flow.js', 'tSizePricedGoods', 'прогон поразмерных цен'],
+  ['docs/API.md', 'sizePriceMin', 'описание нормализации цены из размеров'],
+  ['README.md', 'поразмерные цены', 'инструкция про товары с ценами по размерам'],
+  ['docs/TASKS-for-agents.md', 'ЗАДАНИЕ D. Единая страница репрайсера', 'промт задания D (блоки колонок INDEEPA)'],
+  ['docs/TASKS-for-agents.md', 'ЗАДАНИЕ G. Остатки по складам WB', 'промт задания G (остатки, отключённый метод WB)'],
+  ['docs/TASKS-for-agents.md', 'ЗАДАНИЕ N. Веб-версия: туннель по умолчанию', 'промт задания N (туннель и HTTPS)'],
+  ['docs/TASKS-for-agents.md', 'Порядок работ: кто, что и за кем', 'план работ по агентам'],
+  ['docs/TASKS-for-agents.md', 'zadanie-X.patch', 'требование присылать unified diff'],
+  ['docs/API.md', 'Берётся минимальная цена размера', 'нормализация цены из размеров в справочнике API']
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */
