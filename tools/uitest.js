@@ -1920,7 +1920,7 @@ async function run() {
     return (rpv.COLUMNS || []).filter((c) => c.always || vis.has(c.id)).length;
   };
   check('INDEEPA: справочник колонок совпадает с таблицей',
-    (rpv.COLUMNS || []).length === 31 && colTh() === visCount(),
+    (rpv.COLUMNS || []).length === 32 && colTh() === visCount(),
     'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + colTh() + ', видимых ' + visCount());
   check('INDEEPA: по умолчанию показан полный набор (кроме дубля «Коридор»)',
     rpv.visibleCols().size >= 18 && !rpv.visibleCols().has('corridor'),

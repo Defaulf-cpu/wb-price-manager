@@ -105,6 +105,9 @@ const RATE_FALLBACK_MS = sc(62000);
 /** Сколько товаров в одной загрузке цен (лимит WB — 1000). */
 const MAX_ITEMS_PER_PRICE_TASK = 1000;
 
+/** Сколько размеров в одной загрузке цен по размерам (POST /api/v2/upload/task/size). */
+const MAX_SIZE_ITEMS_PER_PRICE_TASK = 1000;
+
 /** Категория токена, которую требует каждый раздел приложения. */
 const TOKEN_SCOPES = {
   prices: 'Цены и скидки (бит 3)',
@@ -137,5 +140,6 @@ module.exports = {
   RATE_SCALE,
   RATE_FALLBACK_MS,
   MAX_ITEMS_PER_PRICE_TASK,
+  MAX_SIZE_ITEMS_PER_PRICE_TASK,
   TOKEN_SCOPES
 };

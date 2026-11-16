@@ -537,6 +537,52 @@ function createDemoApi(opts) {
       return { uploaded: items.length, demo: true, task, details, batches: [] };
     },
 
+    /** Цены по размерам — POST /api/v2/upload/task/size (демо-заглушка). */
+    async applySizePrices(items) {
+      const details = [];
+      const taskId = ++taskSeq;
+      const now = new Date().toISOString();
+      for (const it of items) {
+        const g = byNm.get(Number(it.nmID));
+        if (!g) { details.push({ taskId, nmID: it.nmID, sizeID: it.sizeID, status: 6, statusText: 'Ошибка', errorText: 'Товар не найден' }); continue; }
+        const size = (g.sizes || []).find((s) => Number(s.sizeID) === Number(it.sizeID));
+        if (!size) { details.push({ taskId, nmID: g.nmID, sizeID: it.sizeID, status: 6, statusText: 'Ошибка', errorText: 'Размер не найден у товара' }); continue; }
+        const oldSeller = Number(size.price) * (1 - (Number(size.discount) || 0) / 100);
+        const newSeller = Number(it.price) * (1 - (Number(it.discount) || 0) / 100);
+        const quarantine = oldSeller > 0 && newSeller < oldSeller / 3;
+        if (quarantine) {
+          details.push({ taskId, nmID: g.nmID, sizeID: it.sizeID, price: it.price, discount: it.discount, status: 6, statusText: 'Карантин цены', errorText: 'Новая цена со скидкой более чем в 3 раза ниже прежней — размер в карантине, цена не изменена.' });
+          continue;
+        }
+        size.price = Math.round(Number(it.price));
+        size.discount = Math.round(Number(it.discount));
+        size.discountedPrice = Math.round(size.price * (1 - size.discount / 100));
+        // товар с поразмерными ценами: базовую цену пересчитываем из размеров
+        if (g.editableSizePrice) {
+          const live = (g.sizes || []).map((s) => Number(s.price) || 0).filter((p) => p > 0);
+          if (live.length) {
+            g.price = Math.min.apply(null, live);
+            g.discountedPrice = Math.round(g.price * (1 - g.discount / 100));
+          }
+        }
+        details.push({ taskId, nmID: g.nmID, sizeID: it.sizeID, price: size.price, discount: size.discount, status: 3, statusText: 'Обработано без ошибок', errorText: '' });
+      }
+      const ok = details.filter((d) => d.status === 3).length;
+      const task = {
+        taskId,
+        createdAt: now,
+        source: 'demo',
+        total: items.length,
+        ok,
+        failed: items.length - ok,
+        status: ok === items.length ? 3 : (ok ? 5 : 6),
+        statusText: ok === items.length ? 'Обработано без ошибок' : (ok ? 'Обработано с ошибками в части товаров' : 'Все товары с ошибками'),
+        details
+      };
+      tasks.unshift(task);
+      return { uploaded: items.length, demo: true, task, details, batches: [] };
+    },
+
     async uploadStates() {
       return tasks.map((t) => ({
         taskId: t.taskId,

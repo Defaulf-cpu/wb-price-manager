@@ -24,6 +24,7 @@ const CHANNELS = [
   'wb:goods',
   'wb:sizes',
   'wb:apply-prices',
+  'wb:apply-size-prices',
   'wb:upload-states',
   'wb:promos',
   'wb:promo-nomenclatures',

@@ -508,6 +508,7 @@ Views.repricer = {
     // ── блок «Новая цена» ──
     { id: 'priceNext', title: 'Новая цена', always: true, group: 'next' },
     { id: 'buyerNext', title: 'Цена покупателю станет', group: 'next' },
+    { id: 'sizes', title: 'Размеры', group: 'next' },
     { id: 'delta', title: 'Изменение', always: true, group: 'next' },
     { id: 'strategy', title: 'Стратегия', group: 'next' },
     { id: 'status', title: 'Статус', group: 'next' },
@@ -558,7 +559,7 @@ Views.repricer = {
    * Все они включаются в один клик в окне «Колонки» — целиком блоком или по отдельности.
    */
   DEFAULT_COLUMNS: ['item', 'allowSend', 'tag', 'info', 'stock', 'plan',
-    'priceNow', 'myPrice', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'delta',
+    'priceNow', 'myPrice', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'sizes', 'delta',
     'strategy', 'status', 'why', 'floor', 'promoMin', 'promos', 'restore',
     'cost', 'profit', 'margin', 'profitMonth',
     'competitor', 'offset'],
@@ -1034,6 +1035,151 @@ Views.repricer = {
     const spread = max > min ? ` (от ${U.money(min)} до ${U.money(max)})` : '';
     const title = `WB не отдаёт цену товара целиком: цены заданы по размерам. В расчёт взята минимальная цена размера${spread}. Отправка изменит цену всех размеров — поразмерная отправка делается отдельным режимом.`;
     return `<div class="tiny"><span class="rp-sizeprice" title="${U.esc(title)}">${UI.badge('цена по размерам', 'warn')}</span></div>`;
+  },
+
+  /**
+   * Ячейка «Размеры»: режим цен по размеров товара (none/sync/manual) и кнопка открытия
+   * таблицы размеров. Размеры читаются из кэша товаров (itemsByNm), а не из контекста
+   * строки — чтобы не дублировать массивы размеров в каждом результате расчёта.
+   *
+   * Режим:
+   *  - none   — размеры не трогаются (по умолчанию): цена уходит ценой товара целиком;
+   *  - sync   — все размеры получают цену товара;
+   *  - manual — цены размеров правятся вручную в таблице (openSizesModal).
+   */
+  sizesCellHtml(r) {
+    const item = this.itemsByNm ? this.itemsByNm.get(String(r.nmID)) : null;
+    const rawSizes = (item && Array.isArray(item.sizes)) ? item.sizes : ((r.context || {}).sizes || []);
+    const sizes = rawSizes.map((s) => ({
+      sizeID: Number(s.sizeID),
+      techSizeName: String(s.techSizeName || ''),
+      price: Number(s.price || 0),
+      discountedPrice: Number(s.discountedPrice || 0)
+    }));
+    if (!sizes.length) return '<span class="muted tiny">нет размеров</span>';
+    const cfg = this.rowConfig(r.nmID);
+    const mode = cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual' ? cfg.sizePriceMode : 'none';
+    const modeLabel = mode === 'sync' ? 'синхрон' : (mode === 'manual' ? 'ручная' : 'не трогать');
+
+    // предупреждение: разные цены по размерам + режим none — отправка сделает их одинаковой
+    const live = sizes.map((s) => U.num(s.price)).filter((p) => p > 0);
+    const uniq = new Set(live.map((p) => Math.round(p * 100))).size;
+    const warnEqual = mode === 'none' && uniq > 1;
+    const min = live.length ? Math.min.apply(null, live) : 0;
+    const max = live.length ? Math.max.apply(null, live) : 0;
+    const spread = uniq > 1 ? ` · ${U.money(min)}–${U.money(max)}` : '';
+
+    // Компактная ячейка: режим (текст) + кнопка открытия таблицы размеров. Select с
+    // режимом и таблица размеров живут в модальном окне — так в большой таблице
+    // репрайсера (до 200 строк) не накапливается тяжёлый DOM (select/option).
+    return `<div class="rp-sizes">
+      <div class="row" style="gap:4px;align-items:center">
+        <span class="rp-size-mode-label tiny" style="width:80px" title="Режим цен по размерам">${modeLabel}</span>
+        <button class="btn btn-xs btn-ghost rp-sizes-open" data-nm="${r.nmID}" title="Таблица цен по размерам">размеры</button>
+        <span class="tiny muted">${sizes.length} шт${spread}</span>
+      </div>
+      ${warnEqual ? '<div class="tiny warnc" style="margin-top:3px">разные цены — отправка цены товара сделает их одинаковой</div>' : ''}
+    </div>`;
+  },
+
+  /**
+   * Таблица цен по размерам товара — модальное окно: режим (none/sync/manual) и
+   * список размеров (размер, текущая цена, цена со скидки, новая цена). Правки копятся
+   * в pendingEdits (stageSizeMode/stageSizePrice) и отправляются из раздела «Репрайсер»
+   * — как остальные параметры строки.
+   */
+  openSizesModal(r) {
+    const item = this.itemsByNm ? this.itemsByNm.get(String(r.nmID)) : null;
+    const rawSizes = (item && Array.isArray(item.sizes)) ? item.sizes : ((r.context || {}).sizes || []);
+    const sizes = rawSizes.map((s) => ({
+      sizeID: Number(s.sizeID),
+      techSizeName: String(s.techSizeName || ''),
+      price: Number(s.price || 0),
+      discountedPrice: Number(s.discountedPrice || 0)
+    }));
+    if (!sizes.length) { App.toast('У товара нет размеров', 'warn'); return; }
+    const cfg = this.rowConfig(r.nmID);
+    const mode = cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual' ? cfg.sizePriceMode : 'none';
+    const manual = cfg.sizePrices || {};
+    const targetPrice = U.num(r.proposed && r.proposed.basePrice);
+    const opt = (v, label) => `<option value="${v}" ${mode === v ? 'selected' : ''}>${label}</option>`;
+    const live = sizes.map((s) => U.num(s.price)).filter((p) => p > 0);
+    const uniq = new Set(live.map((p) => Math.round(p * 100))).size;
+    const warnEqual = mode === 'none' && uniq > 1;
+
+    const rows = sizes.map((s) => {
+      const sid = Number(s.sizeID);
+      const cur = U.num(s.price);
+      const disc = U.num(s.discountedPrice);
+      const editable = mode === 'manual';
+      let val = cur;
+      if (mode === 'sync') val = targetPrice;
+      else if (Object.prototype.hasOwnProperty.call(manual, String(sid))) val = U.num(manual[String(sid)]);
+      const cell = editable
+        ? `<input type="number" class="num rp-size-price" data-nm="${r.nmID}" data-size="${sid}" min="0" step="1" value="${U.num(val)}" style="width:84px" title="Новая цена размера" />`
+        : `<span class="${mode === 'sync' ? 'pos' : 'muted'}">${U.money(val)}</span>`;
+      return `<tr><td>${U.esc(s.techSizeName || 'размер')} <span class="tiny muted">#${sid}</span></td>` +
+        `<td class="num">${U.money(cur)}</td>` +
+        `<td class="num">${U.money(disc)}</td>` +
+        `<td class="num">${cell}</td></tr>`;
+    }).join('');
+
+    const body = `
+      <div class="row wrap" style="gap:8px;margin-bottom:8px">
+        <label class="field" style="margin:0"><b>Режим цен по размерам</b>
+          <select class="rp-size-mode" data-nm="${r.nmID}" style="width:180px">
+            ${opt('none', 'не трогать размеры')}${opt('sync', 'синхрон (цена товара)')}${opt('manual', 'ручная правка')}
+          </select>
+        </label>
+      </div>
+      ${warnEqual ? '<div class="alert warn" style="margin-bottom:8px">Разные цены по размерам, а режим «не трогать» — отправка цены товара сделает цену всех размеров одинаковой.</div>' : ''}
+      <table class="grid-table"><thead><tr>
+        <th>Размер</th><th class="num">Цена</th><th class="num">Со скидкой</th><th class="num">Новая цена</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <p class="hint" style="margin-top:8px">
+        ${mode === 'none' ? 'Размеры не трогаются: цена уходит ценой товара целиком.' : ''}
+        ${mode === 'sync' ? `Все размеры получат цену товара (${U.money(targetPrice)}).` : ''}
+        ${mode === 'manual' ? 'Правьте «новую цену» — отправятся только изменившиеся размеры.' : ''}
+        Правки сохраняются кнопкой «Сохранить» внизу таблицы репрайсера.
+      </p>`;
+
+    const api = UI.modal({
+      title: `Цены по размерам — ${r.title || r.nmID}`,
+      content: body,
+      size: 'md',
+      buttons: [{ label: 'Закрыть', class: 'btn-primary' }]
+    });
+    const root = api && api.root;
+    if (root) {
+      root.querySelectorAll('.rp-size-mode').forEach((sel) => {
+        sel.onchange = () => this.stageSizeMode(sel.getAttribute('data-nm'), sel.value);
+      });
+      root.querySelectorAll('.rp-size-price').forEach((inp) => {
+        inp.onclick = (e) => e.stopPropagation();
+        inp.onchange = () => this.stageSizePrice(inp.getAttribute('data-nm'), inp.getAttribute('data-size'), inp.value);
+      });
+    }
+  },
+
+  /** Переключить режим цен по размерам (none — убрать, чтобы жить по глобальной настройке). */
+  stageSizeMode(nmID, mode) {
+    const m = (mode === 'sync' || mode === 'manual') ? mode : null;
+    this.stageEdit(String(nmID), 'config', { sizePriceMode: m });
+  },
+
+  /**
+   * Положить ручную цену размера в очередь правок. sizePrices — целый массив, поэтому
+   * считаем его из хранилища + уже скопившихся правок и перезаписываем целиком.
+   */
+  stageSizePrice(nmID, sizeID, price) {
+    const nm = String(nmID);
+    const cfg = this.rowConfig(nmID);
+    const base = Object.assign({}, cfg.sizePrices || {});
+    const sid = String(sizeID);
+    if (Number(price) > 0) base[sid] = Math.round(Number(price));
+    else delete base[sid];
+    if (!Object.keys(base).length) this.stageEdit(nm, 'config', { sizePrices: null });
+    else this.stageEdit(nm, 'config', { sizePrices: base });
   },
 
   /**
@@ -1658,6 +1804,7 @@ Views.repricer = {
         { title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
             ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП${this.walletNote(r, 'next')}</div>`
             : '<span class="muted tiny">—</span>' },
+        { title: 'Размеры', render: (r) => this.sizesCellHtml(r) },
         { title: 'Изменение', num: true, render: (r) => `<span class="${r.delta.abs > 0 ? 'pos' : (r.delta.abs < 0 ? 'neg' : 'muted')}">${U.signed(r.delta.abs)} ₽<br>${U.signed(r.delta.pct, 1)}%</span>` },
         { title: 'Стратегия', render: (r) => {
             const cfg = this.rowConfig(r.nmID);
@@ -1861,6 +2008,15 @@ Views.repricer = {
       b.onclick = (e) => { e.stopPropagation(); this.quickAddCompetitor(Number(b.dataset.nm)); };
     });
 
+    // открыть панель цен по размерам товара
+    host.querySelectorAll('.rp-sizes-open').forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const r = this.results.find((x) => String(x.nmID) === b.getAttribute('data-nm'));
+        if (r) this.openSizesModal(r);
+      };
+    });
+
     this.renderBulk();
   },
 
@@ -2037,6 +2193,16 @@ Views.repricer = {
 
     const warn = list.filter((r) => (r.warnings || []).length);
     const loss = list.filter((r) => r.proposed.profit < 0);
+    // товары с режимом «не трогать размеры», у которых разные цены по размерам:
+    // отправка цены товара сделает цену всех размеров одинаковой
+    const sizeEqualize = list.filter((r) => {
+      const cfg = this.rowConfig(r.nmID);
+      if (cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual') return false;
+      const item = this.itemsByNm ? this.itemsByNm.get(String(r.nmID)) : null;
+      const sizes = (item && Array.isArray(item.sizes)) ? item.sizes : [];
+      const live = sizes.map((s) => U.num(s.price)).filter((p) => p > 0);
+      return new Set(live.map((p) => Math.round(p * 100))).size > 1;
+    });
 
     UI.confirmDialog(
       `Отправить ${list.length} цен в Wildberries`,
@@ -2044,6 +2210,7 @@ Views.repricer = {
          Будет отправлено цен: <b>${list.length}</b>
          (${list.filter((r) => r.delta.abs > 0).length} вверх, ${list.filter((r) => r.delta.abs < 0).length} вниз).<br>
          ${warn.length ? `Предупреждений: <b>${warn.length}</b>.<br>` : ''}
+         ${sizeEqualize.length ? `<b class="warnc">${sizeEqualize.length}</b> товаров с разными ценами по размерам — отправка цены товара сделает их одинаковыми.<br>` : ''}
          ${loss.length ? `<b class="neg">${loss.length}</b> товаров с отрицательной прибылью после изменения.<br>` : ''}
          Прогноз изменения прибыли: <b class="${U.profitClass(U.sum(list, (r) => r.delta.profitMonth))}">${U.signed(Math.round(U.sum(list, (r) => r.delta.profitMonth)))} ₽/мес</b>.
        </div>

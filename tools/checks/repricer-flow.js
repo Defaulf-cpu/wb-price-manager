@@ -347,6 +347,117 @@ async function tSizePricedGoods() {
     'в items: ' + JSON.stringify((prop2.items || []).map((x) => [x.nmID, x.basePrice])));
 }
 
+// ───────────────────────── Цены по размерам: отправка, режимы, валидация ─────────────────────────
+
+/**
+ * Запись цен по размерам: роутинг в upload/task/size, режимы none/sync/manual,
+ * предупреждение «разные цены → одинаковые», валидация (чужой размер, карантин) и 429-ретраи.
+ */
+async function tSizePrices() {
+  calls.length = 0;
+  const sizePosts = [];
+  let sizeAttempt = 0;
+  const st = makeStand({ live: true });
+  routes = {
+    '/api/v2/list/goods/filter': () => res(200, {
+      data: {
+        total: 2,
+        goods: [
+          // режим sync: размеры с разными ценами, все получат цену товара (800)
+          { nmID: 1001, vendorCode: 'ART-SYNC', brand: 'Тест', subjectName: 'Одежда',
+            discount: 0, editableSizePrice: true, currencyIsoCode4217: 'RUB',
+            sizes: [
+              { sizeID: 11, techSizeName: '42', price: 900, discountedPrice: 900 },
+              { sizeID: 12, techSizeName: '44', price: 800, discountedPrice: 800 }
+            ] },
+          // режим none: разные цены по размерам — предупреждение «станет одинаковой»
+          { nmID: 2002, vendorCode: 'ART-NONE', brand: 'Тест', subjectName: 'Одежда',
+            discount: 0, editableSizePrice: true, currencyIsoCode4217: 'RUB',
+            sizes: [
+              { sizeID: 21, techSizeName: '42', price: 1000, discountedPrice: 1000 },
+              { sizeID: 22, techSizeName: '44', price: 900, discountedPrice: 900 }
+            ] }
+        ]
+      }
+    }),
+    '/api/v1/calendar/promotions/nomenclatures': () => res(200, { data: { nomenclatures: [] } }),
+    '/api/v1/calendar/promotions': () => res(200, { data: { promotions: [] } }),
+    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0, nmID: 0, updatedAt: '' } }),
+    '/api/v2/upload/task/size': (u, init) => {
+      sizeAttempt++;
+      sizePosts.push({ body: init && init.body, attempt: sizeAttempt });
+      // первый запрос — 429 с быстрым разрешителем, чтобы сработал ретраи-429
+      if (sizeAttempt === 1) return res(429, { errorText: 'limit' }, { 'x-ratelimit-retry': '1' });
+      return res(200, { data: { taskId: 9001 } });
+    },
+    '/api/v2/upload/task': () => res(200, { data: { taskId: 9000 } }),
+    '/api/v2/history/goods/task': () => res(200, { data: { goods: [] } })
+  };
+
+  await st.service.handlers['wb:goods']({ force: true });
+  await st.service.handlers['costs:save']({ items: { 1001: { costPriceRub: 300 }, 2002: { costPriceRub: 300 } } });
+  await st.service.handlers['repricer:item-configs:save']({ items: {
+    1001: { minPrice: 500, sizePriceMode: 'sync' },
+    2002: { minPrice: 500, sizePriceMode: 'none' }
+  } });
+  // своя цена в «Цены и скидки» — гарантирует попадание в предложение (репрайсер
+  // сам поверх расчёта не меняет цену, поэтому без черновика needSend=false)
+  await st.service.handlers['prices:draft-save']({ items: {
+    1001: { basePrice: 850, discount: 0 },
+    2002: { basePrice: 950, discount: 0 }
+  } });
+
+  await st.service.handlers['repricer:calc']({ full: true });
+  const prop = await st.service.handlers['repricer:proposal']();
+  check('цены по размерам: оба товара вошли в предложение',
+    (prop.items || []).length === 2,
+    'items=' + JSON.stringify((prop.items || []).map((x) => [x.nmID, x.basePrice])));
+  check('цены по размерам: предложение несёт режим цен по размерам',
+    (prop.items || []).every((x) => x.sizePriceMode === 'sync' || x.sizePriceMode === 'none'),
+    JSON.stringify((prop.items || []).map((x) => [x.nmID, x.sizePriceMode])));
+
+  const sent = await st.service.handlers['repricer:proposal-send']({ source: 'test-size', nmIDs: [1001, 2002] });
+  check('цены по размерам: отправка ушла в upload/task/size (а не только в upload/task)',
+    callsTo('/api/v2/upload/task/size').length >= 1, 'size-запросов: ' + callsTo('/api/v2/upload/task/size').length);
+  const itemPosts = callsTo('/api/v2/upload/task').length - callsTo('/api/v2/upload/task/size').length;
+  check('цены по размерам: цена товара тоже отправлена (upload/task)', itemPosts >= 1, 'POST upload/task: ' + itemPosts);
+
+  // sync: все размеры товара 1001 (900 и 800) получат цену товара (черновик — 850)
+  const sizeBody = sizePosts.length ? JSON.parse(sizePosts[sizePosts.length - 1].body).data : [];
+  check('режим sync: размер 1001#11 отправлен с ценой товара (850)',
+    sizeBody.some((x) => Number(x.nmID) === 1001 && Number(x.sizeID) === 11 && Number(x.price) === 850),
+    JSON.stringify(sizeBody));
+  check('режим sync: размер 1001#12 тоже отправлен с ценой товара (850)',
+    sizeBody.some((x) => Number(x.nmID) === 1001 && Number(x.sizeID) === 12 && Number(x.price) === 850),
+    JSON.stringify(sizeBody));
+  check('режим none: размеры товара 2002 не отправлены',
+    !sizeBody.some((x) => Number(x.nmID) === 2002), 'sizeBody: ' + JSON.stringify(sizeBody));
+  check('режим none: предупреждение «цена всех размеров станет одинаковой»',
+    (sent.warnings || []).some((w) => w.type === 'size-equalize' && Number(w.nmID) === 2002),
+    JSON.stringify((sent.warnings || []).filter((w) => w.type === 'size-equalize')));
+  check('429: отправка по размерам не падает (ретраи с ожиданием)',
+    sent.ok === true && sizePosts.length >= 2, 'попыток к size: ' + sizePosts.length);
+
+  // ── валидация: чужой размер, карантин, ручная отправка ──
+  await st.service.handlers['wb:goods']({ force: true });
+  const vr = await st.service.handlers['wb:apply-size-prices']({ items: [
+    { nmID: 1001, sizeID: 99, price: 500, discount: 0 },   // чужой размер
+    { nmID: 1001, sizeID: 12, price: 100, discount: 0 },   // карантин (800 → 100 < 800/3)
+    { nmID: 1001, sizeID: 11, price: 750, discount: 0 }    // ок
+  ] });
+  check('валидация: чужой sizeID отклонён (не отправлен)',
+    (vr.warnings || []).some((w) => w.type === 'unknown-size' && Number(w.sizeID) === 99),
+    JSON.stringify((vr.warnings || []).filter((w) => w.type === 'unknown-size')));
+  check('валидация: карантин цены по размеру срабатывает',
+    (vr.warnings || []).some((w) => w.type === 'quarantine' && Number(w.sizeID) === 12),
+    JSON.stringify((vr.warnings || []).filter((w) => w.type === 'quarantine')));
+  // чужой размер не отправлен, корректные — отправлены
+  const vBody = sizePosts.length ? JSON.parse(sizePosts[sizePosts.length - 1].body).data : [];
+  check('валидация: чужой размер не отправлен, корректные — отправлены',
+    !vBody.some((x) => Number(x.sizeID) === 99) && vBody.some((x) => Number(x.sizeID) === 11),
+    JSON.stringify(vBody));
+}
+
 // ───────────────────────── 3. Устаревшее предложение не затирает чужие правки ─────────────────────────
 
 async function tStaleProposal() {
@@ -1007,6 +1118,8 @@ async function tSingleScreen() {
   await tBlockedItems();
   console.log('\n=== Поразмерные цены (WB не отдаёт price товара) ===');
   await tSizePricedGoods();
+  console.log('\n=== Цены по размерам: отправка, режимы, валидация ===');
+  await tSizePrices();
   console.log('\n=== Устаревшее предложение ===');
   await tStaleProposal();
   console.log('\n=== Карточка товара ===');

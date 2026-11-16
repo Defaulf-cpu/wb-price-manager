@@ -97,6 +97,14 @@ const DEFAULT_CONFIG = {
     sppMode: 0                     // 0 — без СПП, 1 — с СПП, 2 — СПП + WB-кошелёк
   },
 
+  /**
+   * Режим цен по размерам (для товаров с `editableSizePrice`):
+   *   'none'   — размеры не трогаться: цена уходит ценой товара целиком;
+   *   'sync'   — все размеры товара получат цену товара;
+   *   'manual' — цены размеров правятся вручную (только изменённые отправляются).
+   */
+  sizePriceMode: 'none',
+
   /** Пресеты стратегий для быстрого назначения. */
   presets: [
     { id: 0, name: 'Без стратегии (только пороги)', strategy: 'default' },
@@ -1256,6 +1264,8 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       // цена подставлена из sizes[] — товар с поразмерными ценами (WB не отдаёт price целиком)
       priceFromSizes: !!ctx.priceFromSizes,
       sizePriceMin: num(ctx.sizePriceMin) || 0, sizePriceMax: num(ctx.sizePriceMax) || 0,
+      // режим цен по размерам (none/sync/manual) — берётся из настроек товара/общих
+      sizePriceMode: ['none', 'sync', 'manual'].indexOf(I.sizePriceMode) >= 0 ? I.sizePriceMode : 'none',
       competitorPrice: comp ? comp.price : null,
       plan: planProgress(marginCtx, I),
       marginMode: C.marginMode,
