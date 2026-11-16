@@ -1100,6 +1100,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     strategyTitle: (STRATEGIES.find((s) => s.id === strategyName) || {}).name || strategyName,
     current: {
       basePrice: curBase, discount: r2(curDisc), sellerPrice: r2(curSeller), buyerPrice: r2(curBuyer),
+      costPriceRub: num(ctx.params && ctx.params.costPriceRub),
       profit: econBefore.profit, marginPct: r2(econBefore.marginPct),
       // прозрачность: откуда взяты расходы (факт из отчёта WB, справочник, настройки, формула)
       costSources: (ctx.params && ctx.params.costSources) || null,

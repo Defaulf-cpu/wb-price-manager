@@ -484,6 +484,8 @@ function createStore(dir, secretBox) {
       return {
         at: d.at || null,
         sendAt: d.sendAt || null,
+        sentAt: d.sentAt || null,
+        staleCount: Number(d.staleCount) || 0,
         phase: d.phase || 'idle',
         summary: isObject(d.summary) ? d.summary : {},
         items: Array.isArray(d.items) ? d.items : [],
@@ -498,6 +500,8 @@ function createStore(dir, secretBox) {
       writeJson(proposalsPath, {
         at: d.at || new Date().toISOString(),
         sendAt: d.sendAt || null,
+        sentAt: d.sentAt || null,
+        staleCount: Number(d.staleCount) || 0,
         phase: d.phase || 'proposed',
         summary: isObject(d.summary) ? d.summary : {},
         items: Array.isArray(d.items) ? d.items.slice(0, 20000) : [],

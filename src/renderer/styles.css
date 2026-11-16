@@ -368,3 +368,13 @@ table.grid-table tfoot td {
 .grid-table.dense tbody .cellinput { height: 22px; padding: 1px 4px; font-size: 12px; }
 .grid-table.dense tbody select { height: 22px; font-size: 11px; }
 .grid-table.dense tbody .btn-xs { padding: 1px 5px; font-size: 10px; }
+
+/* Репрайсер: плотная строка товара и ошибки валидации в ячейке стратегии. */
+#rp-grid .rp-product { min-width: 250px; max-width: 320px; }
+#rp-grid .rp-photo { width: 34px; height: 45px; flex: 0 0 34px; object-fit: cover;
+  border-radius: 5px; background: var(--bg-3); display: inline-flex; align-items: center; justify-content: center; }
+#rp-grid .rp-validation { max-width: 210px; white-space: normal; line-height: 1.3; }
+#rp-tabs .tab[data-t="prices"], #rp-tabs .tab[data-t^="journal-"] { border-radius: 16px; }
+#rp-grid .grid-table td { vertical-align: top; }
+#rp-grid .rowtitle { min-width: 0; }
+#rp-grid .rp-product .trunc { max-width: 240px; }

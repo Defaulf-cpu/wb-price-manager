@@ -11,7 +11,7 @@
  * XLSX — это ZIP-архив с XML внутри. Собираем его руками:
  *   - сжатие deflate (встроенный zlib),
  *   - CRC32 считаем сами (табличный метод),
- *   - строки пишем как inlineStr, поэтому sharedStrings.xml не нужен;
+ *   - строки пишем через sharedStrings.xml, сохраняя артикулы и ведущие нули;
  *   - числа — обычным типом `n`, чтобы в Excel с ними можно было работать как с числами.
  *
  * Ограничение Excel: 1 048 576 строк на лист. При превышении режем по листам.
@@ -62,31 +62,27 @@ function colName(i) {
 
 /**
  * Одна ячейка. Числа пишем как числа (иначе Excel не даст считать по ним),
- * всё остальное — как встроенную строку.
+ * всё остальное — как общую строку (без автоматического превращения SKU в число).
  */
-function cellXml(colIdx, rowIdx, value) {
+function cellXml(colIdx, rowIdx, value, shared) {
   const ref = colName(colIdx) + (rowIdx + 1);
   if (value === null || value === undefined || value === '') return `<c r="${ref}"/>`;
-  const n = typeof value === 'number' ? value : Number(String(value).replace(/\s/g, '').replace(',', '.'));
-  const looksNumeric = (typeof value === 'number' && Number.isFinite(value)) ||
-    (typeof value !== 'number' && String(value).trim() !== '' && Number.isFinite(n) && /^-?\d*([.,]\d+)?$/.test(String(value).trim()));
-  if (looksNumeric) {
-    const num = typeof value === 'number' ? value : n;
-    return `<c r="${ref}"><v>${Number.isFinite(num) ? num : 0}</v></c>`;
-  }
-  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${esc(value)}</t></is></c>`;
+  if (typeof value === 'number' && Number.isFinite(value)) return `<c r="${ref}"><v>${value}</v></c>`;
+  const text = String(value);
+  if (!shared.ids.has(text)) { shared.ids.set(text, shared.values.length); shared.values.push(text); }
+  shared.count++;
+  return `<c r="${ref}" t="s"><v>${shared.ids.get(text)}</v></c>`;
 }
 
 /** XML листа: строки пишем порциями, чтобы не собирать гигантскую строку в памяти. */
-function sheetXml(rows) {
+function sheetXml(rows, shared) {
   const parts = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
     '<sheetData>'];
   for (let r = 0; r < rows.length; r++) {
     const row = Array.isArray(rows[r]) ? rows[r] : [];
-    parts.push(`<row r="${r + 1}">`);
-    for (let c = 0; c < row.length; c++) parts.push(cellXml(c, r, row[c]));
-    parts.push('</row>');
+    const cells = row.map((value, c) => cellXml(c, r, value, shared));
+    parts.push(`<row r="${r + 1}">` + cells.join('') + '</row>');
   }
   parts.push('</sheetData></worksheet>');
   return parts.join('');
@@ -114,6 +110,7 @@ function buildXlsx(rows, opts) {
 
   const sheetName = String(o.sheetName || 'Данные').slice(0, 31).replace(/[\\\/?*\[\]:]/g, '_') || 'Данные';
   const files = [];
+  const shared = { ids: new Map(), values: [], count: 0 };
 
   files.push(['[Content_Types].xml',
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -122,6 +119,7 @@ function buildXlsx(rows, opts) {
     '<Default Extension="xml" ContentType="application/xml"/>' +
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
     sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
+    '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>' +
     '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
     '</Types>']);
 
@@ -135,7 +133,7 @@ function buildXlsx(rows, opts) {
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
-    sheets.map((_, i) => `<sheet name="${esc(i === 0 ? sheetName : sheetName + ' ' + (i + 1))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
+    sheets.map((_, i) => `<sheet name="${esc(i === 0 ? sheetName : sheetName.slice(0, 31 - String(i + 1).length - 1) + ' ' + (i + 1))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
     '</sheets></workbook>']);
 
   files.push(['xl/_rels/workbook.xml.rels',
@@ -143,6 +141,7 @@ function buildXlsx(rows, opts) {
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('') +
     `<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+    `<Relationship Id="rId${sheets.length + 2}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>` +
     '</Relationships>']);
 
   // минимальный styles.xml: без него часть версий Excel ругается на файл
@@ -157,9 +156,12 @@ function buildXlsx(rows, opts) {
     '</styleSheet>']);
 
   sheets.forEach((sheetRows, i) => {
-    files.push([`xl/worksheets/sheet${i + 1}.xml`, sheetXml(sheetRows)]);
+    files.push([`xl/worksheets/sheet${i + 1}.xml`, sheetXml(sheetRows, shared)]);
   });
 
+  files.push(['xl/sharedStrings.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    `<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${shared.count}" uniqueCount="${shared.values.length}">` +
+    shared.values.map((v) => `<si><t xml:space="preserve">${esc(v)}</t></si>`).join('') + '</sst>']);
   return zipFiles(files);
 }
 

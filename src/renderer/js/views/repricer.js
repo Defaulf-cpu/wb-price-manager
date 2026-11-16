@@ -18,13 +18,13 @@ Views.repricer = {
   rstate: null,
   itemFilter: { q: '', strategy: '', onlyChanges: false, tile: '', seg: 'all' },
   /** Плотность строк таблицы: 'normal' | 'compact' (хранится в localStorage). */
-  density: 'normal',
+  density: 'compact',
 
   render(container) {
     this.container = container;
     container.innerHTML = `
       <div class="tabs" id="rp-tabs">
-        <div class="tab" data-t="prices">Цены и стратегии</div>
+        <div class="tab" data-t="prices">Товары</div>
         <div class="tab" data-t="promos">Акции</div>
         <div class="tab" data-t="strategies">Параметры товаров (массово)</div>
         <div class="tab" data-t="competitors">Конкуренты</div>
@@ -114,8 +114,8 @@ Views.repricer = {
               <option value="daily" ${cfg.schedule.mode === 'daily' ? 'selected' : ''}>Раз в сутки в выбранный час</option>
             </select>
             <input type="number" id="rp-interval" class="num" style="width:90px" min="5" max="1440" value="${cfg.schedule.intervalMinutes}" title="Интервал, минут" />
-            <button class="btn btn-primary" id="rp-calc">Пересчитать цены</button>
-            <button class="btn btn-ok" id="rp-send" disabled>Отправить в WB</button>
+            <button class="btn btn-primary" id="rp-calc">Пересчёт (фаза 1)</button>
+            <button class="btn btn-ok" id="rp-send" disabled>Отправить предложение в WB (фаза 2)</button>
           </div>
         </div>
         <div class="alert info" style="margin-top:12px">
@@ -138,6 +138,9 @@ Views.repricer = {
             <option value="compact" ${this.density === 'compact' ? 'selected' : ''}>Плотные строки</option>
           </select>
           <button class="btn btn-sm btn-ghost" id="rp-cols" title="Выбрать, какие колонки показывать">Колонки</button>
+          <button class="btn btn-sm btn-ghost" id="rp-import">Импорт CSV</button>
+          <button class="btn btn-sm btn-ghost" id="rp-edits-reset">Отменить несохранённое</button>
+          <button class="btn btn-sm" id="rp-edits-commit">Сохранить параметры</button>
           <button class="btn btn-sm btn-ghost" id="rp-export">Экспорт CSV</button>
           <button class="btn btn-sm btn-ghost" id="rp-export-xlsx" title="Выгрузка Excel — до 150 000 строк">Excel (до 150к строк)</button>
           ${rs.demo ? '<button class="btn btn-sm btn-ghost" id="rp-drift" title="Изменить цены конкурентов, чтобы посмотреть реакцию репрайсера">Сымитировать рынок</button>' : ''}
@@ -145,8 +148,8 @@ Views.repricer = {
       </div>
       <div class="row wrap" style="gap:8px;margin-bottom:10px;align-items:center">
         <div class="seg" id="rp-seg">
-          ${[['all', 'Все'], ['tosend', 'К отправке'], ['mine', 'Своя цена'], ['errors', 'Ошибки данных'],
-             ['loss', 'Убыточные'], ['warn', 'С предупреждениями']]
+          ${[['all', 'Все'], ['tosend', 'Только с изменением'], ['mine', 'Своя цена'], ['errors', 'Только ошибки'],
+             ['loss', 'Только убыточные'], ['warn', 'С предупреждениями']]
             .map(([id, label]) => `<button class="seg-btn ${this.itemFilter.seg === id ? 'active' : ''}" data-seg="${id}">${label}</button>`).join('')}
         </div>
         <span class="hint" id="rp-seg-count"></span>
@@ -181,15 +184,25 @@ Views.repricer = {
         App.toast(`Пересчитано ${res.summary.total} товаров за ${(res.tookMs / 1000).toFixed(1)} с`, 'ok');
         this.drawSummary();
         this.renderResults();
+        this.drawTiles();
+        await this.drawProposal();
       } catch (err) {
         App.toast(err.message, 'err', 6000);
       } finally {
         e.target.disabled = false;
-        e.target.textContent = 'Пересчитать цены';
+        e.target.textContent = 'Пересчёт (фаза 1)';
       }
     };
 
     $('#rp-send').onclick = () => this.sendSelected();
+    $('#rp-edits-reset').onclick = () => this.discardEdits();
+    $('#rp-edits-commit').onclick = (e) => this.commitEdits(e.target);
+    $('#rp-import').onclick = async () => {
+      try {
+        const text = await API.importCsv();
+        if (text) this.importParameters(text);
+      } catch (e) { App.toast(e.message, 'err', 6000); }
+    };
 
     if (rs.demo) {
       const drift = $('#rp-drift');
@@ -200,7 +213,7 @@ Views.repricer = {
     }
 
     $('#rp-cols').onclick = () => this.openColumnsPicker();
-    $('#rp-q').oninput = U.debounce((e) => { this.itemFilter.q = e.target.value; this.renderResults(); }, 220);
+    $('#rp-q').oninput = U.debounce((e) => { this.itemFilter.q = e.target.value; this.page = 0; this.renderResults(); }, 220);
     // сегментированный фильтр (как «Все / Основной» в INDEEPA): один признак за раз,
     // вместо набора чекбоксов, которые непонятно как сочетаются
     host.querySelectorAll('#rp-seg [data-seg]').forEach((b) => {
@@ -226,7 +239,7 @@ Views.repricer = {
       o.value = s.id; o.textContent = s.name;
       sel.appendChild(o);
     });
-    sel.onchange = (e) => { this.itemFilter.strategy = e.target.value; this.renderResults(); };
+    sel.onchange = (e) => { this.itemFilter.strategy = e.target.value; this.page = 0; this.renderResults(); };
 
     /**
      * Экспорт в Excel — как в репрайсере INDEEPA («Excel (до 150к строк)»).
@@ -383,6 +396,7 @@ Views.repricer = {
     const sch = cfg.schedule || {};
     const sendBtn = this.container.querySelector('#rp-send');
 
+    const lifecycle = `<div class="hint rp-lifecycle">Фаза 1: сохранено предложений <b>${U.fmt(items.length)}</b> · расчёт ${U.date(prop.at, true)} · Фаза 2: отправка ${U.date(prop.sentAt, true)} · устарело <b>${U.fmt(prop.staleCount || 0)}</b></div>`;
     const blocked = prop.blocked || [];
     const blockedHtml = blocked.length ? `
       <div class="alert danger" style="margin-top:10px">
@@ -405,7 +419,7 @@ Views.repricer = {
             </div>
             ${prop.at ? '<span class="hint">Последний пересчёт: <b>' + U.date(prop.at, true) + '</b></span>' : ''}
           </div>
-          ${blockedHtml}
+          ${lifecycle}${blockedHtml}
         </div>`;
       if (sendBtn) sendBtn.disabled = true;
       return;
@@ -442,12 +456,15 @@ Views.repricer = {
           </div>
         </div>
         ${prop.phase === 'stale' && prop.note ? `<div class="alert warn" style="margin-top:10px">${U.esc(prop.note)}</div>` : ''}
-        ${blockedHtml}
+        ${lifecycle}${blockedHtml}
       </div>`;
 
-    if (sendBtn) sendBtn.disabled = false;
+    if (sendBtn) sendBtn.disabled = prop.phase !== 'proposed';
+    const proposalSend = host.querySelector('#rp-prop-send');
+    if (proposalSend) proposalSend.disabled = prop.phase !== 'proposed';
 
     host.querySelector('#rp-prop-send').onclick = async (e) => {
+      if (this.pendingEdits.size) return App.toast('Сохраните или отмените несохранённые параметры перед отправкой', 'warn');
       const btn = e.target;
       UI.confirmDialog('Отправить предложение в WB',
         `<div class="alert warn">В маркетплейс уйдёт <b>${U.fmt(items.length)}</b> цен из предложения от ${U.date(prop.at, true)}.</div>
@@ -606,7 +623,7 @@ Views.repricer = {
    * «Без индекса» — нет данных для оценки (не задана себестоимость).
    */
   valueStatus(r) {
-    const cfg = (this.rstate.itemConfigs || {})[String(r.nmID)] || {};
+    const cfg = this.rowConfig(r.nmID);
     const defs = this.rstate.defaults || {};
     const target = U.num(cfg.targetMarginPct !== undefined ? cfg.targetMarginPct : defs.targetMarginPct);
     const minMargin = U.num(cfg.minMarginPct !== undefined ? cfg.minMarginPct : defs.minMarginPct);
@@ -625,11 +642,11 @@ Views.repricer = {
    * «от балды» и отправлял её в WB.
    */
   rowErrors(r) {
-    const out = [];
-    const cfg = (this.rstate.itemConfigs || {})[String(r.nmID)] || {};
+    const out = r.error ? [String(r.error)] : [];
+    const cfg = this.rowConfig(r.nmID);
     const cogs = U.num((this.cogsByNm || {})[String(r.nmID)]);
     if (cogs <= 0) out.push('не задана себестоимость');
-    else if (cogs < 2) out.push('себестоимость должна быть больше 2 ₽');
+    else if (cogs <= 2) out.push('себестоимость должна быть больше 2 ₽');
     const floor = U.num(cfg.minPrice) || U.num(r.corridor && r.corridor.min);
     if (!(floor > 0)) out.push('не задан порог минимальной цены');
     const base = U.num(r.current && r.current.basePrice);
@@ -646,8 +663,8 @@ Views.repricer = {
     const acts = (r.promoActions || []).filter((a) => a && a.action && a.action !== 'later');
     if (!acts.length) {
       return r.context && r.context.inPromo
-        ? UI.badge('в акции', 'ok') + '<div class="tiny muted">решений нет</div>'
-        : '<span class="muted tiny">не в акции</span>';
+        ? UI.badge('В акции', 'ok') + '<div class="tiny muted">решений нет</div>'
+        : UI.badge('Не в акции');
     }
     const label = { join: ['Войти', 'ok'], exit: ['Выйти', 'danger'], stay: ['Участвуем', ''], recommend: ['Выгодно войти', 'info'], skip: ['Не входим', ''], warn: ['Убыточно', 'warn'] };
     const main = r.promoChosen || acts[0];
@@ -673,7 +690,7 @@ Views.repricer = {
       a.requiredDiscountPct ? ('скидка ≥ ' + U.pct(a.requiredDiscountPct, 0)) : '',
       a.period || (a.started ? 'идёт сейчас' : 'старт через ' + U.num(a.daysToStart, 0) + ' дн'),
       a.reason || ''].filter(Boolean).join(' — ')).join('\n');
-    return `<div title="${U.esc(tip)}">${UI.badge(m[0], m[1])}${acts.length > 1 ? '<span class="tiny muted"> +' + (acts.length - 1) + '</span>' : ''}</div>${rows}`;
+    return `<div title="${U.esc(tip)}">${UI.badge(r.context && r.context.inPromo ? 'В акции' : 'Не в акции', r.context && r.context.inPromo ? 'ok' : '')} ${UI.badge(m[0], m[1])}${acts.length > 1 ? '<span class="tiny muted"> +' + (acts.length - 1) + '</span>' : ''}</div>${rows}`;
   },
 
   /**
@@ -682,17 +699,18 @@ Views.repricer = {
    */
   planCellHtml(r) {
     const pl = (r.context && r.context.plan) || null;
+    const input = `<input type="number" class="num rp-plan" data-nm="${r.nmID}" min="0" step="1" style="width:82px" title="План продаж на месяц, шт" value="${this.rowConfig(r.nmID).planQtyMonth || ''}" />`;
     if (!pl || !(U.num(pl.planQty) > 0)) {
-      return '<span class="muted tiny">⚪ План не заполнен, % выполнения не рассчитан</span>';
+      return input + '<div class="muted tiny">⚪ План не заполнен, % выполнения не рассчитан</div>';
     }
     const ratio = U.num(pl.ratio) * 100;
     const cls = ratio >= 100 ? 'pos' : (ratio >= 60 ? 'warnc' : 'neg');
-    return `<b class="${cls}">${U.pct(ratio, 0)}</b>
+    return `${input}<br><b class="${cls}">${U.pct(ratio, 0)}</b>
       <div class="tiny muted">факт ${U.fmt(pl.fact || 0)} из ${U.fmt(pl.planQty)} шт</div>`;
   },
 
   /** Размер страницы таблицы цен: тысячи строк с десятками полей ввода вешают браузер. */
-  PAGE_SIZE: 100,
+  PAGE_SIZE: 200,
   page: 0,
   /** Страница таблицы «Параметры товаров» (там 10 полей ввода на строку — ещё тяжелее). */
   ST_PAGE_SIZE: 100,
@@ -705,7 +723,7 @@ Views.repricer = {
     const pages = Math.max(1, Math.ceil((list.length || 0) / size));
     if (this.stPage >= pages) this.stPage = 0;
     const from = this.stPage * size;
-    this.stPageInfo = { from: from + 1, to: Math.min(list.length, from + size), total: list.length, pages };
+    this.stPageInfo = { from: list.length ? from + 1 : 0, to: Math.min(list.length, from + size), total: list.length, pages };
     return list.slice(from, from + size);
   },
 
@@ -737,7 +755,7 @@ Views.repricer = {
     const pages = Math.max(1, Math.ceil((list.length || 0) / size));
     if (this.page >= pages) this.page = 0;
     const from = this.page * size;
-    this.pageInfo = { from: from + 1, to: Math.min(list.length, from + size), total: list.length, pages };
+    this.pageInfo = { from: list.length ? from + 1 : 0, to: Math.min(list.length, from + size), total: list.length, pages };
     return list.slice(from, from + size);
   },
 
@@ -814,7 +832,7 @@ Views.repricer = {
     const rest = list.length
       ? list.slice(0, 3).map((c) => `<div class="tiny muted" style="margin-top:2px">
           ${U.esc(c.sku ? 'SKU ' + c.sku : (c.name || 'конкурент'))} · ост. ${U.fmt(U.num(c.stock, 0))}<br>
-          цена ${U.money(c.price)} · с СПП ${U.money(withSpp(U.num(c.price)))} · с кошельком ${U.money(withWallet(U.num(c.price)))}
+          цена ${U.money(c.price)} · с СПП ${U.money(withSpp(U.num(c.price)))} · Цена WB-кошелька (с кошельком) ${U.money(withWallet(U.num(c.price)))}
         </div>`).join('')
       : '';
     return `${head}${rest}<button class="btn btn-xs btn-ghost rp-comp-add" data-nm="${r.nmID}" style="margin-top:3px">+ конкурент</button>`;
@@ -826,16 +844,16 @@ Views.repricer = {
    * Значения пишутся в личные настройки товара (itemConfigs) и сразу пересчитывают цену.
    */
   offsetCellHtml(r) {
-    const cfg = (this.rstate.itemConfigs || {})[String(r.nmID)] || {};
+    const cfg = this.rowConfig(r.nmID);
     const mode = cfg.competitorMode || 'withSpp';
     const offMode = cfg.competitorOffsetMode === 'rub' ? 'rub' : 'pct';
     const list = ((this.rstate.competitors || {})[String(r.nmID)] || []).filter((c) => c.enabled !== false);
     const opt = (v, label) => `<option value="${v}" ${mode === v ? 'selected' : ''}>${label}</option>`;
     return `
       <select class="rp-off-mode" data-nm="${r.nmID}" style="width:150px" title="Тип цены конкурента, от которой считаем отстройку">
-        ${opt('plain', 'Цена как есть')}
-        ${opt('withSpp', 'С учётом СПП')}
-        ${opt('withWallet', 'СПП + кошелёк')}
+        ${opt('plain', 'Классика · Цена как есть')}
+        ${opt('withSpp', 'Комфорт · С учётом СПП')}
+        ${opt('withWallet', 'СПП + кошелёк (карта)')}
       </select>
       <div class="row" style="gap:4px;margin-top:3px;align-items:center">
         <input type="number" step="${offMode === 'rub' ? '10' : '0.5'}" class="num rp-off-val" data-nm="${r.nmID}" style="width:74px"
@@ -846,7 +864,11 @@ Views.repricer = {
           <option value="rub" ${offMode === 'rub' ? 'selected' : ''}>₽</option>
         </select>
       </div>
-      ${list.length ? `<select class="rp-off-sku" data-nm="${r.nmID}" style="width:150px;margin-top:3px" title="Учитывать конкретный SKU конкурента">
+      <select class="rp-off-logic" data-nm="${r.nmID}" style="width:150px" title="Логика цены конкурента">
+        <option value="min" ${!cfg.competitorId ? 'selected' : ''}>Минимальная цена</option>
+        <option value="sku" ${cfg.competitorId ? 'selected' : ''} ${!list.length ? 'disabled' : ''}>По выбранному SKU</option>
+      </select>
+      ${list.length ? `<label class="checkline tiny"><input type="checkbox" class="rp-use-sku" data-nm="${r.nmID}" ${cfg.competitorId ? 'checked' : ''} /> Учитывать SKU</label><select class="rp-off-sku" data-nm="${r.nmID}" style="width:150px;margin-top:3px" title="Учитывать конкретный SKU конкурента">
           <option value="">Минимальная цена</option>
           ${list.map((c) => `<option value="${U.esc(String(c.id))}" ${String(cfg.competitorId || '') === String(c.id) ? 'selected' : ''}>${U.esc(c.name || c.id)}</option>`).join('')}
         </select>` : '<div class="tiny muted" style="margin-top:3px">SKU не заданы</div>'}`;
@@ -865,6 +887,37 @@ Views.repricer = {
    * pendingEdits: nmID → { config: {…поля itemConfigs…}, cost: {…поля costs…} }
    */
   pendingEdits: new Map(),
+
+  rowConfig(nmID) {
+    return Object.assign({}, (this.rstate.itemConfigs || {})[String(nmID)] || {},
+      (this.pendingEdits.get(String(nmID)) || {}).config || {});
+  },
+
+  /** Импорт только копит изменения: запись и пересчёт — по кнопке сохранения. */
+  importParameters(text) {
+    const rows = U.parseCsv(text);
+    const known = new Set((this.results || []).map((r) => String(r.nmID)));
+    let count = 0;
+    rows.forEach((row) => {
+      const nm = String(row['нм-код'] || row.nmID || '').trim();
+      if (!known.has(nm)) return;
+      const patch = {};
+      const strategy = row['Стратегия'] || row.strategy;
+      const entry = (this.rstate.strategies || []).find((s) => s.id === strategy || s.name === strategy);
+      if (entry) patch.strategy = entry.id;
+      [['Минимальная цена', 'minPrice'], ['Минимальный порог', 'minPrice'],
+        ['Базовая цена', 'basePriceTarget'], ['Базовая цена (порог)', 'basePriceTarget']].forEach(([key, field]) => {
+        if (row[key] !== undefined && row[key] !== '') {
+          const value = Number(String(row[key]).replace(/\s/g, '').replace(',', '.'));
+          if (Number.isFinite(value) && value > 0) patch[field] = value;
+        }
+      });
+      if (Object.keys(patch).length) { this.stageEdit(nm, 'config', patch); count++; }
+    });
+    this.renderResults();
+    App.toast(count ? `Импортировано в несохранённые правки: ${count} строк` : 'Подходящих строк не найдено', count ? 'ok' : 'warn');
+    return count;
+  },
 
   /** Положить правку в очередь (без записи и без пересчёта). */
   stageEdit(nmID, kind, patch) {
@@ -1123,7 +1176,12 @@ Views.repricer = {
   renderResults() {
     const host = this.container.querySelector('#rp-grid');
     if (!host) return;
-    const list = this.filteredResults();
+    const list = this.filteredResults().map((r) => r.error ? Object.assign({
+      title: r.title || r.vendorCode || String(r.nmID), current: {}, proposed: {},
+      corridor: {}, context: {}, delta: {}, warnings: []
+    }, r) : r);
+    this.itemsByNm = new Map((S.state.items || []).map((it) => [String(it.nmID), it]));
+    const pageRows = this.pageOf(list);
     const st = S.state;
     this.selection = this.selection || new Set();
     host.innerHTML = '';
@@ -1132,27 +1190,34 @@ Views.repricer = {
       // колонки фильтруются по выбору пользователя (кнопка «Колонки»):
       // порядок массива обязан совпадать со справочником this.COLUMNS
       columns: this.filterCols([
-        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)}</span></div>` },
+        { title: 'Товар', cls: 'rp-product', render: (r) => {
+            const item = this.itemsByNm.get(String(r.nmID)) || {};
+            const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
+            const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
+            return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
+              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
+          } },
         { title: 'Выгодность', render: (r) => {
             const v = this.valueStatus(r);
-            const errs = this.rowErrors(r);
-            return `${UI.badge(v.label, v.kind)}<div class="tiny muted" title="${U.esc(v.hint)}">${v.hint}</div>` +
-              (errs.length ? `<div class="tiny neg" style="margin-top:3px">ОШИБКА: ${U.esc(errs.join('; '))}</div>` : '');
+            return `${UI.badge(v.label, v.kind)}<div class="tiny muted" title="${U.esc(v.hint)}">${U.esc(v.hint)}</div>`;
           } },
         { title: 'Стратегия', render: (r) => {
-            const cfg = (this.rstate.itemConfigs || {})[String(r.nmID)] || {};
+            const cfg = this.rowConfig(r.nmID);
             const cur = cfg.strategy || '';
             return `<select class="rp-strategy" data-nm="${r.nmID}" style="width:170px">
                 <option value="">как в общих настройках</option>
                 ${(this.rstate.strategies || []).map((s) => `<option value="${s.id}" ${cur === s.id ? 'selected' : ''}>${U.esc(s.name)}</option>`).join('')}
               </select>
-              <div class="tiny muted" style="margin-top:2px">сейчас: ${U.esc(r.strategyTitle || r.strategy)}</div>`;
+              <div class="tiny muted" style="margin-top:2px">сейчас: ${U.esc(r.strategyTitle || r.strategy)}</div>
+              <label class="tiny muted">Себестоимость <input type="number" class="num rp-cost" data-nm="${r.nmID}" min="0" step="0.01" style="width:82px" value="${(this.pendingEdits.get(String(r.nmID)) || {}).cost?.costPriceRub ?? U.num((this.cogsByNm || {})[String(r.nmID)])}" /></label>
+              ${this.rowErrors(r).length ? `<div class="rp-validation neg tiny">ОШИБКА: ${U.esc(this.rowErrors(r).join('; '))}</div>` : ''}`;
           } },
         { title: 'Пол / потолок', num: true, render: (r) => {
-            const cfg = (this.rstate.itemConfigs || {})[String(r.nmID)] || {};
+            const cfg = this.rowConfig(r.nmID);
             return `<input type="number" step="10" class="num rp-minprice" data-nm="${r.nmID}" value="${cfg.minPrice || ''}"
                 placeholder="${U.num(r.corridor.min)}" style="width:96px" title="Минимальная цена: ниже неё репрайсер не опустится" />
-              <div class="tiny muted" style="margin-top:2px">коридор ${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
+              <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
+              <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
           } },
         { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>` },
         { title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
@@ -1190,14 +1255,14 @@ Views.repricer = {
             if (r.quarantine) b.push(UI.badge('карантин', 'danger'));
             if (r.limitedBy === 'step') b.push(UI.badge('лимит шага', 'warn'));
             if (r.limitedBy === 'day') b.push(UI.badge('суточный лимит', 'warn'));
-            if ((r.warnings || []).length) b.push(UI.badge(r.warnings.length + ' пред.', 'warn'));
+            if ((r.warnings || []).length) b.push(`<span title="${U.esc(r.warnings.join('\n'))}" aria-label="Предупреждения">⚠ ${UI.badge(r.warnings.length + ' пред.', 'warn')}</span>`);
             if (!b.length) b.push(r.needSend ? UI.badge('к отправке', 'ok') : UI.badge('без изменений'));
             if (r.limitedBy === 'below-min') b.push(UI.badge('поднят до порога', 'info'));
             return b.join(' ');
           } },
         { title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` }
       ]),
-      rows: this.pageOf(list),
+      rows: pageRows,
       tall: true,
       select: {
         get: (r) => this.selection.has(r.nmID),
@@ -1213,12 +1278,16 @@ Views.repricer = {
         return '';
       }
     });
-    if (this.density === 'compact') grid.el.classList.add('dense');
+    if (this.density === 'compact') grid.el.querySelector('table').classList.add('dense');
     host.appendChild(grid.el);
 
     this.drawPager(host);
     this.drawEditBar();
     this.markDirtyRows();
+    host.querySelectorAll('.rp-use-sku').forEach((cb) => {
+      const sku = host.querySelector('.rp-off-sku[data-nm="' + cb.dataset.nm + '"]');
+      cb.checked = !!(sku && sku.value);
+    });
 
     // сколько товаров под текущим сегментом фильтра.
     // Счётчик лежит РЯДОМ с таблицей (в панели фильтров), а не внутри #rp-grid,
@@ -1241,9 +1310,9 @@ Views.repricer = {
       };
     });
     host.querySelectorAll('tbody tr').forEach((tr, i) => {
-      const r = list[i];
+      const r = pageRows[i];
       // двойной клик — карточка товара со всеми разделами (конкуренты, комиссии, акции, история)
-      if (r) tr.ondblclick = () => Views.itemcard.open(r.nmID);
+      if (r) tr.ondblclick = (e) => { if (!e.target.closest('input, select, button')) Views.itemcard.open(r.nmID); };
     });
 
     /**
@@ -1251,7 +1320,7 @@ Views.repricer = {
      * Изменения КОПЯТСЯ и применяются одной кнопкой «Сохранить» (как «Отменить/Сохранить»
      * в INDEEPA): один пересчёт на пачку правок вместо пересчёта на каждую ячейку.
      */
-    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku').forEach((inp) => {
+    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku, .rp-use-sku, .rp-off-logic').forEach((inp) => {
       inp.onclick = (e) => e.stopPropagation();
       inp.onchange = () => {
         const nm = inp.getAttribute('data-nm');
@@ -1260,6 +1329,10 @@ Views.repricer = {
         else if (inp.classList.contains('rp-minprice')) {
           const v = U.num(inp.value);
           patch.minPrice = v > 0 ? v : null;
+        } else if (inp.classList.contains('rp-plan')) {
+          patch.planQtyMonth = Math.max(0, Math.round(U.num(inp.value)));
+        } else if (inp.classList.contains('rp-baseprice')) {
+          patch.basePriceTarget = U.num(inp.value) > 0 ? U.num(inp.value) : null;
         } else if (inp.classList.contains('rp-off-mode')) patch.competitorMode = inp.value || 'withSpp';
         else if (inp.classList.contains('rp-off-val')) {
           // одно поле на два режима: значение пишется в % или в ₽ по выбранному типу отстройки
@@ -1277,8 +1350,24 @@ Views.repricer = {
             else patch.competitorOffsetPct = U.num(valEl.value);
           }
         } else if (inp.classList.contains('rp-off-sku')) patch.competitorId = inp.value || null;
+        else if (inp.classList.contains('rp-use-sku') || inp.classList.contains('rp-off-logic')) {
+          const sku = host.querySelector('.rp-off-sku[data-nm="' + nm + '"]');
+          patch.competitorId = (inp.classList.contains('rp-use-sku') ? inp.checked : inp.value === 'sku') && sku ? (sku.value || (sku.options[1] && sku.options[1].value)) : null;
+        }
         this.stageEdit(nm, 'config', patch);
+        if (Object.prototype.hasOwnProperty.call(patch, 'competitorId')) {
+          const tr = inp.closest('tr');
+          const cb = tr.querySelector('.rp-use-sku');
+          const sku = tr.querySelector('.rp-off-sku');
+          const logic = tr.querySelector('.rp-off-logic');
+          if (cb) cb.checked = !!patch.competitorId;
+          if (sku) sku.value = patch.competitorId || '';
+          if (logic) logic.value = patch.competitorId ? 'sku' : 'min';
+        }
       };
+    });
+    host.querySelectorAll('.rp-cost').forEach((inp) => {
+      inp.onchange = () => this.stageEdit(inp.dataset.nm, 'cost', { costPriceRub: Math.max(0, U.num(inp.value)) });
     });
 
     // добавить конкурента прямо из строки — без перехода в другой раздел
@@ -1292,7 +1381,8 @@ Views.repricer = {
   renderBulk() {
     const bulk = this.container.querySelector('#rp-bulk');
     const sendBtn = this.container.querySelector('#rp-send');
-    if (sendBtn) sendBtn.disabled = !(this.results || []).some((r) => r.needSend);
+    const valid = new Set(this.results.filter((r) => !this.rowErrors(r).length).map((r) => String(r.nmID)));
+    if (sendBtn) sendBtn.disabled = !this.proposal || this.proposal.phase !== 'proposed' || !(this.proposal.items || []).some((p) => valid.has(String(p.nmID)));
     if (!bulk) return;
     const n = this.selection ? this.selection.size : 0;
     bulk.style.display = n ? '' : 'none';
@@ -1426,10 +1516,22 @@ Views.repricer = {
   },
 
   async sendSelected(onlySelected) {
+    if (this.pendingEdits.size) return App.toast('Сохраните или отмените несохранённые параметры перед отправкой', 'warn');
     const rs = this.rstate;
-    const list = onlySelected
-      ? this.results.filter((r) => this.selection.has(r.nmID) && r.needSend)
-      : this.results.filter((r) => r.needSend);
+    const proposal = await API.invoke('repricer:proposal');
+    const byNm = new Map(this.results.map((r) => [String(r.nmID), r]));
+    const list = (proposal.phase === 'proposed' ? proposal.items || [] : []).filter((p) => {
+      const r = byNm.get(String(p.nmID));
+      return r && !this.rowErrors(r).length && (!onlySelected || this.selection.has(r.nmID));
+    }).map((p) => {
+      const r = byNm.get(String(p.nmID));
+      return Object.assign({}, r, {
+        proposed: Object.assign({}, r.proposed, { basePrice: p.basePrice, discount: p.discount,
+          sellerPrice: p.sellerPrice, profit: p.profitNext, marginPct: p.marginNext }),
+        delta: Object.assign({}, r.delta, { abs: p.sellerPrice - p.currentSellerPrice,
+          pct: p.deltaPct, profitMonth: p.deltaProfitMonth })
+      });
+    });
     if (!list.length) { App.toast('Нет товаров к отправке', 'warn'); return; }
 
     const warn = list.filter((r) => (r.warnings || []).length);
@@ -1452,9 +1554,8 @@ Views.repricer = {
       async () => {
         const btn = UI.modal({ title: 'Отправка цен', size: 'sm', dismissable: false, content: UI.loading(`Отправляем ${list.length} цен в WB…`) });
         try {
-          const res = await API.invoke('repricer:send', {
-            source: 'repricer-manual',
-            items: list.map((r) => ({ nmID: r.nmID, price: Math.round(r.proposed.basePrice), discount: Math.round(r.proposed.discount) }))
+          const res = await API.invoke('repricer:proposal-send', {
+            source: 'repricer-manual', nmIDs: list.map((r) => r.nmID)
           });
           btn.close();
           if (Views.prices.showResult) Views.prices.showResult(res, list.length);
@@ -1655,7 +1756,13 @@ Views.repricer = {
     host.innerHTML = '';
     const grid = UI.table({
       columns: [
-        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)}</span></div>` },
+        { title: 'Товар', cls: 'rp-product', render: (r) => {
+            const item = this.itemsByNm.get(String(r.nmID)) || {};
+            const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
+            const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
+            return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
+              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
+          } },
         { title: 'Цена сейчас', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">маржа ${U.pct(r.current.marginPct)}</div>` },
         { title: 'Решения по акциям', render: (r) => (r.actions || []).slice(0, 3).map((a) =>
             `<div class="tiny" style="margin-bottom:3px">${UI.badge(label[a.action] || a.action, kind[a.action])}
@@ -2380,7 +2487,13 @@ Views.repricer = {
       gh.innerHTML = '';
       const grid = UI.table({
         columns: [
-          { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)}</span></div>` },
+          { title: 'Товар', cls: 'rp-product', render: (r) => {
+            const item = this.itemsByNm.get(String(r.nmID)) || {};
+            const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
+            const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
+            return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
+              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
+          } },
           { title: 'Ваша цена (покупателю)', num: true, render: (r) => U.money(r.buyerPrice) },
           { title: 'Конкурентов', num: true, render: (r) => (comps[String(r.nmID)] || []).length },
           { title: 'Мин. цена конкурента', num: true, render: (r) => {
@@ -2528,7 +2641,7 @@ Views.repricer = {
             <label class="checkline" style="margin-top:8px"><input type="checkbox" id="pm-autosend" ${c.schedule.autoSend ? 'checked' : ''} />
               <b>Автоматически отправлять предложение в WB</b> (без подтверждения, по расписанию фазы 2)</label>
             <p class="hint" style="margin-top:6px">Рекомендуем сначала держать автоотправку выключенной: репрайсер будет считать цены
-              и показывать предложение, а отправлять вы будете вручную из вкладки «Цены и стратегии».
+              и показывать предложение, а отправлять вы будете вручную из вкладки «Товары».
               Если двухфазный цикл выключить, автоотправка уйдёт в WB сразу после пересчёта — как раньше.</p>
           </div>
 
@@ -2751,7 +2864,7 @@ Views.repricer = {
       try {
         data = await API.invoke('repricer:journal', {
           kinds: mode === 'prices' ? ['price', 'propose'] : ['promo-join', 'promo-exit', 'promo-restore'],
-          q: f.q, dateFrom: f.from, dateTo: f.to, limit: 1000
+          q: f.q, dateFrom: f.from, dateTo: f.to, limit: 150000
         });
       } catch (e) {
         body.innerHTML = `<div class="alert danger">${U.esc(e.message)}</div>`;
@@ -2820,7 +2933,7 @@ Views.repricer = {
         tall: true,
         empty: 'Записей нет',
         onRowDblClick: (e) => Views.itemcard.open(e.nmID),
-        footer: (c) => (c.title === 'Когда' ? `<b>${U.fmt(data.total)}</b> записей${data.truncated ? ' (показаны первые 1000)' : ''}` : '')
+        footer: (c) => (c.title === 'Когда' ? `<b>${U.fmt(data.total)}</b> записей${ev.length > 1000 || data.truncated ? ' (показаны первые 1000; экспорт — весь выбранный журнал)' : ''}` : '')
       });
       body.innerHTML = '';
       body.appendChild(grid.el);

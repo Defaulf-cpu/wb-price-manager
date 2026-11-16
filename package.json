@@ -16,10 +16,10 @@
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
     "dist:dir": "electron-builder --win --dir",
-    "test": "node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/price-watch-flow.js && node tools/checks/web-server-flow.js && node --max-old-space-size=4096 tools/uitest.js",
+    "test": "node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/price-watch-flow.js && node tools/checks/web-server-flow.js && node --expose-gc --max-old-space-size=1200 tools/uitest.js",
     "test:limits": "node tools/checks/rate-limit-flow.js",
     "test:repricer": "node tools/checks/repricer-flow.js",
-    "test:ui": "node --max-old-space-size=4096 tools/uitest.js",
+    "test:ui": "node --expose-gc --max-old-space-size=1200 tools/uitest.js",
     "test:pricewatch": "node tools/checks/price-watch-flow.js",
     "test:web": "node tools/checks/web-server-flow.js"
   },

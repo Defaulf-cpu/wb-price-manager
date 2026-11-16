@@ -103,7 +103,13 @@ async function run() {
 
   const { window } = dom;
   const doc = window.document;
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // В jsdom удалённые таблицы тяжёлые; освобождаем их между сценариями.
+  // Проверки и размер страницы не меняются, GC нужен для CI с 2 ГБ памяти.
+  let waitCount = 0;
+  const wait = (ms) => new Promise((r) => setTimeout(() => {
+    if (++waitCount % 8 === 0 && global.gc) global.gc();
+    r();
+  }, ms));
 
   // выполняем скрипты интерфейса в том же порядке, что и в index.html.
   // Список берём ИЗ index.html, а не держим отдельной копией: рукописный список
@@ -134,9 +140,15 @@ async function run() {
     if (window.App && doc.querySelector('#view .card')) break;
   }
 
+  // Общие UI-сценарии не нуждаются в 200 DOM-строках на каждом шаге.
+  // Расчёты идут по всем товарам; штатные 200 строк проверяются отдельно ниже.
+  const productionRepricerPageSize = window.Views.repricer.PAGE_SIZE;
+  window.Views.repricer.PAGE_SIZE = 40;
+
   const report = [];
   const check = (name, cond, extra) => {
     report.push(`${cond ? 'OK  ' : 'FAIL'} ${name}${extra ? ' — ' + extra : ''}`);
+    if (process.env.UI_TEST_PROGRESS) console.log(report[report.length - 1]);
     if (!cond) errors.push('CHECK FAILED: ' + name + (extra ? ' — ' + extra : ''));
   };
 
@@ -1586,7 +1598,7 @@ async function run() {
   await wait(2500);
   const rpText = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
   const rpHtml = doc.getElementById('view').innerHTML;
-  check('репрайсер: вкладки цен и стратегий объединены', /Цены и стратегии/.test(rpText) && !/>Новые цены</.test(rpHtml));
+  check('репрайсер: вкладки цен и стратегий объединены', doc.querySelector('#rp-tabs [data-t="prices"]').textContent.trim() === 'Товары' && !/>Новые цены</.test(rpHtml));
   check('репрайсер: цена на МП и новая цена в одной таблице',
     /Цена на МП/.test(rpHtml) && /Новая цена/.test(rpHtml));
   check('репрайсер: сохранённая вручную цена видна отдельно от цены МП',
@@ -1772,7 +1784,7 @@ async function run() {
   check('INDEEPA: есть сегментированный фильтр', seg.length === 6, 'сегментов ' + seg.length);
   check('INDEEPA: сегменты — Все, К отправке, Своя цена, Ошибки данных, Убыточные, С предупреждениями',
     Array.from(seg).map((b) => b.textContent.trim()).join('|') ===
-      'Все|К отправке|Своя цена|Ошибки данных|Убыточные|С предупреждениями',
+      'Все|Только с изменением|Своя цена|Только ошибки|Только убыточные|С предупреждениями',
     Array.from(seg).map((b) => b.textContent.trim()).join('|'));
   const allCount = doc.querySelectorAll('#rp-grid tbody tr').length;
   const errSeg = Array.from(seg).find((b) => b.getAttribute('data-seg') === 'errors');
@@ -1910,6 +1922,96 @@ async function run() {
     check('INDEEPA: после возврата данных ошибки исчезают', rp.rowErrors(sample).length === 0,
       rp.rowErrors(sample).join('; '));
   }
+
+  // Регрессии плотной строки: пороги, ошибки, страницы и несохранённые правки.
+  check('репрайсер: базовый порог редактируется в строке', !!doc.querySelector('.rp-baseprice'));
+  check('репрайсер: в панели доступны импорт и сохранение параметров',
+    !!doc.getElementById('rp-import') && !!doc.getElementById('rp-edits-reset') && !!doc.getElementById('rp-edits-commit'));
+  check('репрайсер: шапка показывает две фазы и устаревшие позиции',
+    /Фаза 1/.test(doc.querySelector('.rp-lifecycle').textContent) && /Фаза 2/.test(doc.querySelector('.rp-lifecycle').textContent) &&
+    /устарело/.test(doc.querySelector('.rp-lifecycle').textContent));
+  check('репрайсер: строка содержит бренд и место фотографии', !!doc.querySelector('.rp-photo') && /SKU/.test(doc.querySelector('.rp-product').textContent));
+  rp.density = 'compact';
+  rp.renderResults();
+  check('репрайсер: плотный режим применён к самой таблице', !!doc.querySelector('#rp-grid table.dense'));
+  if (sample) {
+    const nm = String(sample.nmID);
+    const saved = rp.cogsByNm[nm];
+    rp.cogsByNm[nm] = 0;
+    rp.renderResults();
+    const errCell = doc.querySelector('#rp-grid .rp-validation');
+    check('репрайсер: ОШИБКА находится именно в ячейке стратегии', !!errCell && !!errCell.parentNode.querySelector('.rp-strategy'));
+    rp.cogsByNm[nm] = 2;
+    check('репрайсер: ровно 2 рубля не проходят валидацию', rp.rowErrors(sample).some((x) => /больше 2/.test(x)));
+    rp.cogsByNm[nm] = saved;
+    rp.stageEdit(nm, 'config', { basePriceTarget: 9876 });
+    rp.renderResults();
+    check('репрайсер: перерисовка сохраняет несохранённый базовый порог', doc.querySelector('.rp-baseprice[data-nm="' + nm + '"]').value === '9876');
+    rp.discardEdits();
+    const beforeConfigs = JSON.stringify(rp.rstate.itemConfigs);
+    const imported = rp.importParameters('нм-код;Минимальная цена;Базовая цена\n' + nm + ';700;1300');
+    check('репрайсер: импорт копит правки, не меняя сохранённые параметры', imported === 1 && rp.pendingEdits.get(nm).config.minPrice === 700 && JSON.stringify(rp.rstate.itemConfigs) === beforeConfigs);
+    rp.discardEdits();
+  }
+  const savedPage = rp.page;
+  check('репрайсер: размер страницы — 200 строк', productionRepricerPageSize === 200);
+  rp.PAGE_SIZE = productionRepricerPageSize;
+  rp.page = 24;
+  const syntheticPage = rp.pageOf(Array.from({ length: 5000 }, (_, i) => ({ nmID: i + 1 })));
+  check('репрайсер: 5000 товаров режутся на страницы по 200', syntheticPage.length === 200 && syntheticPage[0].nmID === 4801 && rp.pageInfo.to === 5000);
+  rp.pageOf([]);
+  check('репрайсер: пустая выборка показывает 0 - 0 из 0', rp.pageInfo.from === 0 && rp.pageInfo.to === 0);
+  rp.PAGE_SIZE = 40;
+  rp.page = 1;
+  rp.renderResults();
+  if (rp.filteredResults().length > rp.PAGE_SIZE) {
+    const originalOpen = window.Views.itemcard.open;
+    let openedNm = null;
+    window.Views.itemcard.open = (nm) => { openedNm = nm; };
+    doc.querySelector('#rp-grid tbody tr td.rp-product').dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+    check('репрайсер: двойной клик второй страницы открывает её товар', openedNm === rp.filteredResults()[rp.PAGE_SIZE].nmID);
+    window.Views.itemcard.open = originalOpen;
+  }
+  rp.page = savedPage;
+  rp.renderResults();
+  // XLSX пишется на диск и читается штатным парсером: ровно три строки данных.
+  const { buildXlsx } = require(path.join(ROOT, 'electron', 'xlsx-write'));
+  const { readXlsx } = require(path.join(ROOT, 'electron', 'xlsx-lite'));
+  const roundtripRows = [['00123', 'Товар & <чай>', 123.45], ['9007199254740993', 'Кавычки " и \nперенос', 0], ['=SUM(A1:A2)', 'Товар & <чай>', -15]];
+  const roundtripFile = path.join(os.tmpdir(), 'wb-roundtrip-' + Date.now() + '.xlsx');
+  try {
+    fs.writeFileSync(roundtripFile, buildXlsx(roundtripRows, { headers: ['SKU', 'Название', 'Цена'] }));
+    const readBack = readXlsx(fs.readFileSync(roundtripFile));
+    check('репрайсер: Excel round-trip на 3 строках через файл', JSON.stringify(readBack.rows) === JSON.stringify([['SKU', 'Название', 'Цена'], ...roundtripRows.map((r) => r.map(String))]));
+    const exported = await service.handlers['xlsx:build']({ rows: roundtripRows, headers: ['SKU', 'Название', 'Цена'] });
+    check('репрайсер: канал экспорта Excel возвращает читаемую книгу', exported.ok && exported.rows === 3 && readXlsx(Buffer.from(exported.base64, 'base64')).rows.length === 4);
+  } finally { if (fs.existsSync(roundtripFile)) fs.unlinkSync(roundtripFile); }
+
+  check('репрайсер: логика и флаг SKU доступны в строке', !!doc.querySelector('.rp-off-logic') && !!doc.querySelector('.rp-use-sku'));
+  check('репрайсер: себестоимость и план редактируются в строке', !!doc.querySelector('.rp-cost') && !!doc.querySelector('.rp-plan'));
+  // Изолированный сервис: даже ручной черновик не обходит проверку себестоимости.
+  const safetyDir = path.join(os.tmpdir(), 'wb-validation-' + Date.now());
+  try {
+    const safetyStore = createStore(safetyDir, null);
+    safetyStore.saveSettings({ demoMode: true, firstRun: false });
+    const safetyService = createService(safetyStore, () => {});
+    const safetyGoods = await safetyService.handlers['wb:goods']({});
+    const nm = String(safetyGoods.items[0].nmID);
+    await safetyService.handlers['costs:save']({ items: { [nm]: { costPriceRub: 2 } } });
+    await safetyService.handlers['prices:draft-save']({ items: { [nm]: { basePrice: 9999, discount: 0 } } });
+    await safetyService.handlers['repricer:calc']({ full: true });
+    const blockedProposal = await safetyService.handlers['repricer:proposal']();
+    check('репрайсер: сервер блокирует себестоимость 2 рубля даже с ручной ценой',
+      !blockedProposal.items.some((r) => String(r.nmID) === nm) &&
+      (blockedProposal.blocked || []).some((r) => String(r.nmID) === nm));
+    let tooManyRejected = false;
+    try { await safetyService.handlers['xlsx:build']({ rows: Array(150001).fill([]) }); }
+    catch (e) { tooManyRejected = e.code === 'TOO_MANY_ROWS'; }
+    check('репрайсер: Excel отклоняет более 150000 строк явно', tooManyRejected);
+    safetyStore.saveProposals({ items: [], phase: 'sent', sentAt: '2026-01-02T03:04:05.000Z', staleCount: 3 });
+    const storedLifecycle = safetyStore.loadProposals();
+    check('репрайсер: время отправки и число устаревших переживают сохранение', storedLifecycle.sentAt === '2026-01-02T03:04:05.000Z' && storedLifecycle.staleCount === 3);
+  } finally { fs.rmSync(safetyDir, { recursive: true, force: true }); }
 
   const vs = rp.valueStatus((rp.results || [])[0] || {});
   check('INDEEPA: статус выгодности имеет подпись', !!vs && !!vs.label && !!vs.hint, vs && vs.label + ' / ' + (vs.hint || '').slice(0, 40));
@@ -2138,6 +2240,15 @@ async function run() {
   const cc2 = doc.querySelector('#modal-root .modal-close');
   if (cc2) cc2.click();
   await wait(200);
+
+  // ── возвращаем штатный размер товарной страницы и проверяем настоящую отрисовку ──
+  window.Views.repricer.PAGE_SIZE = productionRepricerPageSize;
+  window.App.go('repricer');
+  await wait(1600);
+  window.Views.repricer.page = 0;
+  window.Views.repricer.renderResults();
+  check('репрайсер: настоящий DOM страницы содержит до 200 товаров',
+    doc.querySelectorAll('#rp-grid tbody tr').length === Math.min(200, window.Views.repricer.filteredResults().length));
 
   // ── веб-версия: CSRF-заголовок и видимая кнопка «Выйти» ──
   // В Electron и в dev-сервере tools/serve.js сессии нет — значит и кнопки выхода быть не должно.

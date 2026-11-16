@@ -93,7 +93,22 @@ const MARKERS = [
   ['src/renderer/js/api.js', 'function logout', 'выход из веб-сессии'],
   ['src/renderer/js/app.js', "mk('Выйти'", 'кнопка «Выйти» в веб-версии'],
   ['package.json', 'web-server-flow.js', 'прогон веб-сервера в npm test'],
-  ['docs/WEB.md', 'cloudflared', 'инструкция по туннелю и HTTPS']
+  ['docs/WEB.md', 'cloudflared', 'инструкция по туннелю и HTTPS'],
+  ['src/renderer/js/views/repricer.js', 'data-t="prices">Товары</div>', 'вкладка «Товары» (прежнее название «Цены и стратегии»)'],
+  ['src/renderer/js/views/repricer.js', 'PAGE_SIZE: 200', 'страница товаров по 200 строк'],
+  ['src/renderer/js/views/repricer.js', 'rowConfig(', 'правки переживают перерисовку и смену страницы'],
+  ['electron/service.js', 'себестоимость должна быть больше 2', 'серверная блокировка себестоимости ≤ 2 ₽'],
+  ['electron/service.js', 'Math.min(150000', 'журналы: лимит поднят до 150 000 событий'],
+  ['electron/service.js', 'payload.nmIDs', 'частичная отправка сохранённого предложения'],
+  ['electron/store.js', 'sentAt', 'время отправки данного предложения'],
+  ['electron/store.js', 'staleCount', 'число устаревших позиций'],
+  ['electron/xlsx-write.js', 'sharedStrings.xml', 'XLSX: строки через sharedStrings'],
+  ['electron/repricer-engine.js', 'costPriceRub: num(', 'себестоимость в результате расчёта'],
+  ['docs/API.md', '21.10 Доводка строки товара', 'описание доводки страницы репрайсера'],
+  ['tools/uitest.js', 'productionRepricerPageSize', 'штатный размер страницы проверяется отдельно'],
+  ['package.json', '--expose-gc', 'UI-прогон с управляемой сборкой мусора'],
+  ['README.md', 'по 200 строк', 'README: страница товаров по 200 строк'],
+  ['docs/TASKS-for-agents.md', 'ЗАКРЫТО — промт оставлен как спецификация', 'задание C закрыто']
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */

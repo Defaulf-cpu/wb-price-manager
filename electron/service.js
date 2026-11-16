@@ -1729,7 +1729,7 @@ function createService(store, emit, electron) {
     },
 
     /** Фаза 2: отправить сохранённое предложение (с проверкой, что цены в WB не уехали). */
-    'repricer:proposal-send': async (payload) => sendProposal((payload && payload.source) || 'repricer-manual'),
+    'repricer:proposal-send': async (payload) => sendProposal((payload && payload.source) || 'repricer-manual', payload && payload.nmIDs),
 
     /** Отказаться от предложения, ничего не отправляя. */
     'repricer:proposal-discard': async () => {
@@ -1874,7 +1874,7 @@ function createService(store, emit, electron) {
      */
     'repricer:journal': async (payload) => {
       const p = payload || {};
-      const limit = Math.min(5000, Math.max(1, Number(p.limit) || 500));
+      const limit = Math.min(150000, Math.max(1, Number(p.limit) || 500));
       const q = String(p.q || '').trim().toLowerCase();
       const from = p.dateFrom ? iso10(p.dateFrom) : '';
       const to = p.dateTo ? iso10(p.dateTo) : '';
@@ -2931,6 +2931,7 @@ function createService(store, emit, electron) {
     // движок отдаёт не значение себестоимости, а её источник: 'none' = не задана нигде
     const src = (r.current && r.current.costSources) || {};
     if (src.costPriceRub === 'none') out.push('не задана себестоимость');
+    else if (r.current && r.current.costPriceRub !== undefined && !(Number(r.current.costPriceRub) > 2)) out.push('себестоимость должна быть больше 2 ₽');
     if (!(Number(r.current && r.current.basePrice) > 0)) out.push('не задана базовая цена');
     if (!(Number(r.corridor && r.corridor.min) > 0)) out.push('не задан порог минимальной цены');
     return out;
@@ -2948,6 +2949,12 @@ function createService(store, emit, electron) {
     const drafts = store.loadPriceDrafts() || {};
     (results || []).forEach((r) => {
       if (!r || r.error) return;
+      const blockers = proposalBlockers(r);
+      if (blockers.length) {
+        blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
+          reasons: blockers, sellerPrice: r.proposed && r.proposed.sellerPrice });
+        return;
+      }
       const d = drafts[String(r.nmID)];
       const hasDraft = !!(d && Number(d.basePrice) > 0);
       if (hasDraft) {
@@ -3064,14 +3071,16 @@ function createService(store, emit, electron) {
   }
 
   /** Фаза 2: отправить сохранённое предложение в WB. */
-  async function sendProposal(source) {
-    const prop = store.loadProposals();
+  async function sendProposal(source, nmIDs) {
+    const saved = store.loadProposals();
+    const ids = Array.isArray(nmIDs) ? new Set(nmIDs.map(String)) : null;
+    const prop = ids ? Object.assign({}, saved, { items: saved.items.filter((x) => ids.has(String(x.nmID))) }) : saved;
     if (!prop.items.length) {
       throw new WBError('Нет сохранённого предложения: сначала нажмите «Пересчитать цены».', { code: 'NO_PROPOSAL' });
     }
     const v = await validateProposal(prop);
     if (!v.ok) {
-      store.saveProposals(Object.assign({}, prop, { phase: 'stale', note: v.reason }));
+      store.saveProposals(Object.assign({}, prop, { phase: 'stale', staleCount: (v.stale || []).length, note: v.reason }));
       notify('repricer', { type: 'proposal-stale', reason: v.reason, stale: (v.stale || []).length });
       throw new WBError(v.reason, { code: 'PROPOSAL_STALE' });
     }
@@ -3081,8 +3090,12 @@ function createService(store, emit, electron) {
       proposed: { basePrice: x.basePrice, discount: x.discount, sellerPrice: x.sellerPrice }
     }));
     const res = await sendPrices(results, source || 'repricer-proposal');
+    const remaining = ids ? saved.items.filter((x) => !ids.has(String(x.nmID))) : [];
     store.saveProposals(Object.assign({}, prop, {
-      phase: 'sent',
+      items: remaining.length ? remaining : prop.items,
+      phase: remaining.length ? 'proposed' : 'sent',
+      sentAt: new Date().toISOString(),
+      staleCount: v.stale.length,
       sendAt: null,
       note: 'Отправлено ' + (res.sent || 0) + ' цен' + (v.stale.length ? ', пропущено устаревших: ' + v.stale.length : '')
     }));
