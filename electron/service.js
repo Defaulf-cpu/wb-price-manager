@@ -1652,11 +1652,27 @@ function createService(store, emit, electron) {
     },
 
     'costs:import': async (payload) => {
-      const rows = (payload && payload.rows) || [];
+      /**
+       * Импорт себестоимости принимает либо готовые строки (их нормализует вьюха после
+       * разбора CSV), либо сам файл в base64. Второй путь нужен для XLSX: это ZIP с XML,
+       * в браузерном окне его не разобрать, а в главном процессе уже есть свой читатель
+       * `xlsx-lite` (тот же, что разбирает список товаров акции).
+       */
+      let rows = (payload && payload.rows) || [];
+      if ((!rows || !rows.length) && payload && payload.base64) {
+        let table;
+        try {
+          table = readTable(Buffer.from(String(payload.base64), 'base64'), payload.fileName || '');
+        } catch (e) {
+          throw new WBError('Не удалось прочитать файл: ' + e.message, { code: 'BAD_FILE' });
+        }
+        rows = costsRowsFromTable(table);
+        if (!rows.length) throw new WBError('В файле нет строк с себестоимостью.', { code: 'EMPTY_FILE' });
+      }
       const items = Object.assign({}, costsMap());
       let updated = 0;
       for (const r of rows) {
-        const nm = String(r.nmID || '').trim();
+        const nm = String(r.nmID || r['нм-код'] || r['НМ-код'] || r['Артикул WB'] || r.nmId || '').trim();
         if (!nm || !/^\d+$/.test(nm)) continue;
         const cur = items[nm] || {};
         const next = Object.assign({}, cur);
@@ -1781,7 +1797,7 @@ function createService(store, emit, electron) {
       const items = Object.assign({}, store.loadCompetitors());
       let added = 0;
       for (const r of rows) {
-        const nm = String(r.nmID || '').trim();
+        const nm = String(r.nmID || r['нм-код'] || r['НМ-код'] || r['Артикул WB'] || r.nmId || '').trim();
         if (!nm || !/^\d+$/.test(nm)) continue;
         const list = Array.isArray(items[nm]) ? items[nm].slice() : [];
         list.push({
@@ -3969,6 +3985,28 @@ function createService(store, emit, electron) {
     handlers, isDemo, getSettings, getClient, getDemo, cache,
     calcRepricer, sendPrices, applyScheduler, sched, repricerCfg, priceWatcher
   };
+}
+
+
+/**
+ * Таблица из `readTable` (массив массивов, первая строка — заголовки) → строки-объекты
+ * для `costs:import`. Заголовки оставляем как есть: обработчик ниже уже умеет читать
+ * и английские поля, и русские подписи из шаблона.
+ */
+function costsRowsFromTable(table) {
+  const raw = (table && table.rows) || [];
+  const rows = raw.filter((r) => Array.isArray(r) && r.some((c) => String(c === undefined || c === null ? '' : c).trim() !== ''));
+  if (rows.length < 2) return [];
+  const header = rows[0].map((h) => String(h === undefined || h === null ? '' : h).trim());
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const obj = {};
+    header.forEach((h, k) => {
+      if (h) obj[h] = rows[i][k];
+    });
+    if (Object.keys(obj).length) out.push(obj);
+  }
+  return out;
 }
 
 module.exports = { createService, maskKey, daysAgoIso };

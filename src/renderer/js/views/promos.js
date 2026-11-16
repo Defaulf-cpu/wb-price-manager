@@ -7,7 +7,15 @@ Views.promos = {
   title: 'Акции WB',
   subtitle: 'Календарь акций, контроль входа и расчёт экономики по акционной цене',
 
-  render(container) {
+  /** Раздел «Акции» — тот же календарь, что открывается вкладкой репрайсера. */
+  render(container) { this.mount(container); },
+
+  /**
+   * Календарь акций в произвольном контейнере: раздел «Акции» и вложенная вкладка
+   * «Акции» репрайсера используют один код (календарь, вход/выход, импорт состава,
+   * ссылка в кабинет), поэтому поведение одинаковое.
+   */
+  mount(container) {
     const st = S.state;
     this.container = container;
     container.innerHTML = `<div class="card">${UI.loading('Загружаем календарь акций из Wildberries…')}</div>`;
@@ -20,7 +28,7 @@ Views.promos = {
         container.innerHTML = `<div class="card"><div class="alert danger">${U.esc(e.message)}</div>
           <p class="hint" style="margin-top:10px">Календарь акций доступен по токену категории «Цены и скидки» (хост dp-calendar-api.wildberries.ru).</p>
           <button class="btn" id="retry">Повторить</button></div>`;
-        container.querySelector('#retry').onclick = () => this.render(container);
+        container.querySelector('#retry').onclick = () => this.mount(container);
       }
     })();
   },
