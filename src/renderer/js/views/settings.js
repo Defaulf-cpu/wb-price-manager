@@ -406,6 +406,38 @@ Views.settings = {
       </div>
 
       <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>3.4 Наблюдатель цен витрины WB</h2>
+          <span class="hint">СПП, цена и остаток глазами покупателя</span></div>
+        <div style="padding:14px 16px 16px">
+          <div class="alert info" style="margin-bottom:12px">
+            API продавца <b>не отдаёт</b> витринную цену, фактический СПП и остаток на витрине.
+            Наблюдатель читает карточку товара на витрине WB и пишет наблюдения в файл
+            <span class="mono">pricewatch.json</span>. Медиана СПП за 7 дней попадает в экономику
+            как источник <b>«витрина WB»</b> — она свежее среднего по статистике продаж.
+            Смотреть и править наблюдения: карточка товара → вкладка <b>«Цены на площадке»</b>.
+          </div>
+          <label class="checkline" style="margin-bottom:8px">
+            <input type="checkbox" id="s-pw-auto" ${s.priceWatchAutoFetch === true ? 'checked' : ''} />
+            <b>Разрешить автоматические запросы к витрине</b>
+            <span class="hint">По умолчанию выключено, и это намеренно: витрина защищена от ботов.
+              При ответе 403/429 или капчей наблюдатель честно сообщает о блокировке и останавливается
+              до перезапуска приложения — повторные запросы только усилят блокировку.
+              Кнопка «Обновить с витрины» в карточке товара работает и без этого переключателя.</span>
+          </label>
+          <div class="grid g3" style="gap:10px;margin-top:6px">
+            <label class="field">Кэш наблюдения, минут
+              <input type="number" class="num" id="s-pw-ttl" value="${U.num(s.priceWatchTtlMinutes, 60)}" min="1" max="1440" step="5" /></label>
+          </div>
+          <p class="hint" style="margin-top:8px">Ограничения наблюдателя: не более <b>200 товаров</b> за проход,
+            запросы строго по очереди с паузой от <b>3 секунд</b> и случайной добавкой,
+            история — до <b>50 записей</b> на товар. Цена конкурента записывается как цена покупателю (с СПП) —
+            именно её сравнивает репрайсер в режиме «с СПП».</p>
+          <p class="hint" style="margin-top:6px">В демо-режиме запросы к витрине не выполняются: демо-артикулы на WB не существуют.
+            Ручной ввод при этом работает.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
         <div class="card-head"><h2>4. Комиссии и реклама по категориям</h2>
           <button class="btn btn-sm btn-ghost" id="cat-reset">Сбросить к значениям по умолчанию</button></div>
         <div id="cats-host"></div>
@@ -505,6 +537,8 @@ Views.settings = {
         promoCabinetUrl: String($('#s-promourl').value || '').trim(),
         promosInferFromDiscount: $('#s-promo-infer').checked,
         promosFetchNomenclatures: $('#s-promo-fetch').checked,
+        priceWatchAutoFetch: $('#s-pw-auto').checked,
+        priceWatchTtlMinutes: U.num($('#s-pw-ttl').value, 60),
         statsLoadOrders: $('#f-orders').checked,
         statsMaxPages: U.num($('#f-statpages').value, 3),
         quarantineGuard: $('#g-quar').checked,

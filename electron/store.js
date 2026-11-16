@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE,
+  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE,
   PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE
 } = require('./config');
 
@@ -18,6 +18,8 @@ const PROMONOMS_FILE = 'promonoms.json';
 
 /** Настройки по умолчанию (все значения пользователь может изменить в разделе «Настройки»). */
 const DEFAULT_SETTINGS = {
+  priceWatchAutoFetch: false, // витрина: включение на свой риск
+  priceWatchTtlMinutes: 60,
   demoMode: true,
   sandbox: false,
   model: 'marketplace', // marketplace | fbw
@@ -143,6 +145,7 @@ function deepMerge(base, src) {
 function createStore(dir, secretBox) {
   fs.mkdirSync(dir, { recursive: true });
   const settingsPath = path.join(dir, SETTINGS_FILE);
+  const priceWatchPath = path.join(dir, PRICEWATCH_FILE);
   const costsPath = path.join(dir, COSTS_FILE);
   const tasksPath = path.join(dir, TASKS_FILE);
   const secretsPath = path.join(dir, SECRETS_FILE);
@@ -264,6 +267,32 @@ function createStore(dir, secretBox) {
       const next = deepMerge(cur, patch || {});
       writeJson(repricerPath, next);
       return next;
+    },
+
+    // nmID -> хронологический список наблюдений; не более 50 на товар.
+    loadPriceWatch() {
+      const d = readJson(priceWatchPath, { items: {} });
+      return isObject(d) && isObject(d.items) ? d.items : {};
+    },
+
+    savePriceWatch(items) {
+      const cleaned = {};
+      for (const [key, rows] of Object.entries(isObject(items) ? items : {})) {
+        if (/^[1-9]\d*$/.test(key) && Array.isArray(rows)) cleaned[key] = rows.slice(-50);
+      }
+      writeJson(priceWatchPath, { items: cleaned, updatedAt: new Date().toISOString() });
+      return cleaned;
+    },
+
+    appendPriceWatch(entries) {
+      const items = api.loadPriceWatch();
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        const key = String(entry && entry.nmID || '');
+        if (!/^[1-9]\d*$/.test(key)) continue;
+        const { nmID, ...row } = entry;
+        items[key] = (Array.isArray(items[key]) ? items[key] : []).concat([row]).slice(-50);
+      }
+      return api.savePriceWatch(items);
     },
 
     loadCompetitors() {

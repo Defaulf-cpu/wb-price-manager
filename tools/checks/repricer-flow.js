@@ -587,6 +587,40 @@ async function tSppFromStats() {
   check('СПП: цена покупателю считается с реальным СПП',
     Math.abs(unit.buyerPrice - 720) < 0.01, String(unit.buyerPrice));
 
+  // ── наблюдение витрины WB (модуль price-watcher): самый свежий источник СПП ──
+  const watch = EC.resolveParams(settings, item, {}, { sppPctAvg: 17.4, sppPctWatch: 21 });
+  check('СПП: наблюдение витрины важнее среднего по статистике продаж',
+    watch.sppPct === 21 && watch.costSources.sppPct === 'watch',
+    watch.sppPct + ' / ' + watch.costSources.sppPct);
+
+  const watchManual = EC.resolveParams(settings, item, { sppPct: 22 }, { sppPctAvg: 17.4, sppPctWatch: 21 });
+  check('СПП: ручной ввод важнее наблюдения витрины',
+    watchManual.sppPct === 22 && watchManual.costSources.sppPct === 'manual',
+    watchManual.sppPct + ' / ' + watchManual.costSources.sppPct);
+
+  const watchZero = EC.resolveParams(settings, item, {}, { sppPctAvg: 17.4, sppPctWatch: 0 });
+  check('СПП: ноль на витрине — осмысленное значение, а не «нет данных»',
+    watchZero.sppPct === 0 && watchZero.costSources.sppPct === 'watch',
+    watchZero.sppPct + ' / ' + watchZero.costSources.sppPct);
+
+  const watchUnit = EC.calcUnit(1000, EC.resolveParams(settings, item, {}, { sppPctWatch: 15 }));
+  check('СПП: цена покупателю по наблюдению витрины',
+    Math.abs(watchUnit.buyerPrice - 850) < 0.01, String(watchUnit.buyerPrice));
+
+  const watchOff = EC.resolveParams(Object.assign({}, settings, { useFactCosts: false }), item, {}, { sppPctWatch: 21 });
+  check('СПП: наблюдение витрины не зависит от переключателя «расходы из отчёта WB»',
+    watchOff.sppPct === 21, String(watchOff.sppPct));
+
+  const watchMeta = EC.resolveParams(settings, item, {}, { sppPctWatch: 21, sppWatchSamples: 4, sppWatchAt: '2026-01-02T03:04:05.000Z' });
+  check('СПП: в параметрах видно, сколько замеров легло в медиану',
+    watchMeta.sppPctWatch === 21 && watchMeta.sppWatchSamples === 4 && !!watchMeta.sppWatchAt,
+    'замеров ' + watchMeta.sppWatchSamples + ', последний ' + watchMeta.sppWatchAt);
+
+  const noWatch = EC.resolveParams(settings, item, {}, { sppPctAvg: 17.4, sppPctWatch: null });
+  check('СПП: пустое наблюдение не подменяет статистику',
+    noWatch.sppPct === 17.4 && noWatch.costSources.sppPct === 'fact',
+    noWatch.sppPct + ' / ' + noWatch.costSources.sppPct);
+
   // на демо-данных: СПП из статистики должен доехать до карточки товара
   const st = makeStand();
   await st.service.handlers['data:refresh-all']({ facts: false });
@@ -598,6 +632,40 @@ async function tSppFromStats() {
   const card = await st.service.handlers['items:card']({ nmID: nm });
   check('СПП: карточка товара видит фактический СПП', Number((card.facts || {}).sppPctAvg) > 0,
     'sppPctAvg=' + (card.facts || {}).sppPctAvg);
+
+  // ── наблюдатель цен: запись вручную доходит до экономики товара ──
+  const rec = await st.service.handlers['pricewatch:record']({ nmID: nm, shelfPrice: 1000, sppPrice: 800, source: 'manual' });
+  check('наблюдатель: ручная запись считает СПП', rec.ok === true && rec.sppPct === 20, JSON.stringify(rec));
+  const goods2 = await st.service.handlers['wb:goods']({});
+  const facts2 = (goods2.facts || {})[String(nm)] || {};
+  check('наблюдатель: медиана витрины попала в факты товара',
+    Number(facts2.sppPctWatch) === 20 && Number(facts2.sppWatchSamples) === 1,
+    'sppPctWatch=' + facts2.sppPctWatch + ', замеров ' + facts2.sppWatchSamples);
+
+  // запись без цены покупателю не даёт СПП — и замером считаться не должна
+  await st.service.handlers['pricewatch:record']({ nmID: nm, shelfPrice: 900 });
+  const facts3 = ((await st.service.handlers['wb:goods']({}).then((g) => g.facts)) || {})[String(nm)] || {};
+  check('наблюдатель: запись без СПП не увеличивает число замеров',
+    Number(facts3.sppPctWatch) === 20 && Number(facts3.sppWatchSamples) === 1,
+    'замеров ' + facts3.sppWatchSamples);
+
+  // наблюдение старше 7 дней в расчёт не берётся
+  st.store.appendPriceWatch([{ nmID: nm + 1, at: new Date(Date.now() - 9 * 86400000).toISOString(), shelfPrice: 1000, sppPrice: 700, sppPct: 30 }]);
+  const facts4 = ((await st.service.handlers['wb:goods']({}).then((g) => g.facts)) || {})[String(nm + 1)] || {};
+  check('наблюдатель: наблюдение старше 7 дней в экономику не попадает',
+    facts4.sppPctWatch === undefined, JSON.stringify(facts4));
+
+  // в демо-режиме к витрине не ходим: честный отказ вместо блокировки
+  const demoFetch = await st.service.handlers['pricewatch:fetch']({ nmIDs: [nm], force: true });
+  check('наблюдатель: в демо-режиме запрос к витрине не выполняется',
+    demoFetch.ok === false && demoFetch.code === 'DEMO', JSON.stringify(demoFetch).slice(0, 80));
+  const noForce = await st.service.handlers['pricewatch:fetch']({ nmIDs: [nm] });
+  check('наблюдатель: без force и без разрешения сеть не запускается',
+    noForce.ok === false && noForce.code === 'AUTO_DISABLED', JSON.stringify(noForce).slice(0, 80));
+  const hist = await st.service.handlers['pricewatch:history']({ nmID: nm });
+  check('наблюдатель: история и медиана доступны из интерфейса',
+    hist.ok === true && hist.items.length >= 2 && hist.sppPct === 20,
+    'записей ' + hist.items.length + ', медиана ' + hist.sppPct);
 }
 
 // ─────── 9. Журнал участия в акциях переживает возврат цены ───────

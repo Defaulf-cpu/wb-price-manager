@@ -63,6 +63,8 @@ Views.itemcard = {
     const cur = a.current;
     const draft = d.drafts || null;
     const prop = d.proposal || null;
+    // сколько замеров витрины легло в медиану СПП — сразу видно, есть ли наблюдения
+    const watchBadge = U.num((d.facts || {}).sppWatchSamples) > 0 ? U.num((d.facts || {}).sppWatchSamples) + ' замеров' : '';
 
     const badges = [
       UI.badge('нм-код ' + it.nmID),
@@ -93,6 +95,7 @@ Views.itemcard = {
       tabs: [
         { id: 'econ', label: 'Экономика и цена', badge: draft ? 'своя цена' : '' },
         { id: 'competitors', label: 'Конкуренты', badge: (d.competitors || []).length || '' },
+        { id: 'watch', label: 'Цены на площадке', badge: watchBadge },
         { id: 'commissions', label: 'Комиссии и параметры' },
         { id: 'promos', label: 'Акции', badge: (d.promos || []).length || '' },
         { id: 'history', label: 'История пересчёта', badge: (d.recalcHistory || []).length || '' }
@@ -112,6 +115,7 @@ Views.itemcard = {
     const fn = {
       econ: () => this.tabEcon(host),
       competitors: () => this.tabCompetitors(host),
+      watch: () => this.tabWatch(host),
       commissions: () => this.tabCommissions(host),
       promos: () => this.tabPromos(host),
       history: () => this.tabHistory(host)
@@ -279,9 +283,9 @@ Views.itemcard = {
       const p = now;
       const src = (analyzeAt(b, dd).params.costSources) || {};
       const srcBadge = (key) => {
-        const map = { fact: 'факт WB', manual: 'вручную', category: 'справочник', settings: 'настройки', formula: 'формула', none: '—' };
+        const map = { fact: 'факт WB', watch: 'витрина WB', manual: 'вручную', category: 'справочник', settings: 'настройки', formula: 'формула', none: '—' };
         const v = src[key] || 'none';
-        const kind = v === 'fact' ? 'ok' : (v === 'manual' ? 'info' : (v === 'none' ? 'warn' : ''));
+        const kind = (v === 'fact' || v === 'watch') ? 'ok' : (v === 'manual' ? 'info' : (v === 'none' ? 'warn' : ''));
         return UI.badge(map[v] || v, kind);
       };
       host.querySelector('#ic-unit').innerHTML = UI.kv([
@@ -366,6 +370,20 @@ Views.itemcard = {
     })();
   },
 
+  /**
+   * Перечитать данные карточки одним запросом.
+   * Нужно после записи наблюдения: СПП по витрине участвует в экономике,
+   * а `this.data.facts` без перечитывания остался бы старым.
+   */
+  async reloadCard() {
+    try {
+      const data = await API.invoke('items:card', { nmID: this.nmID });
+      if (data && data.ok && data.item) this.data = data;
+    } catch (e) {
+      // старая карточка лучше, чем пустая: ошибку покажет тот блок, который её вызвал
+    }
+  },
+
   // ───────────────────────── Конкуренты ─────────────────────────
 
   /**
@@ -376,7 +394,11 @@ Views.itemcard = {
    */
   sppPctNow() {
     const ov = this.data.overrides || {};
+    const f = this.data.facts || {};
     if (U.num(ov.sppPct) > 0) return U.num(ov.sppPct);
+    // наблюдение витрины WB — самая свежая цифра; за ней среднее по продажам WB
+    if (f.sppPctWatch !== undefined && f.sppPctWatch !== null && U.num(f.sppPctWatch, -1) >= 0) return U.num(f.sppPctWatch);
+    if (U.num(f.sppPctAvg) > 0) return U.num(f.sppPctAvg);
     if (U.num(this.data.item && this.data.item.sppPct) > 0) return U.num(this.data.item.sppPct);
     return U.num((this.data.settings || {}).sppDefault);
   },
@@ -501,6 +523,276 @@ Views.itemcard = {
     paintList();
   },
 
+  // ───────────────────────── Цены на площадке ─────────────────────────
+
+  /**
+   * Вкладка «Цены на площадке» — то, чего в кабинете WB нет.
+   *
+   * API продавца отдаёт только вашу цену и скидку: ни витринной цены, ни фактического СПП,
+   * ни остатка на витрине там не видно. Модуль наблюдателя (electron/price-watcher.js) читает
+   * карточку товара на витрине WB и складывает наблюдения в pricewatch.json; медиана СПП за
+   * 7 дней оттуда попадает в экономику (источник «витрина WB») — она свежее среднего по
+   * статистике продаж.
+   *
+   * Автозапросы к витрине по умолчанию ВЫКЛЮЧЕНЫ (настройки, раздел 3.4): витрина защищена
+   * от ботов, и честнее нажать кнопку самому, чем поймать блокировку в фоне. Кнопка ниже
+   * всегда делает один осознанный запрос. Если WB ответит 403/429 или страницей с капчей —
+   * показываем это как есть, останавливаемся и предлагаем вписать цифры руками.
+   */
+  async tabWatch(host) {
+    const nmID = this.nmID;
+    const d = this.data;
+    host.innerHTML = '<div class="card"><div style="padding:16px"><p class="muted">Читаем наблюдения по товару…</p></div></div>';
+
+    let hist = [];
+    let autoFetch = false;
+    let ttl = 0;
+    try {
+      const h = await API.invoke('pricewatch:history', { nmID });
+      const g = await API.invoke('pricewatch:get');
+      hist = ((h && h.items) || []).slice().reverse();
+      autoFetch = !!(g && g.autoFetch);
+      ttl = U.num(g && g.ttlMinutes);
+    } catch (e) {
+      host.innerHTML = '<div class="alert danger">Не удалось прочитать наблюдения: ' + U.esc(e.message || String(e)) + '</div>';
+      return;
+    }
+    // пока читали, пользователь мог переключить вкладку — в чужую не рисуем
+    if (this.tab !== 'watch') return;
+
+    const p = this.econ().params;
+    const srcSpp = (p.costSources || {}).sppPct || 'none';
+    const srcMap = {
+      watch: 'наблюдение витрины WB',
+      fact: 'среднее по продажам WB',
+      manual: 'ваш ручной ввод',
+      category: 'значение в карточке',
+      settings: 'общая настройка',
+      none: 'не задан'
+    };
+    const last = hist[0] || null;
+    const comps = (d.competitors || []).filter((c) => String(c.sku || '').trim());
+    const demo = !!d.demo;
+    const f = d.facts || {};
+    const srcLabel = (v) => ({ site: 'витрина WB', manual: 'вручную', auto: 'автозапрос' }[String(v || '')] || String(v || '—'));
+    const dash = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+    const sppWatch = (f.sppPctWatch === undefined || f.sppPctWatch === null) ? null : U.num(f.sppPctWatch);
+
+    host.innerHTML = `
+      <div class="card">
+        <div class="card-head"><h3>Что видит покупатель на витрине</h3>
+          <span class="hint">WB API эти цифры не отдаёт — их читает наблюдатель цен</span></div>
+        <div style="padding:12px 16px 16px">
+          ${demo ? `<div class="alert info" style="margin-bottom:12px">Демо-режим: запросы к витрине WB не выполняются
+            (артикулы демо-товаров там не существуют, а лишний запрос рискует получить блокировку).
+            Ручной ввод ниже работает — на нём удобно посмотреть, как наблюдение влияет на экономику.</div>` : ''}
+          ${last ? UI.kv([
+            ['Цена на полке', dash(last.shelfPrice) === '—' ? '—' : U.money(last.shelfPrice)],
+            ['Цена покупателю (с СПП)', dash(last.sppPrice) === '—' ? '—' : U.money(last.sppPrice)],
+            ['СПП по витрине', last.sppPct === null || last.sppPct === undefined ? '—' : U.pct(last.sppPct)],
+            ['Остаток на витрине', last.stock === null || last.stock === undefined ? '—' : U.num(last.stock).toFixed(0) + ' шт'],
+            ['Наблюдалось', U.date(last.at, true) + ' · ' + srcLabel(last.source)]
+          ]) : '<p class="muted">Наблюдений пока нет. Нажмите «Обновить с витрины» или впишите цены вручную ниже.</p>'}
+          <div class="row wrap" style="gap:8px;margin-top:12px;align-items:center">
+            <button class="btn btn-primary" id="pw-fetch" ${demo ? 'disabled' : ''}>Обновить с витрины</button>
+            <button class="btn" id="pw-open">Открыть карточку на WB</button>
+            <span class="tiny muted" id="pw-status">${demo ? 'демо-режим'
+              : (autoFetch ? 'автозапросы включены, кэш ' + ttl + ' мин' : 'автозапросы выключены — кнопка делает один запрос')}</span>
+          </div>
+          <div id="pw-result" style="margin-top:10px"></div>
+          <p class="hint" style="margin-top:10px">Витрина WB защищена от ботов. Если запрос вернёт 403/429 или страницу с капчей,
+            приложение честно напишет об этом и остановится — повторные запросы только усилят блокировку.
+            Тогда откройте карточку и впишите цифры руками: расчёты от этого не станут менее точными.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-head"><h3>Какой СПП идёт в расчёты</h3></div>
+        <div style="padding:12px 16px 16px">
+          ${UI.kv([
+            ['Значение', U.pct(p.sppPct) + ' ' + UI.badge(srcMap[srcSpp] || srcSpp, srcSpp === 'none' ? 'warn' : 'ok')],
+            ['Медиана по витрине (7 дней)', sppWatch === null ? 'нет наблюдений'
+              : U.pct(sppWatch) + (U.num(f.sppWatchSamples) ? ' · ' + U.num(f.sppWatchSamples) + ' замеров, последний ' + (f.sppWatchAt ? U.date(f.sppWatchAt, true) : '—') : '')],
+            ['Среднее по продажам WB', U.num(f.sppPctAvg) > 0 ? U.pct(f.sppPctAvg) + ' · ' + U.num(f.sppSalesQty).toFixed(0) + ' продаж' : 'нет данных']
+          ])}
+          <p class="hint" style="margin-top:8px">Приоритет: ваш ручной ввод → наблюдение витрины → среднее по продажам WB →
+            значение в карточке → общая настройка. Своё значение СПП задаётся в разделе «Себестоимость».</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-head"><h3>Вписать вручную</h3>
+          <span class="hint">цифры с витрины, если запрос заблокирован</span></div>
+        <div style="padding:12px 16px 16px">
+          <div class="row wrap" style="gap:8px;align-items:end">
+            <label class="field">Цена на полке, ₽<input type="number" class="num" id="pw-m-shelf" step="1" min="0" placeholder="цена до СПП" style="width:150px" /></label>
+            <label class="field">Цена покупателю, ₽<input type="number" class="num" id="pw-m-buyer" step="1" min="0" placeholder="с учётом СПП" style="width:160px" /></label>
+            <button class="btn" id="pw-m-save">Записать наблюдение</button>
+            <span class="tiny muted" id="pw-m-spp">СПП: —</span>
+          </div>
+          <p class="hint" style="margin-top:8px">Наблюдение попадёт в историю и в медиану СПП, которая используется в экономике
+            и в репрайсере. Остаток вручную не записывается — его видно только на витрине.</p>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-head"><h3>Конкуренты по SKU</h3>
+          <span class="hint">${comps.length ? 'цена и остаток обновляются с витрины WB' : 'нужен SKU конкурента'}</span></div>
+        <div style="padding:12px 16px 16px">
+          ${comps.length ? `<table class="grid-table dense"><thead><tr><th>Продавец</th><th>SKU</th>
+              <th class="num">Цена покупателю</th><th class="num">Наш эквивалент</th><th class="num">Остаток</th>
+              <th>Обновлён</th><th></th></tr></thead><tbody>
+              ${comps.map((c) => `<tr>
+                <td>${U.esc(c.name || 'Конкурент')}</td>
+                <td class="mono">${U.esc(String(c.sku))}</td>
+                <td class="num">${U.num(c.price) > 0 ? U.money(c.price) : '<span class="muted">неизвестна</span>'}</td>
+                <td class="num tiny muted">${U.num(c.price) > 0 ? U.money(this.sppPrice(U.num(c.price))) : '—'}</td>
+                <td class="num">${c.stock === null || c.stock === undefined ? '—' : U.num(c.stock).toFixed(0)}</td>
+                <td class="tiny muted">${c.updatedAt ? U.date(c.updatedAt, true) : '—'}</td>
+                <td><button class="btn btn-xs pw-comp" data-sku="${U.esc(String(c.sku))}" ${demo ? 'disabled' : ''}>обновить</button></td>
+              </tr>`).join('')}</tbody></table>
+            <div class="row wrap" style="gap:8px;margin-top:10px;align-items:center">
+              <button class="btn btn-sm" id="pw-comp-all" ${demo ? 'disabled' : ''}>Обновить всех (${comps.length})</button>
+              <span class="tiny muted">Цена конкурента записывается как цена покупателю (с СПП) — именно её сравнивает
+                репрайсер в режиме «с СПП». «Наш эквивалент» — какую цену до СПП пришлось бы поставить нам.</span>
+            </div>`
+            : `<p class="muted">Чтобы обновлять цену конкурента автоматически, укажите его SKU (нм-код WB) на вкладке
+               «Конкуренты». Без SKU цену придётся вписывать руками.</p>`}
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <div class="card-head"><h3>История наблюдений</h3>
+          <span class="hint">${hist.length ? 'последние ' + hist.length + ' (хранится до 50 на товар)' : 'пусто'}</span></div>
+        <div style="padding:12px 16px 16px">
+          ${hist.length ? `<table class="grid-table dense"><thead><tr><th>Когда</th><th class="num">Полка</th>
+              <th class="num">Покупателю</th><th class="num">СПП</th><th class="num">Остаток</th>
+              <th>Источник</th><th>Примечание</th></tr></thead><tbody>
+              ${hist.map((r) => `<tr>
+                <td class="tiny">${U.date(r.at, true)}</td>
+                <td class="num">${r.shelfPrice === null || r.shelfPrice === undefined ? '—' : U.money(r.shelfPrice)}</td>
+                <td class="num">${r.sppPrice === null || r.sppPrice === undefined ? '—' : U.money(r.sppPrice)}</td>
+                <td class="num">${r.sppPct === null || r.sppPct === undefined ? '—' : U.pct(r.sppPct)}</td>
+                <td class="num">${r.stock === null || r.stock === undefined ? '—' : U.num(r.stock).toFixed(0)}</td>
+                <td class="tiny">${srcLabel(r.source)}</td>
+                <td class="tiny muted">${U.esc(r.note || '')}</td>
+              </tr>`).join('')}</tbody></table>`
+            : '<p class="muted">Пусто — записи появятся после первого обновления с витрины или ручного ввода.</p>'}
+        </div>
+      </div>`;
+
+    const result = host.querySelector('#pw-result');
+    const statusEl = host.querySelector('#pw-status');
+
+    /** Честный разбор ответа наблюдателя: что получили, почему не получили. */
+    const paintResult = (r, what) => {
+      if (!r) return;
+      const rows = r.results || [];
+      const first = rows[0] || null;
+      const msg = (first && first.message) || r.message || '';
+      if (r.code === 'AUTO_DISABLED') {
+        result.innerHTML = '<div class="alert warn">Автозапросы к витрине выключены в настройках (раздел 3.4).</div>';
+        return;
+      }
+      if (r.code === 'DEMO') {
+        result.innerHTML = '<div class="alert info">' + U.esc(msg || 'В демо-режиме запросы к витрине не выполняются.') + '</div>';
+        return;
+      }
+      if (r.blocked) {
+        result.innerHTML = '<div class="alert warn">' + U.esc(msg || 'Витрина WB заблокировала запрос.') +
+          ' <span class="tiny">Дальше не пробуем. Откройте карточку и впишите цены вручную ниже.</span></div>';
+        return;
+      }
+      if (r.ok === false) {
+        result.innerHTML = '<div class="alert danger">' + U.esc(msg || 'Не удалось получить данные витрины.') + '</div>';
+        return;
+      }
+      const own = rows.find((x) => x.kind === 'own' && x.ok);
+      const comp = rows.filter((x) => x.kind === 'competitor' && x.ok);
+      const parts = [];
+      if (own) {
+        parts.push('полка ' + U.money(own.shelfPrice) + ', покупателю ' + (own.sppPrice === null || own.sppPrice === undefined ? '—' : U.money(own.sppPrice)) +
+          ', СПП ' + (own.sppPct === null || own.sppPct === undefined ? '—' : U.pct(own.sppPct)) +
+          ', остаток ' + (own.stock === null || own.stock === undefined ? '—' : U.num(own.stock).toFixed(0) + ' шт') +
+          (own.fromCache ? ' <span class="tiny muted">(из кэша)</span>' : ''));
+      }
+      if (comp.length) parts.push('конкурентов обновлено: ' + comp.length);
+      result.innerHTML = '<div class="alert ok">' + what + ': ' + (parts.join('; ') || 'данные получены') + '</div>';
+    };
+
+    /** Один осознанный запрос к витрине: force обходит и настройку автозапросов, и кэш. */
+    const runFetch = async (payload, what) => {
+      const btns = Array.prototype.slice.call(host.querySelectorAll('button'));
+      btns.forEach((b) => { b.disabled = true; });
+      statusEl.textContent = what + '…';
+      result.innerHTML = '';
+      let r = null;
+      try {
+        r = await API.invoke('pricewatch:fetch', Object.assign({ force: true }, payload));
+      } catch (e) {
+        result.innerHTML = '<div class="alert danger">' + U.esc(e.message || String(e)) + '</div>';
+        return;
+      } finally {
+        if (this.tab === 'watch' && host.contains(statusEl)) {
+          statusEl.textContent = demo ? 'демо-режим' : (autoFetch ? 'автозапросы включены, кэш ' + ttl + ' мин' : 'автозапросы выключены — кнопка делает один запрос');
+          btns.forEach((b) => { if (!demo || b.id === 'pw-open') b.disabled = false; });
+        }
+      }
+      if (r && r.ok) {
+        App.toast(what + ': обновлено', 'ok');
+        await this.reloadCard();
+        if (this.tab === 'watch') await this.tabWatch(host);
+        return;
+      }
+      paintResult(r, what);
+      const rows = (r && r.results) || [];
+      App.toast((rows[0] && rows[0].message) || (r && r.message) || (what + ': не удалось'), 'warn');
+    };
+
+    host.querySelector('#pw-fetch').onclick = () => runFetch({ nmIDs: [nmID] }, 'Витрина');
+    host.querySelector('#pw-open').onclick = () => {
+      API.openExternal('https://www.wildberries.ru/catalog/' + nmID + '/detail.aspx');
+    };
+    host.querySelectorAll('.pw-comp').forEach((b) => {
+      b.onclick = () => runFetch({ competitorSKUs: [String(b.dataset.sku)] }, 'Конкурент ' + b.dataset.sku);
+    });
+    const allBtn = host.querySelector('#pw-comp-all');
+    if (allBtn) allBtn.onclick = () => runFetch({ competitorSKUs: comps.map((c) => String(c.sku)) }, 'Конкуренты');
+
+    // ручной ввод: СПП считаем на лету, чтобы было видно, что запишется
+    const shelfInp = host.querySelector('#pw-m-shelf');
+    const buyerInp = host.querySelector('#pw-m-buyer');
+    const sppOut = host.querySelector('#pw-m-spp');
+    const liveSpp = () => {
+      const sh = U.num(shelfInp.value);
+      const by = U.num(buyerInp.value);
+      sppOut.textContent = sh > 0 && by > 0 && by <= sh
+        ? 'СПП: ' + U.pct(Math.round((1 - by / sh) * 10000) / 100)
+        : 'СПП: —';
+    };
+    shelfInp.oninput = liveSpp;
+    buyerInp.oninput = liveSpp;
+    host.querySelector('#pw-m-save').onclick = async () => {
+      const shelfPrice = U.num(shelfInp.value);
+      const sppPrice = U.num(buyerInp.value);
+      if (!(shelfPrice > 0) && !(sppPrice > 0)) { App.toast('Введите цену с витрины', 'warn'); return; }
+      try {
+        const r = await API.invoke('pricewatch:record', {
+          nmID,
+          shelfPrice: shelfPrice > 0 ? shelfPrice : undefined,
+          sppPrice: sppPrice > 0 ? sppPrice : undefined,
+          source: 'manual'
+        });
+        if (!r || r.ok === false) { App.toast((r && r.message) || 'Не удалось записать наблюдение', 'warn'); return; }
+        App.toast('Наблюдение записано' + (r.sppPct === null || r.sppPct === undefined ? '' : ', СПП ' + U.pct(r.sppPct)), 'ok');
+        await this.reloadCard();
+        if (this.tab === 'watch') await this.tabWatch(host);
+      } catch (e) {
+        App.toast(e.message || String(e), 'warn');
+      }
+    };
+  },
+
   // ───────────────────────── Комиссии и параметры ─────────────────────────
 
   tabCommissions(host) {
@@ -536,9 +828,15 @@ Views.itemcard = {
 
       <div class="card" style="margin-top:12px">
         <h3>СПП по цене на витрине</h3>
-        <p class="hint">СПП — скидка, которую WB даёт покупателю за свой счёт. Витринную цену «здесь и сейчас»
-          по API не отдать, но <b>реальный СПП уже есть в статистике продаж WB</b>: в каждой строке продажи
-          указано поле <span class="mono">spp</span>, и приложение берёт среднее по вашим продажам.</p>
+        <p class="hint">СПП — скидка, которую WB даёт покупателю за свой счёт. По API продавца витринной цены нет,
+          поэтому приложение берёт её двумя путями: <b>наблюдатель цен</b> читает карточку на витрине WB
+          (вкладка «Цены на площадке», медиана за 7 дней) и <b>реальный СПП есть в статистике продаж WB</b> —
+          в каждой строке продажи указано поле <span class="mono">spp</span>, и приложение берёт среднее по вашим продажам.</p>
+        ${(d.facts && d.facts.sppPctWatch !== undefined && d.facts.sppPctWatch !== null) ? `<div class="alert ok" style="margin-bottom:10px">
+            <b>По наблюдению витрины: СПП ${U.pct(U.num(d.facts.sppPctWatch), 2)}</b>
+            <span class="hint">(медиана за 7 дней по ${U.fmt(d.facts.sppWatchSamples || 0)} замерам${d.facts.sppWatchAt ? ', последний ' + U.date(d.facts.sppWatchAt, true) : ''}).
+            Это значение уже используется в расчёте — источник помечен как «витрина WB».</span>
+          </div>` : ''}
         ${(d.facts && d.facts.sppPctAvg) ? `<div class="alert ok" style="margin-bottom:10px">
             <b>По факту продаж WB: СПП ${U.pct(U.num(d.facts.sppPctAvg), 2)}</b>
             <span class="hint">(по ${U.fmt(d.facts.sppSalesQty || 0)} продажам за окно статистики).
@@ -559,6 +857,7 @@ Views.itemcard = {
         </div>
         <div class="row wrap" style="margin-top:10px;gap:8px">
           <button class="btn btn-sm" id="ic-spp-calc">Рассчитать СПП</button>
+          <button class="btn btn-sm" id="ic-spp-watch">Подтянуть с витрины</button>
           <button class="btn btn-sm btn-primary" id="ic-spp-apply">Подставить в поле «СПП, %»</button>
           <button class="btn btn-sm btn-ghost" id="ic-spp-open">Открыть товар на витрине ↗</button>
           <span class="hint" id="ic-spp-note"></span>
@@ -634,6 +933,42 @@ Views.itemcard = {
       if (field) {
         field.value = spp;
         App.toast('СПП ' + U.pct(spp, 2) + ' подставлен — нажмите «Сохранить параметры»', 'ok', 6000);
+      }
+    };
+
+    /**
+     * «Подтянуть с витрины» — один осознанный запрос наблюдателя цен (force обходит
+     * выключенные автозапросы и кэш). Обе цены подставляются в калькулятор, наблюдение
+     * записывается в историю, и СПП сразу считается.
+     * Если витрина заблокировала запрос — пишем об этом честно и предлагаем ручной ввод.
+     */
+    host.querySelector('#ic-spp-watch').onclick = async (ev) => {
+      const btn = ev.currentTarget;
+      const note = host.querySelector('#ic-spp-note');
+      btn.disabled = true;
+      note.className = 'hint';
+      note.textContent = 'Читаем карточку на витрине WB…';
+      try {
+        const r = await API.invoke('pricewatch:fetch', { nmIDs: [this.nmID], force: true });
+        const res = ((r && r.results) || [])[0] || null;
+        if (!res || !res.ok) {
+          note.className = 'hint warnc';
+          note.textContent = (res && res.message) || (r && r.message) || 'Витрина не ответила — впишите цены руками.';
+          return;
+        }
+        host.querySelector('#ic-spp-ours').value = (res.shelfPrice === null || res.shelfPrice === undefined) ? '' : res.shelfPrice;
+        host.querySelector('#ic-spp-shelf').value = (res.sppPrice === null || res.sppPrice === undefined) ? '' : res.sppPrice;
+        calcSpp();
+        note.className = 'hint pos';
+        note.textContent += ' Наблюдение записано' +
+          ((res.stock === null || res.stock === undefined) ? '' : ', остаток на витрине ' + U.num(res.stock).toFixed(0) + ' шт') + '.';
+        // перечитываем карточку: СПП по витрине уже участвует в экономике
+        await this.reloadCard();
+      } catch (e) {
+        note.className = 'hint warnc';
+        note.textContent = e.message || String(e);
+      } finally {
+        btn.disabled = false;
       }
     };
 

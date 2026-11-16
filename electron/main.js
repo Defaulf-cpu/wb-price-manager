@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog, Menu, nativeTheme, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { createStore } = require('./store');
 const { createService } = require('./service');
 const { APP_NAME } = require('./config');
@@ -69,6 +70,41 @@ function createWindow() {
     if (!url.startsWith('file://')) { e.preventDefault(); shell.openExternal(url); }
   });
   win.on('closed', () => { win = null; });
+}
+
+// Изолированное окно без доступа к Node и кукам основного окна. Не обходит
+// антибот-защиту; для ручного просмотра лучше ui:open-external.
+async function openPriceWatchHidden(url, opts) {
+  const partition = 'pricewatch-' + crypto.randomBytes(12).toString('hex');
+  const hidden = new BrowserWindow({ show: false, webPreferences: {
+    partition, sandbox: true, contextIsolation: true, nodeIntegration: false
+  } });
+  const session = hidden.webContents.session;
+  const allowed = (value) => {
+    try {
+      const u = new URL(value);
+      return u.protocol === 'https:' && !u.username && !u.password && !u.port && /^(www\.)?wildberries\.ru$/i.test(u.hostname);
+    } catch (_) { return false; }
+  };
+  session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !allowed(details.url) }));
+  hidden.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  hidden.webContents.on('will-navigate', (event, target) => { if (!allowed(target)) event.preventDefault(); });
+  hidden.webContents.on('will-redirect', (event, target) => { if (!allowed(target)) event.preventDefault(); });
+  let timer;
+  try {
+    await Promise.race([
+      hidden.loadURL(url),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('тайм-аут')), Math.min(10000, Number(opts && opts.timeoutMs) || 10000)); })
+    ]);
+    return { ok: true, url: hidden.webContents.getURL(), title: hidden.getTitle() };
+  } catch (e) {
+    return { ok: false, code: 'BROWSER', message: 'Не удалось открыть страницу: ' + e.message };
+  } finally {
+    clearTimeout(timer);
+    if (!hidden.isDestroyed()) hidden.destroy();
+    session.webRequest.onBeforeRequest(null);
+  }
 }
 
 function send(channel, payload) {
@@ -200,7 +236,7 @@ if (!gotLock) {
     registerEconProtocol();
     const dir = app.getPath('userData');
     store = createStore(dir, makeSecretBox());
-    service = createService(store, (channel, payload) => send('svc:' + channel, payload));
+    service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden });
 
     Menu.setApplicationMenu(null);
     nativeTheme.themeSource = 'dark';

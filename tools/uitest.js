@@ -1492,6 +1492,67 @@ async function run() {
       !!sppField && Math.abs(Number(sppField.value) - 10) < 0.01, sppField ? 'СПП = ' + sppField.value : 'поля нет');
   }
 
+  // ── наблюдатель цен витрины: вкладка «Цены на площадке» в карточке товара ──
+  const watchTab = Array.from(doc.querySelectorAll('#ic-tabs .tab')).find((t) => /Цены на площадке/.test(t.textContent));
+  check('карточка товара: есть вкладка «Цены на площадке»', !!watchTab);
+  if (watchTab) {
+    watchTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(900);
+    const wText = (doc.getElementById('ic-host') || { textContent: '' }).textContent.replace(/\s+/g, ' ');
+    check('витрина: есть кнопка «Обновить с витрины»', !!doc.getElementById('pw-fetch'));
+    check('витрина: есть ручной ввод цены на полке и цены покупателю',
+      !!doc.getElementById('pw-m-shelf') && !!doc.getElementById('pw-m-buyer') && !!doc.getElementById('pw-m-save'));
+    check('витрина: показано, какой СПП идёт в расчёты и в каком порядке источников',
+      /Какой СПП идёт в расчёты/.test(wText) && /наблюдение витрины/.test(wText) && /Приоритет/.test(wText));
+    check('витрина: в демо-режиме честно сказано, что запросов к витрине нет',
+      /Демо-режим/.test(wText) && doc.getElementById('pw-fetch').disabled === true,
+      'кнопка ' + (doc.getElementById('pw-fetch').disabled ? 'выключена' : 'включена'));
+    check('витрина: объяснено поведение при блокировке (403/429/капча)',
+      /403/.test(wText) && /429/.test(wText) && /капч/i.test(wText));
+    check('витрина: есть история наблюдений', /История наблюдений/.test(wText));
+
+    // ручной ввод: СПП считается на лету, запись попадает в историю и в медиану
+    const shelfIn = doc.getElementById('pw-m-shelf');
+    const buyerIn = doc.getElementById('pw-m-buyer');
+    shelfIn.value = '1000';
+    shelfIn.dispatchEvent(new window.Event('input', { bubbles: true }));
+    buyerIn.value = '850';
+    buyerIn.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await wait(150);
+    check('витрина: СПП считается сразу при вводе двух цен',
+      /15/.test(doc.getElementById('pw-m-spp').textContent),
+      doc.getElementById('pw-m-spp').textContent);
+    doc.getElementById('pw-m-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(1600);
+    const wText2 = (doc.getElementById('ic-host') || { textContent: '' }).textContent.replace(/\s+/g, ' ');
+    check('витрина: наблюдение записано и видно в истории',
+      /вручную/.test(wText2) && /850/.test(wText2) && /1 000|1000/.test(wText2));
+    check('витрина: медиана наблюдения показана в блоке СПП',
+      /Медиана по витрине/.test(wText2) && /15/.test(wText2));
+
+    // запрос к витрине в демо-режиме: честный отказ, а не выдуманная цена
+    doc.getElementById('pw-fetch').disabled = false;
+    doc.getElementById('pw-fetch').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(900);
+    const wText3 = (doc.getElementById('ic-host') || { textContent: '' }).textContent.replace(/\s+/g, ' ');
+    check('витрина: запрос в демо-режиме даёт честный отказ, а не цифры',
+      /Демо-режим/.test(wText3) && !/Витрина: полка/.test(wText3), wText3.slice(0, 90));
+  }
+
+  // ── калькулятор СПП: цены можно подтянуть с витрины одной кнопкой ──
+  if (commTab) { commTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(600); }
+  check('карточка товара: у калькулятора СПП есть кнопка «Подтянуть с витрины»', !!doc.getElementById('ic-spp-watch'));
+  if (doc.getElementById('ic-spp-watch')) {
+    doc.getElementById('ic-spp-watch').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await wait(900);
+    const note = (doc.getElementById('ic-spp-note') || { textContent: '' }).textContent;
+    check('карточка товара: в демо «Подтянуть с витрины» честно сообщает об отказе',
+      /Демо-режим|не выполняются/i.test(note), note.slice(0, 80));
+    check('карточка товара: при отказе витрины цены не выдумываются',
+      (doc.getElementById('ic-spp-result') || {}).value === '' || doc.getElementById('ic-spp-result').value === undefined,
+      'результат: ' + ((doc.getElementById('ic-spp-result') || {}).value || 'пусто'));
+  }
+
   const histTab = Array.from(doc.querySelectorAll('#ic-tabs .tab')).find((t) => /История пересчёта/.test(t.textContent));
   if (histTab) { histTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(400); }
   check('карточка товара: история показывает фазы «предложено» и «отправлено»',
@@ -1643,6 +1704,29 @@ async function run() {
     doc.getElementById('s-promo-fetch') && doc.getElementById('s-promo-fetch').checked === false);
   check('настройки: объяснено, откуда брать точный состав',
     /Сформировать/.test(doc.getElementById('view').textContent));
+
+  // ── настройки наблюдателя цен витрины ──
+  const pwText = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
+  check('настройки: есть раздел наблюдателя цен витрины', /Наблюдатель цен витрины WB/.test(pwText));
+  check('настройки: есть переключатель автозапросов к витрине', !!doc.getElementById('s-pw-auto'));
+  check('настройки: автозапросы к витрине по умолчанию выключены',
+    doc.getElementById('s-pw-auto') && doc.getElementById('s-pw-auto').checked === false);
+  check('настройки: есть срок кэша наблюдения', !!doc.getElementById('s-pw-ttl') && Number(doc.getElementById('s-pw-ttl').value) > 0,
+    'кэш ' + ((doc.getElementById('s-pw-ttl') || {}).value || '—') + ' мин');
+  check('настройки: честно сказано про защиту витрины от ботов и остановку при блокировке',
+    /защищена от ботов|403|429|блокиров/i.test(pwText));
+  check('настройки: указано, где смотреть наблюдения', /Цены на площадке/.test(pwText));
+  doc.getElementById('s-pw-auto').checked = true;
+  doc.getElementById('s-pw-ttl').value = '15';
+  const pwSave = doc.getElementById('save-all');
+  if (pwSave) { pwSave.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(900); }
+  const pwSet = await service.handlers['settings:get']();
+  check('настройки: автозапросы к витрине сохраняются',
+    pwSet.priceWatchAutoFetch === true && Number(pwSet.priceWatchTtlMinutes) === 15,
+    'autoFetch=' + pwSet.priceWatchAutoFetch + ', ttl=' + pwSet.priceWatchTtlMinutes);
+  await service.handlers['settings:save']({ priceWatchAutoFetch: false, priceWatchTtlMinutes: 60 });
+  check('настройки: автозапросы возвращены в безопасное состояние',
+    (await service.handlers['settings:get']()).priceWatchAutoFetch === false);
 
   check('себестоимость: указано, что параметры товара правятся в репрайсере',
     /репрайсер/i.test(costsText) && /Комиссии и параметры/.test(costsText));

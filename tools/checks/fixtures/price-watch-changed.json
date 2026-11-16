@@ -1,0 +1,6 @@
+{
+  "products": [{ "nmID": 102, "title": "Другой товар", "brand": "Марка",
+    "card": { "priceUom": 200000, "salePriceUom": 150000, "priceWithSppUom": 120000, "discount": 25 },
+    "wh": [{ "qty": 4 }, { "qty": 1 }]
+  }]
+}

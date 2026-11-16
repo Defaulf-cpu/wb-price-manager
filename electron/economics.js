@@ -94,8 +94,14 @@ function resolveParams(settings, item, overrides, facts) {
   const fact = (v) => (useFacts && Number(v) > 0 ? Number(v) : undefined);
 
   const src = {};
-  const pickSrc = (name, manual, factVal, catVal, defVal) => {
+  /**
+   * Отмечает источник значения. `watchVal` — наблюдение витрины WB (модуль price-watcher);
+   * он передаётся только для тех полей, где витрина вообще что-то знает (сейчас — СПП),
+   * поэтому стоит последним аргументом и у остальных полей остаётся undefined.
+   */
+  const pickSrc = (name, manual, factVal, catVal, defVal, watchVal) => {
     if (manual !== undefined && manual !== null && manual !== '' && Number.isFinite(Number(manual))) src[name] = 'manual';
+    else if (watchVal !== undefined) src[name] = 'watch';
     else if (factVal !== undefined) src[name] = 'fact';
     else if (catVal !== undefined && catVal !== null && catVal !== '' && Number.isFinite(Number(catVal))) src[name] = 'category';
     else if (defVal !== undefined && defVal !== null && defVal !== '' && Number.isFinite(Number(defVal))) src[name] = 'settings';
@@ -119,13 +125,31 @@ function resolveParams(settings, item, overrides, facts) {
    */
   const factSppPct = Number(f.sppPctAvg) > 0 ? Number(f.sppPctAvg) : undefined;
 
+  /**
+   * СПП по наблюдению витрины WB (модуль price-watcher): медиана за 7 дней.
+   * Это самая свежая цифра — то, что покупатель реально видит на карточке прямо сейчас,
+   * поэтому стоит выше среднего по статистике продаж (там окно длиннее и цифра запаздывает).
+   * Ноль здесь — осмысленное значение (витрина показывает товар без СПП), поэтому
+   * принимаем любое конечное число от 0 до 100, а «нет наблюдений» отличаем по null.
+   */
+  const watchSppPct = (function () {
+    const v = f.sppPctWatch;
+    if (v === undefined || v === null || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : undefined;
+  })();
+
   return {
     categoryName: cat,
     brand: (item && item.brand) || o.brand || '',
     basePrice: pickNum(o.basePrice, item && item.price),
     discountPct: pickNum(o.discountPct, item && item.discount),
-    // приоритет СПП: ручной ввод → факт по продажам WB → значение в карточке → общая настройка
-    sppPct: pickNum(o.sppPct, factSppPct, item && item.sppPct, s.sppDefault),
+    // приоритет СПП: ручной ввод → наблюдение витрины WB → факт по продажам WB → значение в карточке → общая настройка
+    sppPct: pickNum(o.sppPct, watchSppPct, factSppPct, item && item.sppPct, s.sppDefault),
+    // что именно увидели на витрине (null — наблюдений нет) и сколько замеров легло в медиану
+    sppPctWatch: watchSppPct === undefined ? null : watchSppPct,
+    sppWatchSamples: Number(f.sppWatchSamples || 0),
+    sppWatchAt: f.sppWatchAt || '',
     commissionPct: pickNum(o.commissionPct, factCommissionPct, catDef.commissionPct, s.commissionDefault),
     logisticsRub: pickNum(o.logisticsRub, factLogistics),
     acceptRub: pickNum(o.acceptRub, factAcceptance, s.acceptRub),
@@ -166,7 +190,7 @@ function resolveParams(settings, item, overrides, facts) {
       pickSrc('acceptRub', o.acceptRub, factAcceptance, undefined, s.acceptRub);
       pickSrc('acquiringPct', o.acquiringPct, factAcquiringPct, undefined, s.acquiringPct);
       pickSrc('costPriceRub', o.costPriceRub, undefined, undefined, undefined);
-      pickSrc('sppPct', o.sppPct, factSppPct, item && item.sppPct, s.sppDefault);
+      pickSrc('sppPct', o.sppPct, factSppPct, item && item.sppPct, s.sppDefault, watchSppPct);
       return src;
     })()
   };

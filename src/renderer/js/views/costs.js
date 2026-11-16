@@ -117,7 +117,17 @@ Views.costs = {
           } },
         { title: 'Хранение ₽', num: true, render: (r) => input(r, 'storageRub', val(r, 'storageRub')) },
         { title: 'Реклама %', num: true, render: (r) => input(r, 'adPct', val(r, 'adPct'), '0.5') },
-        { title: 'СПП %', num: true, render: (r) => input(r, 'sppPct', val(r, 'sppPct'), '1') },
+        { title: 'СПП %', num: true, render: (r) => {
+            // пустое поле — не «ноль», а «берём из наблюдения витрины / статистики / настройки».
+            // Показываем, что именно подставилось, чтобы пустая клетка не выглядела ошибкой.
+            const f = (st.facts && st.facts[String(r.nmID)]) || null;
+            const srcSpp = (r.costSources || {}).sppPct;
+            const hint = f && f.sppPctWatch !== undefined && f.sppPctWatch !== null
+              ? 'витрина ' + U.pct(U.num(f.sppPctWatch), 1)
+              : (f && Number(f.sppPctAvg) > 0 ? 'продажи ' + U.pct(Number(f.sppPctAvg), 1) : '');
+            return input(r, 'sppPct', val(r, 'sppPct'), '1') +
+              (hint ? '<div class="tiny muted">' + hint + ((srcSpp === 'watch' || srcSpp === 'fact') ? ' · учтён' : '') + '</div>' : '');
+          } },
         { title: 'Объём, л', num: true, render: (r) => input(r, 'volumeLiters', val(r, 'volumeLiters') || r.volume, '0.1') },
         { title: 'Прибыль/шт', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b>` },
         { title: 'Маржа', num: true, render: (r) => `<span class="${U.profitClass(r.margin)}">${U.pct(r.margin)}</span>` },

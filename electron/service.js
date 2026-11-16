@@ -4,6 +4,7 @@ const { DEMO_KEY, TOKEN_SCOPES, RATE_FALLBACK_MS } = require('./config');
 const { WBClient, WBError } = require('./wb-client');
 const { createDemoApi } = require('./demo');
 const RP = require('./repricer-engine');
+const { createPriceWatcher } = require('./price-watcher');
 const EC = require('./economics');
 const { readTable } = require('./xlsx-lite');
 const { buildXlsx } = require('./xlsx-write');
@@ -41,8 +42,9 @@ function daysAgoIso(days) {
  * @param {object} store   хранилище (настройки, себестоимости, секреты)
  * @param {function} emit   отправка событий в UI: emit(channel, payload)
  */
-function createService(store, emit) {
+function createService(store, emit, electron) {
   const notify = typeof emit === 'function' ? emit : () => {};
+  const priceWatcher = createPriceWatcher({ store, electron, log: (entry) => notify('log', entry) });
 
   let demoApi = null;
   let client = null;
@@ -159,6 +161,29 @@ function createService(store, emit) {
       rec.sppPctAvg = spp;
       // сколько продаж легло в среднее — видно в интерфейсе как достоверность цифры
       rec.sppSalesQty = Number(st.salesQty || 0);
+    }
+    // Наблюдение витрины WB (модуль price-watcher): медиана СПП за 7 дней.
+    // Товар может не иметь продаж в окне статистики, но наблюдение у него есть —
+    // поэтому не пропускаем такие записи, а создаём их.
+    const since = Date.now() - 7 * 86400000;
+    const watch = store.loadPriceWatch() || {};
+    for (const nm of Object.keys(watch)) {
+      // считаем только записи с реально известным СПП: null (например, наблюдение без цены
+      // покупателю) числом не является, хотя Number(null) и дал бы ноль
+      const rows = (watch[nm] || []).filter((r) => {
+        const v = r && r.sppPct;
+        if (v === null || v === undefined || v === '') return false;
+        const n = Number(v), t = Date.parse(r && r.at);
+        return Number.isFinite(n) && Number.isFinite(t) && t >= since && n >= 0 && n <= 100;
+      });
+      if (!rows.length) continue;
+      const spp = priceWatcher.sppForEconomics(nm);
+      if (spp === null || spp === undefined) continue;
+      const rec = items[nm] || (items[nm] = { nmID: Number(nm), salesQty: 0 });
+      rec.sppPctWatch = spp;
+      // сколько замеров легло в медиану и когда был последний — видно как достоверность цифры
+      rec.sppWatchSamples = rows.length;
+      rec.sppWatchAt = rows[rows.length - 1].at;
     }
     return items;
   }
@@ -641,6 +666,24 @@ function createService(store, emit) {
   // ─────────────────────────── Обработчики ───────────────────────────
 
   const handlers = {
+    'pricewatch:get': async () => ({ ok: true, items: store.loadPriceWatch(), autoFetch: getSettings().priceWatchAutoFetch === true, ttlMinutes: getSettings().priceWatchTtlMinutes }),
+    'pricewatch:record': async (payload) => priceWatcher.recordManual(payload),
+    'pricewatch:fetch': async (payload) => {
+      const p = payload || {};
+      // force — осознанный разовый запрос, также обходит TTL, но не блокировку и интервал.
+      if (getSettings().priceWatchAutoFetch !== true && p.force !== true)
+        return { ok: false, code: 'AUTO_DISABLED', message: 'Автозапросы выключены. Для разового запроса укажите force: true.' };
+      /**
+       * В демо-режиме к витрине не ходим вовсе: демо-артикулы на WB не существуют, а первый же
+       * отказ (403/429/капча) поднимает липкий флаг blocked, который до перезапуска приложения
+       * заблокировал бы уже настоящие запросы. Ручной ввод при этом работает — наблюдение
+       * можно записать глазами с витрины.
+       */
+      if (isDemo()) return { ok: false, code: 'DEMO', message: 'Демо-режим: запросы к витрине WB не выполняются. Впишите цены вручную или включите боевой режим.' };
+      return priceWatcher.runBatch(p);
+    },
+    'pricewatch:history': async (payload) => ({ ok: true, items: priceWatcher.history(payload && payload.nmID), sppPct: priceWatcher.sppForEconomics(payload && payload.nmID) }),
+    'pricewatch:open': async (payload) => priceWatcher.openInBrowser(payload && payload.url),
 
     /**
      * Полное обновление данных из кабинета WB — то, что нужно нажать сразу после ввода ключей.
@@ -3599,7 +3642,7 @@ function createService(store, emit) {
 
   return {
     handlers, isDemo, getSettings, getClient, getDemo, cache,
-    calcRepricer, sendPrices, applyScheduler, sched, repricerCfg
+    calcRepricer, sendPrices, applyScheduler, sched, repricerCfg, priceWatcher
   };
 }
 

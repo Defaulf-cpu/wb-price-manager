@@ -7,6 +7,7 @@
 
 const APP_NAME = 'WB Price Manager';
 const SETTINGS_FILE = 'settings.json';
+const PRICEWATCH_FILE = 'pricewatch.json';
 const COSTS_FILE = 'costs.json';
 const TASKS_FILE = 'tasks.json';
 const SECRETS_FILE = 'secrets.enc';
@@ -105,6 +106,7 @@ const TOKEN_SCOPES = {
 module.exports = {
   APP_NAME,
   SETTINGS_FILE,
+  PRICEWATCH_FILE,
   COSTS_FILE,
   TASKS_FILE,
   SECRETS_FILE,

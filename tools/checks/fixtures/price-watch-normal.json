@@ -1,0 +1,7 @@
+{
+  "data": { "products": [{
+    "id": 101, "name": "Товар", "brand": "Бренд", "sale": 20,
+    "sizes": [{ "price": { "basic": 125000, "product": 100000, "total": 85000 },
+      "stocks": [{ "qty": 3 }, { "qty": 2 }] }]
+  }] }
+}
