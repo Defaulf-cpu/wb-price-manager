@@ -21,7 +21,6 @@
     "test:stocks": "node tools/checks/stocks-flow.js",
     "test:limits": "node tools/checks/rate-limit-flow.js",
     "test:repricer": "node tools/checks/repricer-flow.js",
-    "test:stocks": "node tools/checks/stocks-flow.js",
     "test:ui": "node --expose-gc --max-old-space-size=1200 tools/uitest.js",
     "test:pricewatch": "node tools/checks/price-watch-flow.js",
     "test:web": "node tools/checks/web-server-flow.js"
