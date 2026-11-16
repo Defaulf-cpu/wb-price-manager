@@ -823,6 +823,91 @@ async function tPromoJournal() {
     'найдено ' + byItem.total);
 }
 
+// ─────── 2d. Задание D: разрешение отправки, внутренний тег, валюта себестоимости ───────
+
+/**
+ * Три настройки товара живут в разных хранилищах и по-разному влияют на отправку:
+ *  - allowSend (itemConfigs) — ручной запрет: строка не попадает в предложение,
+ *    а прямой вызов отправки её всё равно пропускает (последний рубеж);
+ *  - tag (itemConfigs) — личный фильтр продавца, должен переживать перезапуск;
+ *  - currency (costs.json) — себестоимость в валюте: без курса строка блокируется,
+ *    с курсом пересчитывается в рубли по settings.costRates.
+ */
+async function tItemFlags() {
+  calls.length = 0;
+  const st = makeStand({ live: true });
+  const good = (nm, price, discount) => ({
+    nmID: nm, vendorCode: 'F-' + nm, brand: 'Тест', subjectName: 'Товары для дома',
+    price, discount, sizes: [{ sizeID: 1, techSizeName: 'ONE SIZE', price, discount, skus: ['s' + nm] }]
+  });
+  routes = {
+    '/api/v2/list/goods/filter': () => res(200, {
+      data: { total: 3, goods: [good(6111111, 1000, 10), good(6222222, 2000, 20), good(6333333, 1500, 5)] }
+    }),
+    '/api/v1/calendar/promotions/nomenclatures': () => res(200, { data: { nomenclatures: [] } }),
+    '/api/v1/calendar/promotions': () => res(200, { data: { promotions: [] } }),
+    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0, nmID: 0, updatedAt: '' } })
+  };
+
+  await st.service.handlers['costs:save']({ items: {
+    6111111: { costPriceRub: 300, stock: 10 },
+    6222222: { costPriceRub: 400, stock: 12 },
+    6333333: { costPriceRub: 500, stock: 14 }
+  } });
+  await st.service.handlers['repricer:item-configs:save']({ items: { 6111111: { allowSend: false, tag: 'Казань' } } });
+
+  const calc = await st.service.handlers['repricer:calc']({ full: true });
+  const row = (calc.results || []).find((x) => String(x.nmID) === '6111111');
+  // поля едут в context: движок не меняет формулу расчёта, только отдаёт настройку наружу
+  check('allowSend: запрет дошёл до расчёта', !!row && row.context.allowSend === false,
+    row ? String(row.context.allowSend) : 'строки нет');
+  check('тег: дошёл до расчёта', !!row && row.context.tag === 'Казань',
+    row ? String(row.context.tag) : 'строки нет');
+
+  const prop = await st.service.handlers['repricer:proposal']();
+  check('allowSend=false: товар не попал в предложение',
+    !(prop.items || []).some((x) => String(x.nmID) === '6111111'),
+    'в items: ' + JSON.stringify((prop.items || []).map((x) => x.nmID)));
+  const blocked = (prop.blocked || []).find((x) => String(x.nmID) === '6111111');
+  check('allowSend=false: причина блокировки названа по-русски',
+    !!blocked && (blocked.reasons || []).some((r) => /отправка цен запрещена/.test(r)),
+    blocked ? (blocked.reasons || []).join('; ') : 'записи нет');
+
+  // последний рубеж: даже прямой вызов отправки не отправит запрещённый товар
+  const direct = await st.service.handlers['repricer:send']({ items: [{ nmID: 6111111, price: 1500, discount: 5 }] });
+  check('allowSend=false: прямая отправка пропускает товар', Number(direct.sent) === 0, JSON.stringify(direct));
+
+  // «перезапуск»: настройки читаются с диска
+  const service2 = createService(createStore(st.dir, null), () => {});
+  const state2 = await service2.handlers['repricer:state']();
+  check('тег: пережил перезапуск приложения', String((state2.itemConfigs['6111111'] || {}).tag) === 'Казань',
+    String((state2.itemConfigs['6111111'] || {}).tag));
+  check('allowSend=false: пережил перезапуск приложения', (state2.itemConfigs['6111111'] || {}).allowSend === false,
+    JSON.stringify(state2.itemConfigs['6111111'] || null));
+
+  // валюта себестоимости: доллары без курса считать нельзя
+  await st.service.handlers['costs:save']({ items: { 6222222: { costPriceRub: 10, currency: 'USD', stock: 12 } } });
+  const noRate = await st.service.handlers['repricer:calc']({ full: true });
+  const usd = (noRate.results || []).find((x) => String(x.nmID) === '6222222');
+  check('валюта: без курса строка блокируется', !!usd && usd.context.costCurrencyError === 'не задан курс USD',
+    usd ? String(usd.context.costCurrencyError) : 'строки нет');
+  const propUsd = await st.service.handlers['repricer:proposal']();
+  check('валюта: причина видна в списке заблокированных',
+    (propUsd.blocked || []).some((x) => String(x.nmID) === '6222222' && (x.reasons || []).some((r) => /курс USD/.test(r))),
+    JSON.stringify((propUsd.blocked || []).find((x) => String(x.nmID) === '6222222') || null));
+
+  // задали курс вручную — себестоимость пересчитана в рубли
+  st.store.saveSettings({ costRates: { USD: 90 } });
+  const withRate = await st.service.handlers['repricer:calc']({ full: true });
+  const usd2 = (withRate.results || []).find((x) => String(x.nmID) === '6222222');
+  check('валюта: с курсом себестоимость пересчитана в рубли',
+    !!usd2 && !usd2.context.costCurrencyError && Math.abs(Number(usd2.current.costPriceRub) - 900) < 0.01,
+    usd2 ? String(usd2.current.costPriceRub) : 'строки нет');
+  const state3 = await service2.handlers['repricer:state']();
+  check('валюта: курсы отдаются интерфейсу', Math.abs(Number((state3.costRates || {}).USD) - 90) < 0.001,
+    JSON.stringify(state3.costRates));
+}
+
 // ───────────────────────── запуск ─────────────────────────
 
 (async () => {
@@ -846,6 +931,8 @@ async function tPromoJournal() {
   await tSppFromStats();
   console.log('\n=== Журнал участия в акциях ===');
   await tPromoJournal();
+  console.log('\n=== Задание D: разрешение отправки, тег, валюта ===');
+  await tItemFlags();
   console.log('\n=== Отстройка от конкурента (%/₽) ===');
   tCompetitorOffset();
 

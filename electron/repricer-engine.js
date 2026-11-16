@@ -1142,6 +1142,23 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       competitorPrice: comp ? comp.price : null,
       plan: planProgress(marginCtx, I),
       marginMode: C.marginMode,
+      /**
+       * Новые поля для таблицы товаров. Все они уже были посчитаны в контексте
+       * (params — те самые расходы, по которым считалась маржа), поэтому это
+       * не новый расчёт, а прозрачность: интерфейс может пересчитать маржу
+       * при минимальной/базовой цене тем же EC.calcUnit, не изобретая формулу.
+       */
+      params: ctx.params || null,
+      allowSend: ctx.allowSend !== false,
+      tag: String(ctx.tag || ''),
+      costCurrency: ctx.costCurrency || 'RUB',
+      costRate: num(ctx.costRate, 1),
+      costManualRub: num(ctx.costManualRub),
+      costCurrencyError: String(ctx.costCurrencyError || ''),
+      sales30: num(ctx.sales30),
+      returns30: num(ctx.returns30),
+      salesMonthQty: num(ctx.salesMonthQty),
+      monthDays: num(ctx.monthDays),
       at: new Date(now).toISOString()
     }
   };

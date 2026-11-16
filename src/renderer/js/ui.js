@@ -148,10 +148,47 @@ window.UI = (function () {
     const tbl = U.el('<table class="grid-table"></table>');
     wrap.appendChild(tbl);
 
+    /**
+     * Шапка таблицы. Если задан o.groups (блоки колонок), шапка становится
+     * двухуровневой: верхний ряд — названия блоков с colSpan, нижний — колонки.
+     * Так устроены таблицы в Excel и в репрайсере INDEEPA: видно, что «Комиссия»
+     * относится к блоку «Мин цена», а не к «Новой цене».
+     */
     function renderHead() {
       const thead = document.createElement('thead');
+      if (Array.isArray(o.groups) && o.groups.length) {
+        const groupRow = document.createElement('tr');
+        groupRow.className = 'group-row';
+        if (o.select) {
+          const th = document.createElement('th');
+          th.className = 'pinned pin-select';
+          th.style.width = '34px';
+          th.setAttribute('rowspan', '2');
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          const all = o.rows.length > 0 && o.rows.every((r) => o.select.get(r));
+          cb.checked = all;
+          cb.onchange = () => {
+            if (o.select.toggleAll) o.select.toggleAll(o.rows, cb.checked);
+            else o.rows.forEach((r) => o.select.set(r, cb.checked));
+            if (o.onSelect) o.onSelect();
+            renderBody();
+          };
+          th.appendChild(cb);
+          groupRow.appendChild(th);
+        }
+        o.groups.forEach((g) => {
+          const th = document.createElement('th');
+          th.colSpan = Math.max(1, Number(g.span) || 1);
+          th.className = 'group-head' + (g.cls ? ' ' + g.cls : '');
+          th.textContent = g.title || '';
+          if (g.hint) th.title = g.hint;
+          groupRow.appendChild(th);
+        });
+        thead.appendChild(groupRow);
+      }
       const tr = document.createElement('tr');
-      if (o.select) {
+      if (o.select && !(Array.isArray(o.groups) && o.groups.length)) {
         const th = document.createElement('th');
         th.style.width = '34px';
         const cb = document.createElement('input');
@@ -171,6 +208,9 @@ window.UI = (function () {
         const th = document.createElement('th');
         th.textContent = c.title || '';
         if (c.num) th.className = 'num';
+        if (c.pinned) th.className += ' pinned pin-first';
+        if (c.required) th.className += ' required-col';
+        if (c.required) th.title = (c.title || '') + ' — обязательное поле';
         if (c.width) th.style.width = c.width;
         if (o.sort && c.key) {
           th.classList.add('sortable');
@@ -226,6 +266,12 @@ window.UI = (function () {
             const td = document.createElement('td');
             if (c.num) td.className = 'num';
             if (c.cls) td.className += ' ' + c.cls;
+            // закреплённая слева колонка («Товар»): не уезжает при горизонтальной прокрутке
+            if (c.pinned) td.className += ' pinned pin-first';
+            if (c.cellClass) {
+              const extra = c.cellClass(r);
+              if (extra) td.className += ' ' + extra;
+            }
             if (c.render) {
               const out = c.render(r);
               if (out instanceof Node) td.appendChild(out);

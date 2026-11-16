@@ -88,6 +88,16 @@ function createService(store, emit, electron) {
     return (store.loadCosts() || {}).items || {};
   }
 
+  /**
+   * Валюта себестоимости товара. Поддерживаются RUB | USD | EUR | CNY,
+   * всё неизвестное считаем рублями (кириллические названия валют не принимаем:
+   * значение приходит из select в интерфейсе, а не из свободного ввода).
+   */
+  function normalizeCostCurrency(value) {
+    const c = String(value || 'RUB').trim().toUpperCase();
+    return ['RUB', 'USD', 'EUR', 'CNY'].includes(c) ? c : 'RUB';
+  }
+
   function overridesFor(goods) {
     const costs = costsMap();
     const out = {};
@@ -112,6 +122,13 @@ function createService(store, emit, electron) {
         discountPct: c.discountPct,
         model: c.model,
         note: c.note,
+        /**
+         * Остаток и валюта себестоимости живут в costs.json рядом с расходами:
+         * остаток правится прямо в строке таблицы товаров, а валюта задаёт,
+         * в каких деньгах введена себестоимость (пересчёт в рубли — в buildContexts).
+         */
+        stock: c.stock,
+        currency: c.currency,
         updatedAt: c.updatedAt,
         source: c.costPriceRub !== undefined && c.costPriceRub !== null && c.costPriceRub !== '' ? 'user' : 'none'
       };
@@ -129,8 +146,13 @@ function createService(store, emit, electron) {
         if (o[k] === undefined || o[k] === null || o[k] === '') o[k] = v;
       }
       o.source = o.source === 'user' ? 'user' : 'demo';
-      o.stock = d.stock;
-      o.salesPerDay = d.salesPerDay;
+      /**
+       * Остаток, введённый продавцом в строке таблицы (costs.json), важнее демо-значения:
+       * иначе правка «Остаток шт» затиралась бы при каждом обновлении демо-данных.
+       * Если своего значения нет — подставляем демо-остаток, чтобы расчёт был осмысленным.
+       */
+      if (o.stock === undefined || o.stock === null || o.stock === '') o.stock = d.stock;
+      if (o.salesPerDay === undefined || o.salesPerDay === null || o.salesPerDay === '') o.salesPerDay = d.salesPerDay;
     }
     return overrides;
   }
@@ -1615,6 +1637,9 @@ function createService(store, emit, electron) {
           lastRunAt: sched.lastRun ? sched.lastRun.at : null
         },
         runs: store.loadRuns().slice(0, 60),
+        // имя кабинета и ручные курсы валют себестоимости — их показывает таблица товаров
+        shopName: String(getSettings().shopName || 'Основной'),
+        costRates: Object.assign({}, getSettings().costRates || {}),
         demo: isDemo()
       };
     },
@@ -2793,10 +2818,31 @@ function createService(store, emit, electron) {
       const rawOv = g.overrides[key] || {};
       const fact = facts[key];
       // факт из отчёта WB перекрывает демо-значения, но не ручные настройки пользователя
-      const ov = EC.preferFacts(rawOv, fact, settings);
+      // копируем: ниже себестоимость пересчитывается в рубли, а кэш товаров менять нельзя
+      const ov = Object.assign({}, EC.preferFacts(rawOv, fact, settings));
       const stats = statsByNm[key] || {};
       const ic = itemConfigs[key] || {};
       const merged = RP.itemConfig(cfg.defaults, ic);
+      // «Разрешить отправку цен» по умолчанию включена: отсутствие поля = разрешено
+      merged.allowSend = ic.allowSend !== false;
+      merged.tag = String(ic.tag || '');
+
+      /**
+       * Себестоимость в валюте пересчитывается в рубли ТОЛЬКО по курсу из настроек
+       * (settings.costRates). Курсы из интернета не берём: расчёт не должен зависеть
+       * от чужого источника. Если валюта ≠ RUB, а курс не задан — строку блокируем
+       * понятной причиной, а не считаем «по курсу 1:1».
+       */
+      const costCurrency = normalizeCostCurrency(rawOv.currency);
+      const costRate = costCurrency === 'RUB' ? 1 : Number((settings.costRates || {})[costCurrency] || 0);
+      const costManualRaw = Number(rawOv.costPriceRub);
+      let costCurrencyError = '';
+      if (costCurrency !== 'RUB') {
+        if (!(costRate > 0)) costCurrencyError = 'не задан курс ' + costCurrency;
+        else if (Number.isFinite(costManualRaw) && costManualRaw > 0) {
+          ov.costPriceRub = Math.round(costManualRaw * costRate * 100) / 100;
+        }
+      }
 
       const seller = Number(item.price) * (1 - Number(item.discount) / 100);
       const perDay = stats.salesQty ? stats.salesQty / 30 : Number(ov.salesPerDay || 0);
@@ -2840,6 +2886,14 @@ function createService(store, emit, electron) {
           priceDayStart: dayStart[key] || seller,
           econAt: (price) => EC.calcUnit(price, p),
           params: p,
+          // «Себестоимость (настройка)» и валюта: что именно ввёл продавец, без пересчёта.
+          // Нужно интерфейсу, чтобы показать исходное значение и причину блокировки.
+          costCurrency,
+          costRate,
+          costManualRub: Number.isFinite(costManualRaw) ? costManualRaw : 0,
+          costCurrencyError,
+          allowSend: merged.allowSend,
+          tag: merged.tag,
           factCosts: fact || null,
           factWindowDays: Number((fact && fact.windowDays) || 0),
           now,
@@ -2932,6 +2986,15 @@ function createService(store, emit, electron) {
    */
   function proposalBlockers(r, drafts) {
     const out = [];
+    const ctx = (r && r.context) || {};
+    /**
+     * «Разрешить отправку цен» — ручной запрет по товару (itemConfigs[nmID].allowSend).
+     * Такую строку нельзя ни предлагать, ни отправлять, даже если расчёт считает,
+     * что цену менять пора. Причина показывается в интерфейсе рядом с бейджем.
+     */
+    if (ctx.allowSend === false) out.push('отправка цен запрещена для товара (allowSend)');
+    // Себестоимость в валюте без курса: считать маржу «по 1:1» нельзя, строка блокируется.
+    if (ctx.costCurrencyError) out.push(ctx.costCurrencyError);
     // движок отдаёт не значение себестоимости, а её источник: 'none' = не задана нигде
     const src = (r.current && r.current.costSources) || {};
     if (src.costPriceRub === 'none') out.push('не задана себестоимость');
@@ -3119,7 +3182,14 @@ function createService(store, emit, electron) {
   }
 
   async function sendPrices(results, source) {
-    const toSend = (results || []).filter((r) => r.needSend && !r.error && r.proposed);
+    /**
+     * Последний рубеж: даже если строка как-то попала в предложение, товар с
+     * «Разрешить отправку цен» = false в WB не уходит. Настройка читается из
+     * хранилища, а не из результата расчёта, — её нельзя обойти устаревшей строкой.
+     */
+    const itemConfigs = store.loadItemConfigs();
+    const sendAllowed = (r) => !(itemConfigs[String(r.nmID)] && itemConfigs[String(r.nmID)].allowSend === false);
+    const toSend = (results || []).filter((r) => r.needSend && !r.error && r.proposed && sendAllowed(r));
     if (!toSend.length) return { sent: 0, skipped: (results || []).length };
     const items = toSend.map((r) => ({ nmID: r.nmID, price: Math.round(r.proposed.basePrice), discount: Math.round(r.proposed.discount) }));
     const res = await handlers['wb:apply-prices']({ items, source: source || 'repricer' });

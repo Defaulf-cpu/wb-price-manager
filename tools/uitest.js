@@ -143,7 +143,7 @@ async function run() {
   // Общие UI-сценарии не нуждаются в 200 DOM-строках на каждом шаге.
   // Расчёты идут по всем товарам; штатные 200 строк проверяются отдельно ниже.
   const productionRepricerPageSize = window.Views.repricer.PAGE_SIZE;
-  window.Views.repricer.PAGE_SIZE = 40;
+  window.Views.repricer.PAGE_SIZE = 25;
 
   const report = [];
   const check = (name, cond, extra) => {
@@ -1600,7 +1600,7 @@ async function run() {
   const rpHtml = doc.getElementById('view').innerHTML;
   check('репрайсер: вкладки цен и стратегий объединены', doc.querySelector('#rp-tabs [data-t="prices"]').textContent.trim() === 'Товары' && !/>Новые цены</.test(rpHtml));
   check('репрайсер: цена на МП и новая цена в одной таблице',
-    /Цена на МП/.test(rpHtml) && /Новая цена/.test(rpHtml));
+    /Текущая цена ₽/.test(rpHtml) && /Новая цена/.test(rpHtml));
   check('репрайсер: сохранённая вручную цена видна отдельно от цены МП',
     /Моя цена/.test(rpHtml));
   check('репрайсер: стратегию можно поменять прямо в таблице', !!doc.querySelector('.rp-strategy'));
@@ -1756,7 +1756,7 @@ async function run() {
   check('INDEEPA: статус выгодности показан бейджем',
     /Супер-выгодный|Выгодный|Невыгодный|Без индекса/.test(rpText2));
   check('INDEEPA: есть цена покупателю (СПП) сейчас и станет',
-    /Цена покупателю сейчас/.test(rpHtml2) && /Цена покупателю станет/.test(rpHtml2));
+    /Текущая цена с СПП/.test(rpHtml2) && /Новая цена с СПП/.test(rpHtml2));
   check('INDEEPA: есть колонка «Акции» с решениями', /<th[^>]*>\s*Акции/.test(rpHtml2) || /Акции/.test(rpHtml2));
   check('INDEEPA: есть колонка «План продаж»', /План продаж/.test(rpHtml2));
 
@@ -1857,14 +1857,14 @@ async function run() {
   check('INDEEPA: есть кнопка выбора колонок', !!doc.getElementById('rp-cols'));
   const rpv = window.Views.repricer;
   check('INDEEPA: справочник колонок совпадает с таблицей',
-    (rpv.COLUMNS || []).length === 21 &&
-      doc.querySelectorAll('#rp-grid thead th').length === (rpv.COLUMNS || []).length,
-    'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + doc.querySelectorAll('#rp-grid thead th').length);
-  check('INDEEPA: по умолчанию показан полный набор (кроме дубля «Коридор»)',
-    rpv.visibleCols().size >= 18 && !rpv.visibleCols().has('corridor'),
+    (rpv.visibleColumns ? rpv.visibleColumns().length : -1) === doc.querySelectorAll('#rp-grid thead tr:nth-child(2) th').length &&
+      doc.querySelectorAll('#rp-grid thead tr:nth-child(2) th').length > 20,
+    'видимо ' + doc.querySelectorAll('#rp-grid thead tr:nth-child(2) th').length + ' из ' + (rpv.COLUMNS || []).length + ' в справочнике');
+  check('INDEEPA: по умолчанию показан полный набор (без тяжёлых служебных колонок)',
+    rpv.visibleCols().size >= 30 && !rpv.visibleCols().has('walletPct'),
     'видимо ' + rpv.visibleCols().size + ' колонок');
   check('INDEEPA: обязательные колонки нельзя выключить',
-    (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.id).join(',') === 'item,priceNow,myPrice,priceNext,delta,why',
+    (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.id).sort().join(',') === ['item', 'priceNow', 'priceNext', 'delta', 'why'].sort().join(','),
     (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.title || c.id).join(', '));
   const headersBefore = doc.querySelectorAll('#rp-grid thead th').length;
   rpv.saveVisibleCols(rpv.COMPACT_COLUMNS);
@@ -1881,6 +1881,149 @@ async function run() {
   check('INDEEPA: набор колонок возвращается к полному',
     doc.querySelectorAll('#rp-grid thead th').length === headersBefore,
     'колонок ' + doc.querySelectorAll('#rp-grid thead th').length);
+
+  // ── Задание D: блоки колонок и двухуровневая шапка ──────────────────────
+  const headRows = doc.querySelectorAll('#rp-grid thead tr');
+  check('D: шапка таблицы двухуровневая — ряд блоков и ряд колонок',
+    headRows.length === 2 && !!doc.querySelector('#rp-grid thead tr.group-row'),
+    'рядов шапки: ' + headRows.length);
+  const groupThs = Array.from(doc.querySelectorAll('#rp-grid thead tr.group-row th.group-head'));
+  const spanSum = groupThs.reduce((acc, th) => acc + Number(th.colSpan || 1), 0);
+  check('D: colspan блоков равен числу видимых колонок',
+    spanSum === rpv.visibleColumns().length,
+    'сумма colspan ' + spanSum + ' / колонок ' + rpv.visibleColumns().length);
+  check('D: блоки идут слева направо как в задании',
+    groupThs.map((th) => th.textContent.trim()).join('|') === rpv.BLOCKS.map((b) => b.title).join('|'),
+    groupThs.map((th) => th.textContent.trim()).join('|'));
+  const cssText = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'styles.css'), 'utf8');
+  check('D: оба ряда шапки липкие, колонки выбора и «Товар» закреплены слева',
+    /grid-table thead tr:nth-child\(2\) th \{ top: 29px/.test(cssText) &&
+      /grid-table thead th\.pin-select/.test(cssText) && /grid-table thead th\.pin-first/.test(cssText) &&
+      !!doc.querySelector('#rp-grid thead th.pin-first') && !!doc.querySelector('#rp-grid td.pin-first'),
+    'CSS и классы закрепления на месте');
+  check('D: обязательные колонки помечены required',
+    (rpv.COLUMNS || []).filter((c) => c.required).length >= 15,
+    'обязательных колонок: ' + (rpv.COLUMNS || []).filter((c) => c.required).length);
+  check('D: в компактном наборе есть колонка из каждого блока',
+    rpv.BLOCKS.every((b) => rpv.COMPACT_COLUMNS.some((id) => (rpv.COLUMNS.find((c) => c.id === id) || {}).block === b.id)),
+    rpv.COMPACT_COLUMNS.join(', '));
+  check('D: порядок колонок в таблице совпадает со справочником COLUMNS',
+    rpv.visibleColumns().map((c) => c.id).join(',') ===
+      rpv.COLUMNS.filter((c) => c.always || rpv.visibleCols().has(c.id)).map((c) => c.id).join(','));
+
+  // пикер: выключаем блок целиком и отдельную колонку внутри него
+  rpv.openColumnsPicker();
+  await wait(350);
+  const dPicker = Array.from(doc.querySelectorAll('#modal-root .modal-backdrop')).pop();
+  const blockInfo = dPicker && dPicker.querySelector('[data-block="info"]');
+  const roiBox = dPicker && dPicker.querySelector('[data-col="roi"]');
+  const currencyBox = dPicker && dPicker.querySelector('[data-col="currency"]');
+  if (blockInfo) {
+    blockInfo.checked = false;
+    blockInfo.dispatchEvent(new window.Event('change'));
+  }
+  check('D: выключение блока снимает все его необязательные колонки',
+    !!roiBox && !roiBox.checked && !!currencyBox && !currencyBox.checked);
+  if (currencyBox) {
+    currencyBox.checked = true;
+    currencyBox.dispatchEvent(new window.Event('change'));
+  }
+  check('D: отдельную колонку внутри выключенного блока можно включить обратно',
+    !!currencyBox && currencyBox.checked && !!roiBox && !roiBox.checked);
+  if (dPicker) {
+    const applyBtn = Array.from(dPicker.querySelectorAll('.modal-foot .btn')).find((b) => /Применить/.test(b.textContent));
+    if (applyBtn) applyBtn.click();
+    await wait(500);
+  }
+  check('D: «Валюта себестоимости» осталась, «ROI» скрыт после применения',
+    /Валюта себестоимости/.test(doc.querySelector('#rp-grid').innerHTML) && !/ROI, %/.test(doc.querySelector('#rp-grid').innerHTML));
+  rpv.saveVisibleCols(new Set(rpv.DEFAULT_COLUMNS));
+  rpv.renderResults();
+  await wait(400);
+  check('D: набор колонок восстанавливается после эксперимента',
+    doc.querySelectorAll('#rp-grid thead tr:nth-child(2) th').length === rpv.visibleColumns().length);
+
+  // подсветка обязательного поля с пустым значением
+  const reqSample = (rpv.results || [])[0];
+  if (reqSample) {
+    const savedEffCost = reqSample.current.costPriceRub;
+    reqSample.current.costPriceRub = 0;
+    reqSample.current.costSources = Object.assign({}, reqSample.current.costSources, { costPriceRub: 'none' });
+    rpv.renderResults();
+    await wait(150);
+    check('D: обязательная колонка подсвечивается при пустом значении',
+      !!doc.querySelector('#rp-grid td.required-empty'),
+      'подсвечено ячеек: ' + doc.querySelectorAll('#rp-grid td.required-empty').length);
+    reqSample.current.costPriceRub = savedEffCost;
+    reqSample.current.costSources = Object.assign({}, reqSample.current.costSources, { costPriceRub: 'manual' });
+    rpv.renderResults();
+    await wait(150);
+  }
+
+  // «—» и tooltip, когда данных у WB нет
+  if (reqSample) {
+    const itemObj = rpv.itemsByNm.get(String(reqSample.nmID));
+    const savedSizes = itemObj ? itemObj.sizes : null;
+    if (itemObj) itemObj.sizes = [];
+    const sizesCol = rpv.COLUMNS.find((c) => c.id === 'sizes');
+    const sizesHtml = sizesCol.render(reqSample);
+    check('D: при отсутствии данных показывается «—» с подсказкой',
+      /—/.test(sizesHtml) && /title="[^"]+"/.test(sizesHtml), sizesHtml.slice(0, 90));
+    if (itemObj) itemObj.sizes = savedSizes;
+  }
+
+  // экспорт: ряд блоков в Excel и префикс «Блок / Колонка» в CSV
+  const expSample = (rpv.results || []).slice(0, 2);
+  const expTable = rpv.buildExportTable(expSample);
+  check('D: в экспорте Excel первым рядом идут названия блоков',
+    expTable.blockRow[0] === 'Артикул' &&
+      expTable.blockRow.filter(Boolean).length === rpv.BLOCKS.filter((b) => rpv.visibleColumns().some((c) => c.block === b.id)).length &&
+      expTable.headRow.length === expTable.blockRow.length,
+    expTable.blockRow.filter(Boolean).join(' | '));
+  const csvRow = expSample.length ? rpv.buildCsvRows([expSample[0]])[0] : {};
+  check('D: в CSV заголовки с префиксом «Блок / Колонка»',
+    Object.keys(csvRow).some((k) => k.indexOf('Инфо о товаре / ') === 0) &&
+      Object.keys(csvRow).some((k) => k.indexOf('Мин цена (в акции) / ') === 0),
+    Object.keys(csvRow).slice(0, 3).join(' | '));
+
+  // новые редактируемые поля: allowSend, tag, валюта — и живучесть правок
+  const editSample = (rpv.results || [])[0];
+  if (editSample) {
+    const editNm = String(editSample.nmID);
+    rpv.stageEdit(editNm, 'config', { allowSend: false, tag: 'проверка-D' });
+    rpv.stageEdit(editNm, 'cost', { currency: 'USD' });
+    rpv.renderResults();
+    await wait(200);
+    const rowOf = () => Array.from(doc.querySelectorAll('#rp-grid tbody tr'))
+      .find((tr) => !!tr.querySelector('[data-nm="' + editNm + '"]'));
+    const row1 = rowOf();
+    check('D: «Разрешить отправку цен» видно в строке и оно выключено',
+      !!row1 && !!row1.querySelector('.rp-allow-send') && row1.querySelector('.rp-allow-send').checked === false,
+      row1 ? 'бейдж: ' + (/отправка запрещена/.test(row1.textContent) ? 'есть' : 'нет') : 'строка не найдена');
+    check('D: внутренний тег виден в строке',
+      !!row1 && !!row1.querySelector('.rp-tag') && row1.querySelector('.rp-tag').value === 'проверка-D');
+    check('D: валюта себестоимости видна в строке',
+      !!row1 && !!row1.querySelector('.rp-currency') && row1.querySelector('.rp-currency').value === 'USD');
+    rpv.page = 1;
+    rpv.renderResults();
+    await wait(200);
+    rpv.page = 0;
+    rpv.renderResults();
+    await wait(200);
+    const row2 = rowOf();
+    check('D: правки переживают смену страницы и перерисовку',
+      !!row2 && row2.querySelector('.rp-tag').value === 'проверка-D' && row2.querySelector('.rp-allow-send').checked === false &&
+        row2.querySelector('.rp-currency').value === 'USD');
+    rpv.itemFilter.tag = 'проверка-D';
+    rpv.renderResults();
+    await wait(200);
+    check('D: фильтр по внутреннему тегу отбирает строку',
+      doc.querySelectorAll('#rp-grid tbody tr').length === 1,
+      'строк: ' + doc.querySelectorAll('#rp-grid tbody tr').length);
+    rpv.itemFilter.tag = '';
+    rpv.discardEdits();
+    await wait(200);
+  }
   rpv.openColumnsPicker();
   await wait(500);
   const cpModal = (function () { const bs = doc.querySelectorAll('#modal-root .modal-backdrop'); return bs.length ? bs[bs.length - 1] : null; })();
@@ -1906,8 +2049,12 @@ async function run() {
   // подменяем данные по одному артикулу и смотрим, что строка помечается ошибкой
   const sample = (rp.results || [])[0];
   if (sample) {
-    const savedCogs = rp.cogsByNm[String(sample.nmID)];
-    rp.cogsByNm[String(sample.nmID)] = 0;
+    // эффективная себестоимость теперь приходит из расчёта (факт WB или costs.json),
+    // поэтому «нет себестоимости» имитируем именно в результате движка
+    const savedCogs = sample.current.costPriceRub;
+    const savedSources = sample.current.costSources;
+    sample.current.costPriceRub = 0;
+    sample.current.costSources = Object.assign({}, savedSources, { costPriceRub: 'none' });
     const errs0 = rp.rowErrors(sample);
     check('INDEEPA: без себестоимости строка помечается ошибкой',
       errs0.some((e) => /себестоимость/.test(e)), errs0.join('; '));
@@ -1915,10 +2062,12 @@ async function run() {
       rp.valueStatus(sample).id === 'noindex', rp.valueStatus(sample).label);
     check('INDEEPA: товар с ошибкой попадает в список неотправимых',
       rp.invalidResults().some((r) => String(r.nmID) === String(sample.nmID)));
-    rp.cogsByNm[String(sample.nmID)] = 1;
+    sample.current.costPriceRub = 1;
+    sample.current.costSources = Object.assign({}, savedSources, { costPriceRub: 'manual' });
     check('INDEEPA: себестоимость меньше 2 ₽ тоже ошибка (как в референсе)',
       rp.rowErrors(sample).some((e) => /больше 2/.test(e)), rp.rowErrors(sample).join('; '));
-    rp.cogsByNm[String(sample.nmID)] = savedCogs;
+    sample.current.costPriceRub = savedCogs;
+    sample.current.costSources = savedSources;
     check('INDEEPA: после возврата данных ошибки исчезают', rp.rowErrors(sample).length === 0,
       rp.rowErrors(sample).join('; '));
   }
@@ -1936,14 +2085,18 @@ async function run() {
   check('репрайсер: плотный режим применён к самой таблице', !!doc.querySelector('#rp-grid table.dense'));
   if (sample) {
     const nm = String(sample.nmID);
-    const saved = rp.cogsByNm[nm];
-    rp.cogsByNm[nm] = 0;
+    const savedEff = sample.current.costPriceRub;
+    const savedSrc = sample.current.costSources;
+    sample.current.costPriceRub = 0;
+    sample.current.costSources = Object.assign({}, savedSrc, { costPriceRub: 'none' });
     rp.renderResults();
     const errCell = doc.querySelector('#rp-grid .rp-validation');
     check('репрайсер: ОШИБКА находится именно в ячейке стратегии', !!errCell && !!errCell.parentNode.querySelector('.rp-strategy'));
-    rp.cogsByNm[nm] = 2;
+    sample.current.costPriceRub = 2;
+    sample.current.costSources = Object.assign({}, savedSrc, { costPriceRub: 'manual' });
     check('репрайсер: ровно 2 рубля не проходят валидацию', rp.rowErrors(sample).some((x) => /больше 2/.test(x)));
-    rp.cogsByNm[nm] = saved;
+    sample.current.costPriceRub = savedEff;
+    sample.current.costSources = savedSrc;
     rp.stageEdit(nm, 'config', { basePriceTarget: 9876 });
     rp.renderResults();
     check('репрайсер: перерисовка сохраняет несохранённый базовый порог', doc.querySelector('.rp-baseprice[data-nm="' + nm + '"]').value === '9876');
@@ -2205,7 +2358,7 @@ async function run() {
   await wait(2500);
   const rpHtml4 = doc.getElementById('view').innerHTML;
   check('закольцовка: в репрайсере видна «Моя цена»', /Моя цена/.test(rpHtml4));
-  check('закольцовка: в репрайсере цена МП показана отдельно', /Цена на МП/.test(rpHtml4));
+  check('закольцовка: в репрайсере цена МП показана отдельно', /Текущая цена ₽/.test(rpHtml4));
 
   // цена должна дойти и до «Экономики», и до «Панели» — они берут строки из общего состояния
   // «Экономика» группирует по категориям, поэтому сверяем итог раздела с общим состоянием:
@@ -2243,10 +2396,13 @@ async function run() {
 
   // ── возвращаем штатный размер товарной страницы и проверяем настоящую отрисовку ──
   window.Views.repricer.PAGE_SIZE = productionRepricerPageSize;
+  window.Views.repricer.page = 0;
+  // перед самой тяжёлой отрисовкой (200 строк × все видимые колонки) убираем мусор,
+  // иначе jsdom упирается в лимит кучи ещё до проверки
+  if (global.gc) global.gc();
   window.App.go('repricer');
   await wait(1600);
-  window.Views.repricer.page = 0;
-  window.Views.repricer.renderResults();
+  if (global.gc) global.gc();
   check('репрайсер: настоящий DOM страницы содержит до 200 товаров',
     doc.querySelectorAll('#rp-grid tbody tr').length === Math.min(200, window.Views.repricer.filteredResults().length));
 

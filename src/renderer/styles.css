@@ -384,3 +384,46 @@ table.grid-table tfoot td {
    базовая цена подставляется из sizes[]. Минимальная — берём худший вариант по марже. */
 .rp-sizeprice { cursor: help; }
 .rp-sizeprice .badge { white-space: nowrap; }
+
+/* ─────────── Двухуровневая шапка и закреплённые колонки (таблица товаров) ───────────
+   Как в Excel и в репрайсере INDEEPA: верхний ряд — блоки колонок («Артикул»,
+   «Инфо о товаре», «Текущая цена» …), нижний — сами колонки. Оба ряда липкие:
+   при прокрутке длинного списка всегда видно, к какому блоку относится цифра.
+   Слева закреплены колонка выбора и колонка «Товар». */
+.grid-table thead tr.group-row th {
+  top: 0; z-index: 5;
+  text-align: center; text-transform: none; letter-spacing: 0;
+  font-size: 11px; font-weight: 700; color: var(--text);
+  background: var(--bg-3);
+  border-left: 2px solid var(--line-2);
+  border-bottom: 1px solid var(--line-2);
+  cursor: default;
+}
+.grid-table thead tr.group-row th:first-of-type { border-left: 0; }
+.grid-table thead tr.group-row th.group-head { white-space: nowrap; }
+/* второй ряд шапки стоит ровно под первым */
+.grid-table thead tr:nth-child(2) th { top: 29px; z-index: 4; }
+
+/* Закрепление слева: колонка выбора (34px) и «Товар» */
+.grid-table thead th.pinned, .grid-table tbody td.pinned {
+  position: sticky; z-index: 2;
+  background: var(--bg-2);
+}
+.grid-table thead th.pin-select { left: 0; z-index: 6; }
+.grid-table thead th.pin-first { left: 34px; z-index: 6; }
+.grid-table tbody td.pin-select { left: 0; }
+.grid-table tbody td.pin-first { left: 34px; box-shadow: inset -1px 0 0 var(--line-2); }
+.grid-table thead th.pin-select, .grid-table thead th.pin-first {
+  background: var(--bg-3); box-shadow: inset -1px 0 0 var(--line-2);
+}
+/* строка под курсором/выделенная: закреплённые ячейки не должны «просвечивать» */
+.grid-table tbody tr:hover > td.pinned { background: #181f2b; }
+.grid-table tbody tr.selected > td.pinned { background: var(--accent-soft); }
+.grid-table tbody tr.row-dirty > td.pinned { background: #2a2318; }
+
+/* Обязательное поле пустое — ячейка подсвечена, как в INDEEPA */
+.grid-table td.required-empty { box-shadow: inset 0 0 0 1px rgba(255, 92, 114, .55); background: rgba(255, 92, 114, .07); }
+.grid-table thead th.required-col::after { content: ' *'; color: var(--danger); }
+#rp-grid .rp-cell-note { white-space: normal; line-height: 1.25; max-width: 190px; }
+#rp-grid .rp-cell-input { width: 92px; }
+#rp-grid .rp-block-sep { border-left: 2px solid var(--line); }
