@@ -148,6 +148,19 @@ const MARKERS = [
   ['src/renderer/js/views/settings.js', 'catLogCell', 'редактирование тарифов логистики по категории'],
   ['docs/API.md', 'Расхождения, которые вскрыли тесты, устранены', 'устранение расхождений, найденных заданием H'],
   ['tools/uitest.js', 'тарифы логистики категории сохранились', 'правки категорий доезжают до хранилища'],
+  // ── задания E (одно рабочее место) и I (сборка .exe, автообновление) ──
+  ['src/renderer/js/rules.js', 'window.RULES', 'общий модуль массовых правил'],
+  ['src/renderer/index.html', 'js/rules.js', 'модуль правил зарегистрирован в index.html'],
+  ['src/renderer/js/views/repricer.js', 'Массовые правила', 'вложенные вкладки репрайсера'],
+  ['electron/service.js', 'costsRowsFromTable', 'импорт себестоимости из файла (CSV и XLSX)'],
+  ['docs/API.md', '21.12 Задание E', 'описание единого рабочего места'],
+  ['package.json', 'max-old-space-size=1600', 'UI-прогон с увеличенной кучей'],
+  ['electron/updater.js', 'createUpdateManager', 'менеджер автообновления'],
+  ['electron/main.js', 'ui:update-check', 'каналы автообновления'],
+  ['src/renderer/js/views/settings.js', 'ui:update-state', 'раздел «Обновления» в настройках'],
+  ['docs/BUILD.md', 'latest.yml', 'инструкция по сборке и публикации'],
+  ['tools/checks/updater-flow.js', 'отключённая настройка не загружает updater', 'прогон автообновления'],
+  ['package.json', 'electron-updater', 'зависимость автообновления'],
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */
@@ -177,6 +190,8 @@ const REQUIRED_FILES = [
   'tools/checks/rate-limit-flow.js', 'tools/checks/repo-check.js',
   'tools/checks/repricer-flow.js',
   'tools/checks/engine-unit.js', 'tools/checks/stocks-flow.js',
+  'tools/checks/updater-flow.js', 'src/renderer/js/rules.js',
+  'electron/updater.js', 'docs/BUILD.md', 'build/icon.ico',
   'Запуск (Windows).bat', 'Запуск в браузере (демо).bat',
   'Собрать EXE (Windows).bat', 'Опубликовать на GitHub (Windows).bat',
   'Веб-версия (доступ из сети).bat'

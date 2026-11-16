@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
    */
   stocksLowDays: 14,
   demoMode: true,
+  autoUpdateEnabled: true,
   sandbox: false,
   model: 'marketplace', // marketplace | fbw
   currency: 'RUB',

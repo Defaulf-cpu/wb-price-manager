@@ -6,11 +6,13 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { createStore } = require('./store');
 const { createService } = require('./service');
+const { createUpdateManager } = require('./updater');
 const { APP_NAME } = require('./config');
 
 let win = null;
 let store = null;
 let service = null;
+let updateManager = null;
 
 const DEV = process.argv.includes('--dev');
 
@@ -32,7 +34,10 @@ function makeSecretBox() {
  * интерфейс получал «Неизвестный канал: data:refresh-all»).
  */
 function registeredChannels() {
-  const ui = ['ui:export-csv', 'ui:import-csv', 'ui:open-external', 'ui:app-info', 'ui:theme'];
+  const ui = [
+    'ui:export-csv', 'ui:import-csv', 'ui:open-external', 'ui:app-info', 'ui:theme',
+    'ui:update-state', 'ui:update-check', 'ui:update-enable', 'ui:update-restart'
+  ];
   const svc = service && service.handlers ? Object.keys(service.handlers) : [];
   return Array.from(new Set(svc.concat(ui)));
 }
@@ -190,6 +195,30 @@ function registerIpc() {
     nativeTheme.themeSource = theme || 'dark';
     return { ok: true };
   });
+
+  ipcMain.handle('ui:update-state', async () => ({
+    ok: true,
+    data: updateManager ? updateManager.getState() : { status: 'unavailable', error: 'Менеджер обновлений не запущен.' }
+  }));
+
+  ipcMain.handle('ui:update-check', async () => ({
+    ok: true,
+    data: updateManager ? await updateManager.checkNow(true) : { status: 'unavailable' }
+  }));
+
+  ipcMain.handle('ui:update-enable', async (_e, value) => {
+    const enabled = !!value;
+    const settings = store.saveSettings({ autoUpdateEnabled: enabled });
+    const update = updateManager ? await updateManager.setEnabled(enabled) : null;
+    return { ok: true, data: { settings, update } };
+  });
+
+  ipcMain.handle('ui:update-restart', async () => {
+    if (!updateManager || !updateManager.restartAndInstall()) {
+      return { ok: false, error: { message: 'Загруженного обновления для установки нет.' } };
+    }
+    return { ok: true, data: { started: true } };
+  });
 }
 
 app.setName(APP_NAME);
@@ -237,11 +266,18 @@ if (!gotLock) {
     const dir = app.getPath('userData');
     store = createStore(dir, makeSecretBox());
     service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden });
+    updateManager = createUpdateManager({
+      app,
+      platform: process.platform,
+      enabled: store.loadSettings().autoUpdateEnabled !== false,
+      emit: (state) => send('svc:update-status', state)
+    });
 
     Menu.setApplicationMenu(null);
     nativeTheme.themeSource = 'dark';
     registerIpc();
     createWindow();
+    updateManager.initialize().catch((error) => console.error('[updater] не удалось запустить проверку:', error.message));
 
     // автопересчёт цен по расписанию (если включён в настройках репрайсера)
     try {

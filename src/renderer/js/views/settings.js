@@ -37,10 +37,14 @@ Views.settings = {
 
   async draw() {
     const container = this.container;
+    if (this.updateStatusOff) { this.updateStatusOff(); this.updateStatusOff = null; }
     container.innerHTML = UI.loading('Читаем настройки…');
     const info = await API.invoke('app:state');
     const s = info.settings;
     const appInfo = await API.appInfo();
+    const initialUpdateState = API.isElectron
+      ? await API.invoke('ui:update-state').catch(() => null)
+      : null;
     const hasRealKey = !!(info.keys && (info.keys.single || info.keys.prices || info.keys.statistics || info.keys.content || info.keys.finance));
     const demoHint = s.demoMode
       ? (hasRealKey
@@ -501,6 +505,20 @@ Views.settings = {
           <div class="grow"></div>
           <span class="hint">Версия ${U.esc(appInfo ? appInfo.version : '')} · Electron ${U.esc(appInfo ? appInfo.electron : '')} · шифрование: ${U.esc(appInfo ? appInfo.encryption : '')}</span>
         </div>
+        ${API.isElectron ? `
+          <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div>
+          <div class="row wrap" style="gap:10px">
+            <label class="row tiny" style="gap:8px;align-items:center;cursor:pointer">
+              <input id="s-auto-update" type="checkbox" ${s.autoUpdateEnabled !== false ? 'checked' : ''}>
+              Проверять обновления при запуске (рекомендуется)
+            </label>
+            <div class="grow"></div>
+            <button class="btn btn-sm" id="btn-update-check" type="button">Проверить обновления</button>
+            <button class="btn btn-sm btn-primary" id="btn-update-restart" type="button" hidden>Перезапустить и установить</button>
+          </div>
+          <p class="hint" id="update-status" role="status" aria-live="polite" style="margin:8px 0 0">Получаем состояние обновлений…</p>
+          <p class="tiny muted" style="margin:5px 0 0">Новая версия загружается в фоне. Обновление приложения не удаляет пользовательские данные.</p>
+        ` : ''}
       </div>
 
       <div style="margin-top:14px" class="row wrap">
@@ -510,6 +528,77 @@ Views.settings = {
     `;
 
     const $ = (id) => container.querySelector(id);
+
+    function paintUpdateStatus(update) {
+      const host = $('#update-status');
+      const restartButton = $('#btn-update-restart');
+      if (!host) return;
+      if (!update || !update.status) {
+        host.textContent = 'Не удалось получить состояние автообновления. Перезапустите приложение и попробуйте снова.';
+        host.className = 'hint neg';
+        if (restartButton) restartButton.hidden = true;
+        return;
+      }
+      const version = update.updateVersion ? ' ' + update.updateVersion : '';
+      const progress = Number.isFinite(Number(update.progress)) ? Math.floor(Number(update.progress)) : null;
+      const messages = {
+        idle: 'Проверка обновлений ещё не выполнялась.',
+        checking: 'Проверяем GitHub Releases…',
+        available: 'Доступна новая версия' + version + '; загружаем её в фоне.',
+        downloading: 'Загружаем обновление' + version + (progress === null ? '…' : ': ' + progress + '%.'),
+        downloaded: 'Обновление' + version + ' загружено. Нажмите «Перезапустить и установить», когда будете готовы.',
+        'not-available': 'Установлена последняя версия' + version + '.',
+        offline: 'Нет соединения с GitHub или сеть недоступна. Проверку можно повторить позже.',
+        error: 'Не удалось проверить или загрузить обновление: ' + (update.error || 'неизвестная ошибка'),
+        disabled: 'Автоматическая проверка при запуске отключена. Ручная проверка доступна кнопкой выше.',
+        unavailable: 'Модуль автообновления недоступен: ' + (update.error || 'переустановите приложение из сборки с поддержкой обновлений.'),
+        development: 'Автообновление доступно только в установленной Windows-сборке.',
+        portable: 'Автообновление предназначено для установленной NSIS-версии. Портативную сборку обновляйте вручную.',
+        unsupported: 'Автообновление поддерживается в Windows-сборке NSIS.',
+        installing: 'Приложение закрывается для установки обновления…'
+      };
+      host.textContent = messages[update.status] || 'Состояние обновления: ' + update.status + '.';
+      host.className = 'hint' + (update.status === 'downloaded' ? ' pos' :
+        (update.status === 'offline' || update.status === 'error' || update.status === 'unavailable' ? ' warnc' : ''));
+      if (restartButton) restartButton.hidden = update.status !== 'downloaded';
+    }
+
+    if (API.isElectron) {
+      this.updateStatusOff = API.on('update-status', paintUpdateStatus);
+      paintUpdateStatus(initialUpdateState);
+      $('#s-auto-update').onchange = async (event) => {
+        const checkbox = event.currentTarget;
+        const enabled = checkbox.checked;
+        checkbox.disabled = true;
+        try {
+          const result = await API.invoke('ui:update-enable', enabled);
+          if (result && result.settings) S.state.settings = result.settings;
+          paintUpdateStatus(result && result.update);
+          UI.toast(enabled ? 'Автоматическая проверка обновлений включена' : 'Автоматическая проверка обновлений отключена', 'ok');
+        } catch (error) {
+          checkbox.checked = !enabled;
+          UI.toast('Не удалось сохранить настройку обновлений: ' + error.message, 'err', 7000);
+        } finally {
+          checkbox.disabled = false;
+        }
+      };
+      $('#btn-update-check').onclick = async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        paintUpdateStatus({ status: 'checking' });
+        try { paintUpdateStatus(await API.invoke('ui:update-check')); }
+        catch (error) { paintUpdateStatus({ status: 'error', error: error.message }); }
+        finally { button.disabled = false; }
+      };
+      $('#btn-update-restart').onclick = async (event) => {
+        event.currentTarget.disabled = true;
+        try { await API.invoke('ui:update-restart'); }
+        catch (error) {
+          event.currentTarget.disabled = false;
+          UI.toast('Не удалось запустить установку обновления: ' + error.message, 'err', 7000);
+        }
+      };
+    }
 
     $('#lnk-seller').onclick = (e) => { e.preventDefault(); API.openExternal('https://seller.wildberries.ru/settings/access-to-api'); };
 
@@ -999,7 +1088,8 @@ Views.settings = {
       UI.confirmDialog('Сбросить всё', '<div class="alert danger">Будут удалены настройки, ключи и введённые себестоимости.</div>', async () => {
         await API.invoke('keys:clear', {});
         await API.invoke('costs:clear', {});
-        await API.invoke('settings:reset');
+        const resetSettings = await API.invoke('settings:reset');
+        if (API.isElectron) await API.invoke('ui:update-enable', resetSettings.autoUpdateEnabled !== false);
         await S.loadAppState();
         S.state.costs = {};
         App.toast('Приложение сброшено', 'ok');
