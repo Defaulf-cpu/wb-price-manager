@@ -1,6 +1,6 @@
 'use strict';
 
-const { WB_HOSTS, RATE_LIMITS, MAX_ITEMS_PER_PRICE_TASK } = require('./config');
+const { WB_HOSTS, RATE_LIMITS, MAX_ITEMS_PER_PRICE_TASK, MAX_SIZE_ITEMS_PER_PRICE_TASK } = require('./config');
 
 /** Ошибка WB API с понятным текстом для интерфейса. */
 class WBError extends Error {
@@ -705,23 +705,59 @@ class WBClient {
     const { waitDetails = true } = opts || {};
     if (!Array.isArray(items) || !items.length) throw new WBError('Нет товаров для обновления цен.', { category: 'prices', code: 'EMPTY' });
 
-    const results = [];
+    const batches = [];
     for (let i = 0; i < items.length; i += MAX_ITEMS_PER_PRICE_TASK) {
       const chunk = items.slice(i, i + MAX_ITEMS_PER_PRICE_TASK).map((it) => ({
         nmID: Number(it.nmID),
         price: Math.round(Number(it.price)),
         discount: Math.round(Number(it.discount))
       }));
-      const json = await this.request('prices', 'POST', '/api/v2/upload/task', { body: { data: chunk } });
-      results.push({ batch: i / MAX_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response: json, items: chunk });
+      const response = await this.request('prices', 'POST', '/api/v2/upload/task', { body: { data: chunk } });
+      batches.push({ batch: i / MAX_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
     }
 
-    if (!waitDetails) return { uploaded: items.length, batches: results, details: [] };
+    if (!waitDetails) return { uploaded: items.length, batches, details: [] };
 
-    // Детали обработанной загрузки (ошибки по товарам, в т.ч. карантин цен)
+    const details = await this._collectUploadDetails(batches);
+    return { uploaded: items.length, batches, details };
+  }
+
+  /**
+   * POST /api/v2/upload/task/size — установить цены по размерам
+   * (только для товаров с `editableSizePrice: true`).
+   * Автоматически режет на пачки по 1000 размеров и собирает ошибки из состояний загрузки.
+   */
+  async applySizePrices(items, opts) {
+    const { waitDetails = true } = opts || {};
+    if (!Array.isArray(items) || !items.length) throw new WBError('Нет размеров для обновления цен.', { category: 'prices', code: 'EMPTY' });
+
+    const batches = [];
+    for (let i = 0; i < items.length; i += MAX_SIZE_ITEMS_PER_PRICE_TASK) {
+      const chunk = items.slice(i, i + MAX_SIZE_ITEMS_PER_PRICE_TASK).map((it) => ({
+        nmID: Number(it.nmID),
+        sizeID: Number(it.sizeID),
+        price: Math.round(Number(it.price)),
+        discount: Math.round(Number(it.discount))
+      }));
+      const response = await this.request('prices', 'POST', '/api/v2/upload/task/size', { body: { data: chunk } });
+      batches.push({ batch: i / MAX_SIZE_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
+    }
+
+    if (!waitDetails) return { uploaded: items.length, batches, details: [] };
+
+    const details = await this._collectUploadDetails(batches);
+    return { uploaded: items.length, batches, details };
+  }
+
+  /**
+   * Детали обработанной загрузки (ошибки по товарам/размерам, в т.ч. карантин цен).
+   * Общая логика для цен товара (`upload/task`) и цен по размерам (`upload/task/size`):
+   * опрос истории по taskId и разбор `goods[]` с состояниями.
+   */
+  async _collectUploadDetails(batches) {
     await sleep(1500);
     const details = [];
-    for (const b of results) {
+    for (const b of batches) {
       const taskId = pick(b.response && b.response.data, ['taskId', 'id']);
       if (taskId === undefined || taskId === null) continue;
       try {
@@ -741,7 +777,7 @@ class WBClient {
         details.push({ taskId, error: e.message });
       }
     }
-    return { uploaded: items.length, batches: results, details };
+    return details;
   }
 
   static uploadStatusText(status) {
