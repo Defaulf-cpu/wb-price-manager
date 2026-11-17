@@ -161,6 +161,32 @@ const MARKERS = [
   ['docs/BUILD.md', 'latest.yml', 'инструкция по сборке и публикации'],
   ['tools/checks/updater-flow.js', 'отключённая настройка не загружает updater', 'прогон автообновления'],
   ['package.json', 'electron-updater', 'зависимость автообновления'],
+  // ── задания F (размеры), J (копии), K (Telegram) и исправления приёмки ──
+  ["electron/wb-client.js", "applySizePrices", "отдельный метод записи цен размеров"],
+  ["electron/preload.js", "wb:apply-size-prices", "канал размерных цен в preload"],
+  ["electron/service.js", "currentSizePrices", "защита от чужих правок любого размера"],
+  ["electron/service.js", "SIZE_EQUALIZE_CONFIRM", "защита автоотправки от выравнивания размеров"],
+  ["electron/service.js", "skippedUnchanged", "неизменённые размеры не отправляются"],
+  ["src/renderer/js/views/repricer.js", "pm-sizemode", "общий режим размерных цен в параметрах"],
+  ["src/renderer/js/views/repricer.js", "sizeMode(nmID)", "наследование и индивидуальный режим размеров"],
+  ["tools/checks/repricer-flow.js", "tSizePriceSafety", "регрессии сохранности размерных цен"],
+  ["tools/uitest.js", "окно результатов не считает ошибки успешной загрузкой", "честная сводка ошибок размерной отправки"],
+  ["electron/backup.js", "createBackupManager", "менеджер резервных копий"],
+  ["electron/backup.js", "aes-256-gcm", "шифрование ключей WB в переносимой копии"],
+  ["electron/service.js", "backup:restore", "восстановление внутренней резервной копии"],
+  ["electron/main.js", "createBackupManager", "резервные копии подключены в Electron"],
+  ["electron/notifications.js", "createTelegramNotifier", "менеджер Telegram-уведомлений"],
+  ["electron/notifications.js", "sanitizeError", "маскирование Telegram-токена в ошибках"],
+  ["electron/notifications.js", "quietState", "тихие часы уведомлений"],
+  ["electron/service.js", "notify:test", "честная проверка уведомлений"],
+  ["electron/main.js", "createTelegramNotifier", "Telegram подключён в Electron"],
+  ["tools/web-server.js", "telegramNotifier", "резервные копии и Telegram в защищённой веб-версии"],
+  ["src/renderer/js/views/settings.js", "backup-export", "раздел резервных копий в настройках"],
+  ["src/renderer/js/views/settings.js", "tg-test", "раздел Telegram в настройках"],
+  ["package.json", "backup-flow.js", "прогон резервных копий в npm test"],
+  ["package.json", "notify-flow.js", "прогон уведомлений в npm test"],
+  ["docs/API.md", "26. Резервные копии", "контракты резервных копий и уведомлений"],
+
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */
@@ -192,6 +218,9 @@ const REQUIRED_FILES = [
   'tools/checks/engine-unit.js', 'tools/checks/stocks-flow.js',
   'tools/checks/updater-flow.js', 'src/renderer/js/rules.js',
   'electron/updater.js', 'docs/BUILD.md', 'build/icon.ico',
+  'build/icon.png', 'build/icon.svg',
+  'electron/backup.js', 'electron/notifications.js',
+  'tools/checks/backup-flow.js', 'tools/checks/notify-flow.js',
   'Запуск (Windows).bat', 'Запуск в браузере (демо).bat',
   'Собрать EXE (Windows).bat', 'Опубликовать на GitHub (Windows).bat',
   'Веб-версия (доступ из сети).bat'

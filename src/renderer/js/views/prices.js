@@ -558,21 +558,22 @@ Views.prices = {
 
   showResult(res, sent) {
     const details = res.details || [];
-    const ok = details.filter((d) => d.status === 3).length;
-    const failed = details.filter((d) => d.status && d.status !== 3);
+    const ok = details.filter((d) => d.status === 3 && !d.error && !d.errorText).length;
+    const failed = details.filter((d) => d.error || d.errorText || (d.status && d.status !== 3));
+    const uploaded = res.sent !== undefined ? Number(res.sent) : sent;
     const task = res.task || null;
     UI.modal({
       title: 'Результат загрузки цен',
       content: `
         <div class="grid g4" style="margin-bottom:12px">
-          <div class="card stat"><span class="label">Отправлено</span><span class="value">${sent}</span></div>
-          <div class="card stat"><span class="label">Принято WB</span><span class="value pos">${ok || sent}</span></div>
+          <div class="card stat"><span class="label">Отправлено</span><span class="value">${uploaded}</span></div>
+          <div class="card stat"><span class="label">Без ошибок WB</span><span class="value pos">${ok}</span>${!details.length && uploaded ? '<span class="hint">Задача принята, обработка ещё не подтверждена</span>' : ''}</div>
           <div class="card stat"><span class="label">С ошибками</span><span class="value ${failed.length ? 'neg' : 'pos'}">${failed.length}</span></div>
           <div class="card stat"><span class="label">Задача</span><span class="value">${task ? task.taskId : '—'}</span><span class="hint">${task ? task.statusText || '' : ''}</span></div>
         </div>
         ${(res.warnings && res.warnings.length) ? `<div class="alert warn" style="margin-bottom:10px"><b>Предупреждения (${res.warnings.length}):</b><br>${res.warnings.slice(0, 8).map((w) => U.esc(w.message)).join('<br>')}</div>` : ''}
-        ${failed.length ? `<h3>Ошибки по товарам</h3><table class="grid-table"><thead><tr><th>нм-код</th><th>Артикул</th><th>Статус</th><th>Ошибка</th></tr></thead>
-          <tbody>${failed.slice(0, 60).map((f) => `<tr><td>${f.nmID || ''}</td><td>${U.esc(f.vendorCode || '')}</td><td>${U.esc(f.statusText || f.status || '')}</td><td class="trunc">${U.esc(f.errorText || '')}</td></tr>`).join('')}</tbody></table>` : ''}
+        ${failed.length ? `<h3>Ошибки по товарам</h3><table class="grid-table"><thead><tr><th>нм-код / размер</th><th>Артикул</th><th>Статус</th><th>Ошибка</th></tr></thead>
+          <tbody>${failed.slice(0, 60).map((f) => `<tr><td>${f.nmID || ''}${f.sizeID ? ' / #' + Number(f.sizeID) : ''}</td><td>${U.esc(f.vendorCode || '')}</td><td>${U.esc(f.statusText || f.status || '')}</td><td class="trunc">${U.esc(f.errorText || f.error || '')}</td></tr>`).join('')}</tbody></table>` : ''}
         ${res.demo ? '<p class="hint">Демо-режим: изменения применены к локальным данным, в Wildberries ничего не отправлялось.</p>' : ''}
       `,
       buttons: [{ label: 'Готово', class: 'btn-primary' }]

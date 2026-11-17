@@ -1347,7 +1347,9 @@ function createService(store, emit, electron, integrations) {
         const old = current.get(Number(it.nmID));
         if (!old) continue;
         const oldSeller = old.price * (1 - old.discount / 100);
-        const newSeller = Number(it.price) * (1 - Number(it.discount) / 100);
+        const base = it.price === undefined ? Number(old.price) : Number(it.price);
+        const discount = it.discount === undefined ? Number(old.discount) : Number(it.discount);
+        const newSeller = base * (1 - discount / 100);
         if (oldSeller > 0 && newSeller < oldSeller / 3) {
           warnings.push({ nmID: it.nmID, type: 'quarantine', message: `Цена упадёт более чем в 3 раза (${Math.round(oldSeller)} → ${Math.round(newSeller)}) — WB отправит товар в карантин.` });
         }
@@ -1397,75 +1399,7 @@ function createService(store, emit, electron, integrations) {
       return Object.assign({ demo: false, warnings }, res);
     },
 
-    'wb:apply-size-prices': async (payload) => {
-      const items = (payload && payload.items) || [];
-      if (!items.length) throw new WBError('Нет размеров для изменения цены.', { code: 'EMPTY' });
-
-      // Размеры читаем из кэша товаров: проверяем, что sizeID принадлежит товару.
-      // Если кэш сбросили (отправка цены товара обнуляет cache.goods), берём snapshot,
-      // переданный отправителем.
-      const goodsForSizes = (cache.goods && cache.goods.items) || ((payload && payload.goods) || []);
-      const current = new Map(goodsForSizes.map((g) => [Number(g.nmID), g]));
-
-      // Защита от ошибок: чужой размер, неположительная цена и карантин цен по размеру
-      const warnings = [];
-      const invalid = new Set();
-      for (const it of items) {
-        const key = String(it.nmID) + ':' + String(it.sizeID);
-        const g = current.get(Number(it.nmID));
-        if (!g) {
-          warnings.push({ nmID: it.nmID, sizeID: it.sizeID, type: 'unknown-item', message: 'Товар ' + it.nmID + ' не найден — размер не отправлен.' });
-          invalid.add(key);
-          continue;
-        }
-        const size = (Array.isArray(g.sizes) ? g.sizes : []).find((s) => Number(s.sizeID) === Number(it.sizeID));
-        if (!size) {
-          warnings.push({ nmID: it.nmID, sizeID: it.sizeID, type: 'unknown-size',
-            message: 'Размер ' + it.sizeID + ' не найден у товара ' + it.nmID + ' — не отправлен.' });
-          invalid.add(key);
-          continue;
-        }
-        if (!(Number(it.price) > 0)) {
-          warnings.push({ nmID: it.nmID, sizeID: it.sizeID, type: 'bad-price',
-            message: 'Цена размера ' + it.sizeID + ' не положительна — не отправлен.' });
-          invalid.add(key);
-          continue;
-        }
-        const oldSeller = Number(size.price) * (1 - (Number(size.discount) || 0) / 100);
-        const newSeller = Number(it.price) * (1 - (Number(it.discount) || 0) / 100);
-        if (oldSeller > 0 && newSeller < oldSeller / 3) {
-          warnings.push({ nmID: it.nmID, sizeID: it.sizeID, type: 'quarantine',
-            message: 'Цена размера ' + it.sizeID + ' упадёт более чем в 3 раза (' + Math.round(oldSeller) + ' → ' + Math.round(newSeller) + ') — WB отправит её в карантин.' });
-        }
-      }
-      // чужой размер / некорректная цена не отправляются (карантин — отправляется, помечается)
-      const toSend = items.filter((it) => !invalid.has(String(it.nmID) + ':' + String(it.sizeID)));
-
-      if (isDemo()) {
-        const res = await getDemo().applySizePrices(toSend);
-        cache.goods = null;
-        return Object.assign({ demo: true, warnings }, res);
-      }
-
-      const res = await getClient().applySizePrices(toSend);
-      cache.goods = null;
-      cache.goodsAt = 0;
-
-      // сохраним задачу в историю
-      const tasks = store.loadTasks();
-      tasks.unshift({
-        taskId: Date.now(),
-        createdAt: new Date().toISOString(),
-        total: toSend.length,
-        ok: (res.details || []).filter((d) => d.status === 3).length,
-        failed: (res.details || []).filter((d) => d.status !== 3 && !d.error).length,
-        details: res.details || [],
-        warnings
-      });
-      store.saveTasks(tasks);
-
-      return Object.assign({ demo: false, warnings }, res);
-    },
+    'wb:apply-size-prices': async (payload) => applySizePrices(payload),
 
     'wb:upload-states': async () => {
       if (isDemo()) return getDemo().uploadStates();
@@ -3260,7 +3194,7 @@ function createService(store, emit, electron, integrations) {
           sizePriceMin: Number(item.sizePriceMin) || 0,
           sizePriceMax: Number(item.sizePriceMax) || 0,
           // режим цен по размерам (none/sync/manual) — из настроек товара/общих
-          sizePriceMode: normalizeSizePriceMode(merged.sizePriceMode),
+          sizePriceMode: normalizeSizePriceMode(merged.sizePriceMode, cfg.sizePriceMode),
           discount: Number(item.discount),
           sellerPrice: seller,
           buyerPrice: seller * (1 - Number(p.sppPct || 0) / 100),
@@ -3320,9 +3254,24 @@ function createService(store, emit, electron, integrations) {
     const startedAt = Date.now();
     try {
       const rows = await buildContexts(opts);
+      const goodsByNm = new Map(((cache.goods && cache.goods.items) || []).map((g) => [Number(g.nmID), g]));
       const results = rows.map((r) => {
-        try { return RP.computeItem(r.ctx, r.cfg, r.itemCfg, EC); }
-        catch (e) { return { nmID: r.ctx.nmID, vendorCode: r.ctx.vendorCode, error: e.message }; }
+        try {
+          const result = RP.computeItem(r.ctx, r.cfg, r.itemCfg, EC);
+          const good = goodsByNm.get(Number(r.ctx.nmID));
+          const mode = result.context.sizePriceMode;
+          // Правка только размера тоже является предложением, даже если минимальная
+          // цена товара и скидка не изменились. Без этого ручные цены не отправлялись.
+          const manual = r.itemCfg.sizePrices || {};
+          result.sizeChanges = good && good.editableSizePrice && mode !== 'none'
+            ? (good.sizes || []).filter((size) => {
+              const price = mode === 'sync' ? result.proposed.basePrice : manual[String(size.sizeID)];
+              return Number.isFinite(Number(price)) && Number(price) > 0 &&
+                Math.round(Number(price)) !== Math.round(Number(size.price));
+            }).length : 0;
+          if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
+          return result;
+        } catch (e) { return { nmID: r.ctx.nmID, vendorCode: r.ctx.vendorCode, error: e.message }; }
       });
       const summary = RP.summarize(results);
       const run = {
@@ -3458,7 +3407,7 @@ function createService(store, emit, electron, integrations) {
         const mpSeller = r.current ? r.current.sellerPrice : 0;
         const mySeller = Math.round(Number(d.basePrice) * (1 - Number(d.discount || 0) / 100) * 100) / 100;
         // отправлять нужно только если наша цена действительно отличается от цены МП
-        if (Math.abs(mySeller - mpSeller) > 0.5) {
+        if (Math.abs(mySeller - mpSeller) > 0.5 || r.sizeChanges > 0) {
           r.manualDraft = { basePrice: Number(d.basePrice), discount: Number(d.discount || 0), sellerPrice: mySeller, note: d.note || '' };
           ready.push(r);
         }
@@ -3510,6 +3459,11 @@ function createService(store, emit, electron, integrations) {
         // из кэша товаров при отправке, не дублируется в предложении.
         sizePriceMode: normalizeSizePriceMode((r.context || {}).sizePriceMode),
         sizePrices: (itemConfigsNow[String(r.nmID)] || {}).sizePrices || {},
+        // Сверяем все размеры, а не только минимальную цену: иначе чужая правка
+        // более дорогого размера оставалась бы незамеченной при отправке.
+        currentSizePrices: Object.fromEntries(((((cache.goods && cache.goods.items) || [])
+          .find((g) => Number(g.nmID) === Number(r.nmID)) || {}).sizes || [])
+          .map((size) => [String(size.sizeID), Number(size.price)])),
         costCurrency: (r.cost && r.cost.currency) || 'RUB',
         costRub: (r.cost && r.cost.rub) || 0
       }));
@@ -3563,6 +3517,15 @@ function createService(store, emit, electron, integrations) {
     for (const it of items) {
       const cur = byNm.get(Number(it.nmID));
       if (!cur) { stale.push(Object.assign({}, it, { reason: 'товар не найден в кабинете' })); continue; }
+      const sizeSnapshot = it.currentSizePrices;
+      if (sizeSnapshot && Object.keys(sizeSnapshot).length) {
+        const currentSizes = new Map((cur.sizes || []).map((size) => [String(size.sizeID), Number(size.price)]));
+        if (currentSizes.size !== Object.keys(sizeSnapshot).length || Object.entries(sizeSnapshot)
+          .some(([sid, price]) => !currentSizes.has(sid) || Math.abs(currentSizes.get(sid) - Number(price)) > 0.5)) {
+          stale.push(Object.assign({}, it, { reason: 'цены или состав размеров в WB изменились — нужен пересчёт' }));
+          continue;
+        }
+      }
       const curSeller = Math.round(Number(cur.price) * (1 - Number(cur.discount) / 100) * 100) / 100;
       const wasSeller = Math.round(Number(it.currentSellerPrice) * 100) / 100;
       if (Math.abs(curSeller - wasSeller) > 0.51) {
@@ -3629,75 +3592,127 @@ function createService(store, emit, electron, integrations) {
   }
 
   /** Привести режим цен по размерам к допустимому значению (none/sync/manual). */
-  function normalizeSizePriceMode(mode) {
-    return (mode === 'sync' || mode === 'manual') ? mode : 'none';
+  function normalizeSizePriceMode(mode, fallback) {
+    if (['none', 'sync', 'manual'].includes(mode)) return mode;
+    return ['none', 'sync', 'manual'].includes(fallback) ? fallback : 'none';
+  }
+
+  /** Размеры валидируются только по данным сервера, а не по payload.goods из браузера. */
+  async function applySizePrices(payload, trustedGoods) {
+    const input = payload && payload.items;
+    if (!Array.isArray(input) || !input.length) throw new WBError('Нет размеров для изменения цены.', { code: 'EMPTY' });
+    const goods = trustedGoods || (await handlers['wb:goods']({})).items || [];
+    const byNm = new Map(goods.map((g) => [Number(g.nmID), g]));
+    const warnings = [];
+    const valid = new Map();
+    let skippedUnchanged = 0;
+    const blockQuarantine = repricerCfg().limits.blockQuarantine !== false;
+    for (const it of input) {
+      if (!it || typeof it !== 'object') continue;
+      const nmID = Number(it.nmID), sizeID = Number(it.sizeID);
+      const good = byNm.get(nmID);
+      const size = good && (good.sizes || []).find((s) => Number(s.sizeID) === sizeID);
+      let type = '', message = '';
+      const price = Math.round(Number(it.price));
+      if (!good) { type = 'unknown-item'; message = 'Товар не найден в загруженном кабинете.'; }
+      else if (!size || !Number.isSafeInteger(sizeID) || sizeID <= 0) { type = 'unknown-size'; message = 'Размер не принадлежит товару.'; }
+      else if (!good.editableSizePrice) { type = 'not-size-editable'; message = 'WB не разрешает разные цены размеров у этого товара.'; }
+      else if ((typeof it.price !== 'number' && typeof it.price !== 'string') || String(it.price).trim() === '' ||
+        !Number.isSafeInteger(price) || price < 1) { type = 'bad-price'; message = 'Цена размера должна быть конечным числом не меньше 1 ₽.'; }
+      if (type) { warnings.push({ nmID, sizeID, type, message: message + ' Размер ' + sizeID + ' не отправлен.' }); continue; }
+      if (price === Math.round(Number(size.price))) { skippedUnchanged++; continue; }
+      const discount = Number(good.discount) || 0;
+      const oldSeller = Number(size.price) * (1 - discount / 100);
+      const newSeller = price * (1 - discount / 100);
+      if (oldSeller > 0 && newSeller < oldSeller / 3) {
+        warnings.push({ nmID, sizeID, type: 'quarantine',
+          message: 'Цена размера ' + sizeID + ' снизится более чем в 3 раза (' + Math.round(oldSeller) + ' → ' + Math.round(newSeller) + ' ₽).' +
+            (blockQuarantine ? ' Отправка заблокирована защитой приложения.' : ' Проверьте цену: защита приложения отключена.') });
+        if (blockQuarantine) continue;
+      }
+      valid.set(nmID + ':' + sizeID, { nmID, sizeID, price });
+    }
+    const items = Array.from(valid.values());
+    if (!items.length) return { demo: isDemo(), uploaded: 0, batches: [], details: [], warnings, skippedUnchanged, sentItems: [] };
+    let res;
+    try {
+      res = await (isDemo() ? getDemo() : getClient()).applySizePrices(items);
+    } catch (error) {
+      if (!isDemo()) notify('app-event', { type: 'sendError', failed: items.length, message: error.message || String(error), source: payload.source || 'size-prices' });
+      throw error;
+    } finally {
+      // Даже при сетевой ошибке часть пачек могла быть принята WB.
+      cache.goods = null; cache.goodsAt = 0;
+    }
+    const details = res.details || [];
+    const failed = details.filter((d) => d.error || d.errorText || (d.status && d.status !== 3));
+    const succeeded = details.filter((d) => d.status === 3 && !d.error && !d.errorText);
+    if (!isDemo()) {
+      const tasks = store.loadTasks();
+      tasks.unshift({ taskId: Date.now(), createdAt: new Date().toISOString(), kind: 'size-prices',
+        total: items.length, ok: succeeded.length, failed: failed.length, details, warnings });
+      store.saveTasks(tasks);
+      if (failed.length) notify('app-event', { type: 'sendError', failed: failed.length, message: failed[0].error || failed[0].errorText || 'WB не обработал часть размеров.', source: payload.source || 'size-prices' });
+      if (succeeded.length) notify('app-event', { type: 'sendSuccess', count: succeeded.length, source: payload.source || 'size-prices' });
+    }
+    return Object.assign({}, res, { demo: isDemo(), warnings, skippedUnchanged, sentItems: items });
   }
 
   async function sendPrices(results, source) {
     const toSend = (results || []).filter((r) => r.needSend && !r.error && r.proposed);
     if (!toSend.length) return { sent: 0, skipped: (results || []).length };
-    const items = toSend.map((r) => ({ nmID: r.nmID, price: Math.round(r.proposed.basePrice), discount: Math.round(r.proposed.discount) }));
-    const goodsSnap = (cache.goods && cache.goods.items) || [];
+    const goodsSnap = ((await handlers['wb:goods']({})).items || []);
     const goodsByNm = new Map(goodsSnap.map((g) => [Number(g.nmID), g]));
     const itemConfigsNow = store.loadItemConfigs() || {};
-    const res = await handlers['wb:apply-prices']({ items, source: source || 'repricer' });
-
-    // Цены по размерам: по режиму товара собираем набор размеров для отправки.
-    const sizesOf = (r) => {
-      const g = goodsByNm.get(Number(r.nmID));
-      return (g && Array.isArray(g.sizes)) ? g.sizes : (r.sizes || []);
-    };
-    const modeOf = (r) => normalizeSizePriceMode(
-      r.sizePriceMode || (r.context && r.context.sizePriceMode) ||
-      (itemConfigsNow[String(r.nmID)] || {}).sizePriceMode);
-    const sizePricesOf = (r) => r.sizePrices || (itemConfigsNow[String(r.nmID)] || {}).sizePrices || {};
-
-    const sizeRows = [];
-    const allWarnings = (res && res.warnings) || [];
+    const cfg = repricerCfg();
+    const items = [], sizeRows = [], allWarnings = [];
+    // Сначала строим план целиком. Для sync/manual никогда не передаём общую
+    // базовую цену: иначе WB затрёт цены размеров, которые пользователь не менял.
     for (const r of toSend) {
-      const mode = modeOf(r);
-      if (mode === 'none') {
-        // размеры не трогаются: цена уходит ценой товара. Но если цены разные —
-        // предупреждение, что отправка сделает их все одинаковыми.
-        const sizes = sizesOf(r);
-        const live = sizes.map((s) => Number(s.price) || 0).filter((p) => p > 0);
-        const uniq = new Set(live.map((p) => Math.round(p * 100))).size;
-        if (uniq > 1) {
-          allWarnings.push({ nmID: r.nmID, type: 'size-equalize',
-            message: 'У товара ' + r.nmID + ' разные цены по размерам, а режим «не трогать размеры» — отправка цены товара сделает цену всех размеров одинаковой.' });
+      const good = goodsByNm.get(Number(r.nmID));
+      if (!good) { allWarnings.push({ nmID: r.nmID, type: 'unknown-item', message: 'Товар не найден в кабинете, отправка пропущена.' }); continue; }
+      const ic = itemConfigsNow[String(r.nmID)] || {};
+      const mode = normalizeSizePriceMode(r.sizePriceMode || (r.context || {}).sizePriceMode || ic.sizePriceMode,
+        (cfg.defaults || {}).sizePriceMode || cfg.sizePriceMode);
+      const targetPrice = Math.round(Number(r.proposed.basePrice));
+      const targetDiscount = Math.round(Number(r.proposed.discount));
+      const sizes = good.sizes || [];
+      if (good.editableSizePrice && mode !== 'none') {
+        // WB задаёт скидку только на товар. Без price эта операция сохраняет
+        // текущие базовые цены размеров, в том числе не затронутых ручной правкой.
+        if (targetDiscount !== Math.round(Number(good.discount))) items.push({ nmID: r.nmID, discount: targetDiscount });
+        if (mode === 'sync') {
+          sizes.forEach((size) => sizeRows.push({ nmID: r.nmID, sizeID: size.sizeID, price: targetPrice }));
+        } else {
+          const manual = r.sizePrices || ic.sizePrices || {};
+          Object.entries(manual).forEach(([sizeID, price]) => sizeRows.push({ nmID: r.nmID, sizeID: Number(sizeID), price }));
         }
-        continue;
-      }
-      const sizes = sizesOf(r);
-      if (!sizes.length) continue;
-      if (mode === 'sync') {
-        // все размеры получают цену товара; отправляются только ещё не совпадающие
-        const targetPrice = Math.round(r.proposed.basePrice);
-        sizes.forEach((s) => {
-          const cur = Math.round(Number(s.price) || 0);
-          if (cur !== targetPrice) {
-            sizeRows.push({ nmID: r.nmID, sizeID: Number(s.sizeID), price: targetPrice, discount: Math.round(r.proposed.discount) });
-          }
-        });
       } else {
-        // manual: только изменённые ручные цены
-        const mp = sizePricesOf(r);
-        Object.keys(mp).forEach((sid) => {
-          const price = Math.round(Number(mp[sid]) || 0);
-          if (price > 0) {
-            sizeRows.push({ nmID: r.nmID, sizeID: Number(sid), price, discount: Math.round(r.proposed.discount) });
-          }
-        });
+        const differentSizes = new Set(sizes.map((size) => Math.round(Number(size.price))).filter((price) => price > 0)).size > 1;
+        const changesBase = targetPrice !== Math.round(Number(good.price));
+        if (differentSizes && changesBase) {
+          allWarnings.push({ nmID: r.nmID, type: 'size-equalize', message: 'У товара ' + r.nmID + ' разные цены размеров — отправка общей базовой цены сделает их одинаковыми.' });
+          if (source === 'repricer-auto') throw new WBError('Автоотправка остановлена: у товара ' + r.nmID + ' разные цены размеров. Выберите sync/manual или подтвердите общую цену вручную в репрайсере.', { code: 'SIZE_EQUALIZE_CONFIRM' });
+        }
+        // Изменение только скидки не должно случайно выровнять разные цены.
+        items.push(changesBase ? { nmID: r.nmID, price: targetPrice, discount: targetDiscount }
+          : { nmID: r.nmID, discount: targetDiscount });
       }
     }
+    const empty = () => ({ uploaded: 0, batches: [], details: [], warnings: [], demo: isDemo() });
+    const res = items.length ? await handlers['wb:apply-prices']({ items, source: source || 'repricer' }) : empty();
+    const sizeRes = sizeRows.length ? await applySizePrices({ items: sizeRows, source: source || 'repricer' }, goodsSnap) : empty();
+    allWarnings.push(...(res.warnings || []), ...(sizeRes.warnings || []));
+    const details = (res.details || []).concat(sizeRes.details || []);
+    const sentIDs = new Set(items.map((item) => Number(item.nmID)));
+    // size-метод может отфильтровать неизменённые/чужие/небезопасные размеры.
+    (sizeRes.sentItems || []).forEach((row) => sentIDs.add(Number(row.nmID)));
+    const sentResults = toSend.filter((r) => sentIDs.has(Number(r.nmID)));
 
-    let sizeRes = { uploaded: 0, batches: [], details: [] };
-    if (sizeRows.length) {
-      sizeRes = await handlers['wb:apply-size-prices']({ items: sizeRows, goods: goodsSnap, source: source || 'repricer' });
-    }
-
-    store.appendPriceHistory(toSend.map((r) => ({
+    store.appendPriceHistory(sentResults.map((r) => ({
       nmID: r.nmID,
+      sizePrices: Object.fromEntries((sizeRes.sentItems || []).filter((row) => Number(row.nmID) === Number(r.nmID))
+        .map((row) => [String(row.sizeID), row.price])),
       basePrice: r.proposed.basePrice,
       discount: r.proposed.discount,
       sellerPrice: r.proposed.sellerPrice,
@@ -3705,7 +3720,7 @@ function createService(store, emit, electron, integrations) {
     })));
 
     // история пересчёта по артикулу: что реально ушло в WB (фаза 'send')
-    store.appendRecalcHistory(toSend.map((r) => ({
+    store.appendRecalcHistory(sentResults.map((r) => ({
       nmID: r.nmID,
       phase: 'send',
       basePrice: r.proposed.basePrice,
@@ -3722,15 +3737,19 @@ function createService(store, emit, electron, integrations) {
       id: Date.now(),
       at: new Date().toISOString(),
       mode: source || 'repricer',
-      sent: items.length,
-      ok: (res.details || []).filter((x) => x.status === 3).length,
-      failed: (res.details || []).filter((x) => x.status && x.status !== 3).length,
+      sent: sentIDs.size,
+      sizeSent: sizeRes.uploaded || 0,
+      ok: details.filter((x) => x.status === 3).length,
+      failed: details.filter((x) => x.error || x.errorText || (x.status && x.status !== 3)).length,
       demo: isDemo(),
       summary: RP.summarize(results)
     });
     store.saveRuns(runs);
-    notify('repricer', { type: 'sent', count: items.length, at: new Date().toISOString() });
-    return Object.assign({}, res, { sent: items.length, toSendCount: toSend.length, sizeSent: sizeRows.length, warnings: allWarnings });
+    notify('repricer', { type: 'sent', count: sentIDs.size, at: new Date().toISOString() });
+    return Object.assign({}, res, { sent: sentIDs.size, toSendCount: toSend.length,
+      uploaded: Number(res.uploaded || 0) + Number(sizeRes.uploaded || 0),
+      sizeSent: sizeRes.uploaded || 0, details, batches: (res.batches || []).concat(sizeRes.batches || []),
+      warnings: allWarnings });
   }
 
   /**

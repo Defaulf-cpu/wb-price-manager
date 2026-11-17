@@ -2160,6 +2160,46 @@ async function run() {
     await wait(250);
   }
 
+  // ── F: панель размеров, наследование режима и честные результаты ──
+  let fView = Object.assign(Object.create(rpD), {
+    container: null,
+    pendingEdits: new window.Map(),
+    rstate: { config: { sizePriceMode: 'sync' }, itemConfigs: {} },
+    itemsByNm: new window.Map([['7007', { nmID: 7007, editableSizePrice: true, sizes: [
+      { sizeID: 701, techSizeName: 'S', price: 900, discountedPrice: 810 },
+      { sizeID: 702, techSizeName: 'M', price: 1000, discountedPrice: 900 }
+    ] }]])
+  });
+  const fRow = { nmID: 7007, title: 'Тест размеров', proposed: { basePrice: 950 } };
+  check('F: ячейка размеров наследует общий режим sync', /синхрон/.test(fView.sizesCellHtml(fRow)));
+  fView.openSizesModal(fRow);
+  let fModal = doc.querySelector('#modal-root .modal:last-child');
+  check('F: таблица размеров открывается с двумя строками', !!fModal && fModal.querySelectorAll('tbody tr').length === 2);
+  let fSelect = fModal && fModal.querySelector('.rp-size-mode');
+  if (fSelect) { fSelect.value = 'manual'; fSelect.onchange(); }
+  fModal = doc.querySelector('#modal-root .modal:last-child');
+  check('F: смена режима сразу включает ручные поля без закрытия и повторного открытия',
+    !!fModal && fModal.querySelectorAll('.rp-size-price').length === 2);
+  let fPrice = fModal && fModal.querySelector('.rp-size-price[data-size="702"]');
+  if (fPrice) { fPrice.value = '1050'; fPrice.onchange(); }
+  check('F: ручная цена попадает в общую очередь несохранённых правок',
+    ((fView.pendingEdits.get('7007') || {}).config || {}).sizePrices['702'] === 1050);
+  fView.stageSizePrice('7007', '702', 'Infinity');
+  check('F: некорректная цена не стирает корректную правку', fView.rowConfig('7007').sizePrices['702'] === 1050);
+  fView.stageSizeMode('7007', 'none');
+  check('F: индивидуальный none не превращается в наследование общего sync', fView.sizeMode('7007') === 'none');
+  fView.stageSizeMode('7007', '');
+  check('F: выбор общих параметров возвращает режим sync', fView.sizeMode('7007') === 'sync');
+  if (fModal) fModal.querySelector('.modal-close').click();
+
+  window.Views.prices.showResult({ sent: 0, details: [{ nmID: 7007, sizeID: 702, status: 6, errorText: 'Ошибка размера' }] }, 2);
+  fModal = doc.querySelector('#modal-root .modal:last-child');
+  let fStats = fModal ? Array.from(fModal.querySelectorAll('.stat .value')).map((el) => el.textContent.trim()) : [];
+  check('F: окно результатов не считает ошибки успешной загрузкой', fStats[0] === '0' && fStats[1] === '0' && fStats[2] === '1');
+  check('F: в ошибке виден sizeID, а не только товар', !!fModal && /7007 \/ #702/.test(fModal.textContent));
+  if (fModal) fModal.querySelector('.modal-close').click();
+  fView = null; fModal = null; fSelect = null; fPrice = null; fStats = null;
+
   // ── массовая панель: отправка и метка сразу группе товаров ──
   if (dRow) {
     rpD.selection.add(dRow.nmID);
@@ -2177,6 +2217,7 @@ async function run() {
   rpD.tab = 'params';
   rpD.draw();
   await wait(1000);
+  check('F: общий режим цен размеров доступен в параметрах репрайсера', !!doc.querySelector('#pm-sizemode'));
   check('D: курсы валют и название магазина правятся на вкладке «Параметры»',
     !!doc.querySelector('#pm-rates [data-rate="CNY"]') && !!doc.querySelector('#pm-shopname'));
   let cnyInp = doc.querySelector('#pm-rates [data-rate="CNY"]');

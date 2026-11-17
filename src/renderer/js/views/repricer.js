@@ -1033,7 +1033,7 @@ Views.repricer = {
     const min = U.num(c.sizePriceMin);
     const max = U.num(c.sizePriceMax);
     const spread = max > min ? ` (от ${U.money(min)} до ${U.money(max)})` : '';
-    const title = `WB не отдаёт цену товара целиком: цены заданы по размерам. В расчёт взята минимальная цена размера${spread}. Отправка изменит цену всех размеров — поразмерная отправка делается отдельным режимом.`;
+    const title = `WB не отдаёт цену товара целиком: цены заданы по размерам. В расчёт взята минимальная цена размера${spread}. Режим отправки выбирается в колонке «Размеры»: ручной режим сохраняет незатронутые размеры; смена общей базовой цены может их выровнять.`;
     return `<div class="tiny"><span class="rp-sizeprice" title="${U.esc(title)}">${UI.badge('цена по размерам', 'warn')}</span></div>`;
   },
 
@@ -1047,6 +1047,15 @@ Views.repricer = {
    *  - sync   — все размеры получают цену товара;
    *  - manual — цены размеров правятся вручную в таблице (openSizesModal).
    */
+  /** Индивидуальное значение, включая явное none, важнее общих параметров. */
+  sizeMode(nmID) {
+    const value = this.rowConfig(nmID).sizePriceMode;
+    if (['none', 'sync', 'manual'].includes(value)) return value;
+    const config = (this.rstate || {}).config || {};
+    const fallback = (config.defaults || {}).sizePriceMode || config.sizePriceMode;
+    return ['none', 'sync', 'manual'].includes(fallback) ? fallback : 'none';
+  },
+
   sizesCellHtml(r) {
     const item = this.itemsByNm ? this.itemsByNm.get(String(r.nmID)) : null;
     const rawSizes = (item && Array.isArray(item.sizes)) ? item.sizes : ((r.context || {}).sizes || []);
@@ -1057,8 +1066,9 @@ Views.repricer = {
       discountedPrice: Number(s.discountedPrice || 0)
     }));
     if (!sizes.length) return '<span class="muted tiny">нет размеров</span>';
+    if (item && !item.editableSizePrice) return '<span class="muted tiny">единая цена · ' + sizes.length + ' разм.</span>';
     const cfg = this.rowConfig(r.nmID);
-    const mode = cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual' ? cfg.sizePriceMode : 'none';
+    const mode = this.sizeMode(r.nmID);
     const modeLabel = mode === 'sync' ? 'синхрон' : (mode === 'manual' ? 'ручная' : 'не трогать');
 
     // предупреждение: разные цены по размерам + режим none — отправка сделает их одинаковой
@@ -1098,11 +1108,13 @@ Views.repricer = {
       discountedPrice: Number(s.discountedPrice || 0)
     }));
     if (!sizes.length) { App.toast('У товара нет размеров', 'warn'); return; }
+    if (item && !item.editableSizePrice) { App.toast('WB не разрешает разные цены размеров у этого товара', 'warn'); return; }
     const cfg = this.rowConfig(r.nmID);
-    const mode = cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual' ? cfg.sizePriceMode : 'none';
+    const mode = this.sizeMode(r.nmID);
     const manual = cfg.sizePrices || {};
     const targetPrice = U.num(r.proposed && r.proposed.basePrice);
-    const opt = (v, label) => `<option value="${v}" ${mode === v ? 'selected' : ''}>${label}</option>`;
+    const selectedMode = ['none', 'sync', 'manual'].includes(cfg.sizePriceMode) ? cfg.sizePriceMode : '';
+    const opt = (v, label) => `<option value="${v}" ${selectedMode === v ? 'selected' : ''}>${label}</option>`;
     const live = sizes.map((s) => U.num(s.price)).filter((p) => p > 0);
     const uniq = new Set(live.map((p) => Math.round(p * 100))).size;
     const warnEqual = mode === 'none' && uniq > 1;
@@ -1128,6 +1140,7 @@ Views.repricer = {
       <div class="row wrap" style="gap:8px;margin-bottom:8px">
         <label class="field" style="margin:0"><b>Режим цен по размерам</b>
           <select class="rp-size-mode" data-nm="${r.nmID}" style="width:180px">
+            ${opt('', 'по общим параметрам (' + mode + ')')}
             ${opt('none', 'не трогать размеры')}${opt('sync', 'синхрон (цена товара)')}${opt('manual', 'ручная правка')}
           </select>
         </label>
@@ -1140,6 +1153,7 @@ Views.repricer = {
         ${mode === 'none' ? 'Размеры не трогаются: цена уходит ценой товара целиком.' : ''}
         ${mode === 'sync' ? `Все размеры получат цену товара (${U.money(targetPrice)}).` : ''}
         ${mode === 'manual' ? 'Правьте «новую цену» — отправятся только изменившиеся размеры.' : ''}
+        Скидка задаётся на товар целиком, а не на отдельный размер.
         Правки сохраняются кнопкой «Сохранить» внизу таблицы репрайсера.
       </p>`;
 
@@ -1152,7 +1166,11 @@ Views.repricer = {
     const root = api && api.root;
     if (root) {
       root.querySelectorAll('.rp-size-mode').forEach((sel) => {
-        sel.onchange = () => this.stageSizeMode(sel.getAttribute('data-nm'), sel.value);
+        sel.onchange = () => {
+          this.stageSizeMode(sel.getAttribute('data-nm'), sel.value);
+          api.close();
+          this.openSizesModal(r); // сразу показать/скрыть поля ручных цен
+        };
       });
       root.querySelectorAll('.rp-size-price').forEach((inp) => {
         inp.onclick = (e) => e.stopPropagation();
@@ -1161,9 +1179,9 @@ Views.repricer = {
     }
   },
 
-  /** Переключить режим цен по размерам (none — убрать, чтобы жить по глобальной настройке). */
+  /** Пустое значение — общие параметры; none — явный индивидуальный запрет. */
   stageSizeMode(nmID, mode) {
-    const m = (mode === 'sync' || mode === 'manual') ? mode : null;
+    const m = ['none', 'sync', 'manual'].includes(mode) ? mode : null;
     this.stageEdit(String(nmID), 'config', { sizePriceMode: m });
   },
 
@@ -1176,8 +1194,13 @@ Views.repricer = {
     const cfg = this.rowConfig(nmID);
     const base = Object.assign({}, cfg.sizePrices || {});
     const sid = String(sizeID);
-    if (Number(price) > 0) base[sid] = Math.round(Number(price));
-    else delete base[sid];
+    if (String(price).trim() === '') delete base[sid];
+    else if (Number.isSafeInteger(Math.round(Number(price))) && Math.round(Number(price)) >= 1) {
+      base[sid] = Math.round(Number(price));
+    } else {
+      App.toast('Цена размера должна быть конечным числом не меньше 1 ₽', 'warn');
+      return false;
+    }
     if (!Object.keys(base).length) this.stageEdit(nm, 'config', { sizePrices: null });
     else this.stageEdit(nm, 'config', { sizePrices: base });
   },
@@ -2197,7 +2220,7 @@ Views.repricer = {
     // отправка цены товара сделает цену всех размеров одинаковой
     const sizeEqualize = list.filter((r) => {
       const cfg = this.rowConfig(r.nmID);
-      if (cfg.sizePriceMode === 'sync' || cfg.sizePriceMode === 'manual') return false;
+      if (this.sizeMode(r.nmID) !== 'none' || Math.round(r.proposed.basePrice) === Math.round(r.current.basePrice)) return false;
       const item = this.itemsByNm ? this.itemsByNm.get(String(r.nmID)) : null;
       const sizes = (item && Array.isArray(item.sizes)) ? item.sizes : [];
       const live = sizes.map((s) => U.num(s.price)).filter((p) => p > 0);
@@ -2217,7 +2240,7 @@ Views.repricer = {
        <p class="hint" style="margin-top:10px">
          Лимит изменения за одно обновление: <b>${U.pct(rs.config.limits.maxChangePerUpdatePct, 0)}</b>
          ${rs.config.limits.maxChangePerDayPct ? ', за сутки: <b>' + U.pct(rs.config.limits.maxChangePerDayPct, 0) + '</b>' : ''}.
-         ${rs.demo ? '<br><b>Демо-режим:</b> цены изменятся только в приложении.' : 'Отправка идёт через POST /api/v2/upload/task.'}
+         ${rs.demo ? '<br><b>Демо-режим:</b> цены изменятся только в приложении.' : 'Отправка: цены товара — /upload/task, цены размеров — /upload/task/size.'}
        </p>`,
       async () => {
         const btn = UI.modal({ title: 'Отправка цен', size: 'sm', dismissable: false, content: UI.loading(`Отправляем ${list.length} цен в WB…`) });
@@ -3611,6 +3634,13 @@ Views.repricer = {
                 </select>
               </label>
               <label class="field">Скидка WB-кошелька, %<input type="number" class="num" id="pm-wallet" value="${c.priceEdit.walletPct}" step="0.5" /></label>
+              <label class="field">Цены размеров по умолчанию
+                <select id="pm-sizemode">
+                  ${opt('none', c.sizePriceMode, 'Не трогать (общая цена с подтверждением)')}
+                  ${opt('sync', c.sizePriceMode, 'Синхрон — одна цена всем размерам')}
+                  ${opt('manual', c.sizePriceMode, 'Ручные цены размеров')}
+                </select>
+              </label>
             </div>
 
             <div class="alert info" style="margin-top:12px">
@@ -3753,6 +3783,7 @@ Views.repricer = {
     host.querySelector('#pm-save').onclick = async () => {
       const patch = {
         marginMode: host.querySelector('#pm-marginmode').value,
+        sizePriceMode: host.querySelector('#pm-sizemode').value,
         priceEdit: {
           canChangeBasePrice: host.querySelector('#pm-baseprice').value,
           canCancelDiscount: host.querySelector('#pm-canceldisc').checked,

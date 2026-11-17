@@ -707,11 +707,13 @@ class WBClient {
 
     const batches = [];
     for (let i = 0; i < items.length; i += MAX_ITEMS_PER_PRICE_TASK) {
-      const chunk = items.slice(i, i + MAX_ITEMS_PER_PRICE_TASK).map((it) => ({
-        nmID: Number(it.nmID),
-        price: Math.round(Number(it.price)),
-        discount: Math.round(Number(it.discount))
-      }));
+      const chunk = items.slice(i, i + MAX_ITEMS_PER_PRICE_TASK).map((it) => {
+        const row = { nmID: Number(it.nmID) };
+        // Скидка общая для товара: запрос без price сохраняет вилку цен размеров.
+        if (it.price !== undefined) row.price = Math.round(Number(it.price));
+        if (it.discount !== undefined) row.discount = Math.round(Number(it.discount));
+        return row;
+      });
       const response = await this.request('prices', 'POST', '/api/v2/upload/task', { body: { data: chunk } });
       batches.push({ batch: i / MAX_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
     }
@@ -736,8 +738,8 @@ class WBClient {
       const chunk = items.slice(i, i + MAX_SIZE_ITEMS_PER_PRICE_TASK).map((it) => ({
         nmID: Number(it.nmID),
         sizeID: Number(it.sizeID),
-        price: Math.round(Number(it.price)),
-        discount: Math.round(Number(it.discount))
+        // У size-метода нет поля discount: скидка задаётся на товар целиком.
+        price: Math.round(Number(it.price))
       }));
       const response = await this.request('prices', 'POST', '/api/v2/upload/task/size', { body: { data: chunk } });
       batches.push({ batch: i / MAX_SIZE_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
@@ -766,6 +768,7 @@ class WBClient {
         goods.forEach((g) => details.push({
           taskId,
           nmID: Number(g.nmID),
+          ...(g.sizeID !== undefined ? { sizeID: Number(g.sizeID) } : {}),
           vendorCode: g.vendorCode || '',
           price: Number(g.price || 0),
           discount: Number(g.discount || 0),

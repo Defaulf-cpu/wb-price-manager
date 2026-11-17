@@ -458,6 +458,155 @@ async function tSizePrices() {
     JSON.stringify(vBody));
 }
 
+/** Регрессии приёмки F: ручная правка не должна выравнивать остальные размеры. */
+async function tSizePriceSafety() {
+  const st = makeStand({ live: true });
+  const goods = [{
+    nmID: 7007, vendorCode: 'SIZE-SAFE', brand: 'Тест', subjectName: 'Одежда',
+    discount: 10, editableSizePrice: true, currencyIsoCode4217: 'RUB',
+    sizes: [
+      { sizeID: 701, techSizeName: 'S', price: 900, discountedPrice: 810 },
+      { sizeID: 702, techSizeName: 'M', price: 1000, discountedPrice: 900 },
+      { sizeID: 703, techSizeName: 'L', price: 1100, discountedPrice: 990 }
+    ]
+  }, {
+    nmID: 8008, price: 900, discount: 0, editableSizePrice: false,
+    sizes: [{ sizeID: 801, price: 900 }]
+  }];
+  const commonPosts = [], sizePosts = [];
+  let history = [], rejectSize = false, sizeError = false, taskId = 15000;
+  const recalcDiscounts = (good) => good.sizes.forEach((size) => { size.discountedPrice = size.price * (1 - good.discount / 100); });
+  routes = {
+    '/api/v2/list/goods/filter': () => res(200, { data: { total: goods.length, goods } }),
+    '/api/v1/calendar/promotions': () => res(200, { data: { promotions: [] } }),
+    '/content/v2/get/cards/list': () => res(200, { cards: [], cursor: { total: 0 } }),
+    '/api/v2/upload/task/size': (url, init) => {
+      const body = JSON.parse(init.body).data;
+      sizePosts.push(body);
+      if (rejectSize) return res(400, { errorText: 'Ошибка поразмерной отправки' });
+      history = body.map((row) => {
+        const good = goods.find((g) => g.nmID === row.nmID);
+        const size = good && good.sizes.find((s) => s.sizeID === row.sizeID);
+        if (!sizeError && size) { size.price = row.price; recalcDiscounts(good); }
+        return Object.assign({}, row, { status: sizeError ? 6 : 3, errorText: sizeError ? 'WB отклонил размер' : '' });
+      });
+      return res(200, { data: { taskId: ++taskId } });
+    },
+    '/api/v2/upload/task': (url, init) => {
+      const body = JSON.parse(init.body).data;
+      commonPosts.push(body);
+      history = body.map((row) => {
+        const good = goods.find((g) => g.nmID === row.nmID);
+        if (good) {
+          if (row.price !== undefined) good.sizes.forEach((size) => { size.price = row.price; });
+          if (row.discount !== undefined) good.discount = row.discount;
+          recalcDiscounts(good);
+        }
+        return Object.assign({}, row, { status: 3, errorText: '' });
+      });
+      return res(200, { data: { taskId: ++taskId } });
+    },
+    '/api/v2/history/goods/task': () => res(200, { data: { goods: history } })
+  };
+  await st.service.handlers['wb:goods']({ force: true });
+  await st.service.handlers['costs:save']({ items: { 7007: { costPriceRub: 200 }, 8008: { costPriceRub: 200 } } });
+  await st.service.handlers['repricer:item-configs:save']({ items: {
+    7007: { minPrice: 500, sizePriceMode: 'manual', sizePrices: { 702: 1050, 703: 1100 } }
+  } });
+  await st.service.handlers['prices:draft-save']({ items: { 7007: { basePrice: 900, discount: 10 } } });
+  const calc = await st.service.handlers['repricer:calc']({ full: true });
+  const row = calc.results.find((r) => r.nmID === 7007);
+  check('F: правка только размера помечает строку к отправке', row && row.needSend && row.sizeChanges === 1);
+  const proposal = await st.service.handlers['repricer:proposal']();
+  check('F: правка только размера попадает в предложение при неизменной общей цене',
+    proposal.items.some((p) => p.nmID === 7007 && p.basePrice === 900 && p.currentBasePrice === 900));
+  const sent = await st.service.handlers['repricer:proposal-send']({ nmIDs: [7007] });
+  check('F: manual не отправляет общую базовую цену товара', commonPosts.length === 0);
+  check('F: manual отправляет только изменившийся размер', sizePosts.length === 1 && sizePosts[0].length === 1 && sizePosts[0][0].sizeID === 702);
+  check('F: тело size-запроса строго nmID/sizeID/price, без discount',
+    Object.keys(sizePosts[0][0]).sort().join(',') === 'nmID,price,sizeID');
+  check('F: ручная правка сохраняет остальные размеры и общую скидку',
+    goods[0].sizes.map((s) => s.price).join(',') === '900,1050,1100' && goods[0].discount === 10);
+  check('F: итог включает реальные sizeSent и детали с sizeID',
+    sent.sent === 1 && sent.sizeSent === 1 && sent.details.length === 1 && sent.details[0].sizeID === 702);
+
+  const n = sizePosts.length;
+  const unchanged = await st.service.handlers['wb:apply-size-prices']({ items: [{ nmID: 7007, sizeID: 702, price: 1050 }] });
+  check('F: unchanged-размеры не вызывают WB и дают нулевую загрузку', unchanged.uploaded === 0 && unchanged.skippedUnchanged === 1 && sizePosts.length === n);
+  const bad = await st.service.handlers['wb:apply-size-prices']({ items: [
+    { nmID: 7007, sizeID: 999, price: 950 }, { nmID: 7007, sizeID: 701, price: Infinity },
+    { nmID: 7007, sizeID: 702, price: 0.2 }, { nmID: 8008, sizeID: 801, price: 950 }
+  ] });
+  check('F: чужой размер, бесконечная/округлённая в ноль цена и запрет WB отфильтрованы',
+    bad.uploaded === 0 && bad.warnings.length === 4 && sizePosts.length === n);
+  const restarted = createService(st.store, () => {});
+  const forged = await restarted.handlers['wb:apply-size-prices']({
+    items: [{ nmID: 9999, sizeID: 999, price: 1000 }],
+    goods: [{ nmID: 9999, editableSizePrice: true, sizes: [{ sizeID: 999, price: 900 }] }]
+  });
+  check('F: payload.goods не позволяет подделать принадлежность размера',
+    forged.uploaded === 0 && forged.warnings[0].type === 'unknown-item' && sizePosts.length === n);
+  const quarantine = await st.service.handlers['wb:apply-size-prices']({ items: [{ nmID: 7007, sizeID: 701, price: 100 }] });
+  check('F: защита приложения блокирует снижение цены размера более чем втрое',
+    quarantine.uploaded === 0 && quarantine.warnings.some((w) => w.type === 'quarantine') && sizePosts.length === n);
+
+  const beforePrices = goods[0].sizes.map((s) => s.price).join(',');
+  await st.service.handlers['repricer:send']({ items: [{ nmID: 7007, price: 900, discount: 20 }] });
+  const discountBody = commonPosts[commonPosts.length - 1][0];
+  check('F: общая скидка отправляется без общей цены и не выравнивает размеры',
+    discountBody.discount === 20 && !Object.hasOwn(discountBody, 'price') && goods[0].sizes.map((s) => s.price).join(',') === beforePrices);
+
+  // Ошибки size-этапа видны и в ответе, и в истории, и интеграции Telegram.
+  sizeError = true;
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePrices: { 702: 1060 } } } });
+  const failed = await st.service.handlers['repricer:send']({ items: [{ nmID: 7007, price: 900, discount: 20 }] });
+  check('F: ошибка размера не теряется при объединении результатов отправки',
+    failed.sizeSent === 1 && failed.details.some((d) => d.sizeID === 702 && d.status === 6 && /WB отклонил/.test(d.errorText)));
+  check('F/K: ошибка размера попадает в историю и событие sendError',
+    st.store.loadTasks().some((t) => t.kind === 'size-prices' && t.failed === 1) &&
+    st.events.some((e) => e.channel === 'app-event' && e.payload.type === 'sendError' && /WB отклонил/.test(e.payload.message)));
+  sizeError = false;
+  rejectSize = true;
+  let networkFailed = false;
+  try { await st.service.handlers['wb:apply-size-prices']({ items: [{ nmID: 7007, sizeID: 702, price: 1060 }] }); }
+  catch (e) { networkFailed = e.status === 400; }
+  check('F/K: сетевая ошибка size-этапа не маскируется успехом', networkFailed &&
+    st.events.some((e) => e.channel === 'app-event' && e.payload.type === 'sendError' && /HTTP 400/.test(e.payload.message)));
+  rejectSize = false;
+
+  await st.service.handlers['repricer:save']({ sizePriceMode: 'sync' });
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: null, sizePrices: null } } });
+  const globalMode = await st.service.handlers['repricer:calc']({ full: true });
+  const globalRow = globalMode.results.find((r) => r.nmID === 7007);
+  check('F: общий режим sync доходит до движка и учитывает отличающиеся размеры',
+    globalRow && globalRow.context.sizePriceMode === 'sync' && globalRow.sizeChanges > 0 &&
+    globalRow.sizeChanges === goods[0].sizes.filter((size) => Math.round(size.price) !== Math.round(globalRow.proposed.basePrice)).length,
+    JSON.stringify(globalRow && { mode: globalRow.context.sizePriceMode, sizeChanges: globalRow.sizeChanges, target: globalRow.proposed.basePrice }));
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: 'none' } } });
+  const ownNone = await st.service.handlers['repricer:calc']({ full: true });
+  check('F: индивидуальный none важнее общего sync', ownNone.results.some((r) => r.nmID === 7007 && r.context.sizePriceMode === 'none'));
+
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: 'manual', sizePrices: { 702: 1060 } } } });
+  await st.service.handlers['repricer:calc']({ full: true });
+  const beforeStale = sizePosts.length + commonPosts.length;
+  goods[0].sizes[1].price = 1065; // минимум (900) остался прежним
+  let stale = false;
+  try { await st.service.handlers['repricer:proposal-send']({ nmIDs: [7007] }); }
+  catch (e) { stale = e.code === 'PROPOSAL_STALE'; }
+  check('F: чужая правка неминимального размера делает предложение устаревшим',
+    stale && sizePosts.length + commonPosts.length === beforeStale);
+
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: 'none' } } });
+  await st.service.handlers['prices:draft-save']({ items: { 7007: { basePrice: 950, discount: 20 } } });
+  await st.service.handlers['repricer:calc']({ full: true });
+  const beforeAuto = sizePosts.length + commonPosts.length;
+  let autoBlocked = false;
+  try { await st.service.handlers['repricer:proposal-send']({ source: 'repricer-auto', nmIDs: [7007] }); }
+  catch (e) { autoBlocked = e.code === 'SIZE_EQUALIZE_CONFIRM'; }
+  check('F: автоотправка не выравнивает разные размеры в режиме none без ручного подтверждения',
+    autoBlocked && sizePosts.length + commonPosts.length === beforeAuto);
+}
+
 // ───────────────────────── 3. Устаревшее предложение не затирает чужие правки ─────────────────────────
 
 async function tStaleProposal() {
@@ -1120,6 +1269,8 @@ async function tSingleScreen() {
   await tSizePricedGoods();
   console.log('\n=== Цены по размерам: отправка, режимы, валидация ===');
   await tSizePrices();
+  console.log('\n=== Приёмка F: сохранность цен по размерам ===');
+  await tSizePriceSafety();
   console.log('\n=== Устаревшее предложение ===');
   await tStaleProposal();
   console.log('\n=== Карточка товара ===');

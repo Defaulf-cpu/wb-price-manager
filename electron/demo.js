@@ -479,17 +479,20 @@ function createDemoApi(opts) {
         const g = byNm.get(Number(it.nmID));
         if (!g) { details.push({ taskId, nmID: it.nmID, status: 6, statusText: 'Ошибка', errorText: 'Товар не найден' }); continue; }
         const oldSeller = g.price * (1 - g.discount / 100);
-        const newSeller = Number(it.price) * (1 - Number(it.discount) / 100);
+        const newPrice = it.price === undefined ? g.price : Math.round(Number(it.price));
+        const newDiscount = it.discount === undefined ? g.discount : Math.round(Number(it.discount));
+        const newSeller = newPrice * (1 - newDiscount / 100);
         const quarantine = oldSeller > 0 && newSeller < oldSeller / 3;
         if (quarantine) {
           details.push({ taskId, nmID: g.nmID, vendorCode: g.vendorCode, price: it.price, discount: it.discount, status: 6, statusText: 'Карантин цены', errorText: 'Новая цена со скидкой более чем в 3 раза ниже прежней — товар в карантине, цена не изменена.' });
           continue;
         }
-        g.price = Math.round(Number(it.price));
-        g.discount = Math.round(Number(it.discount));
+        g.price = newPrice;
+        g.discount = newDiscount;
         g.discountedPrice = Math.round(g.price * (1 - g.discount / 100));
         g.sizes.forEach((s) => {
-          s.price = g.editableSizePrice ? Math.round(s.price) : g.price;
+          // Общая базовая цена выравнивает размеры, запрос только со скидкой — нет.
+          s.price = it.price === undefined ? Math.round(s.price) : g.price;
           s.discountedPrice = Math.round(s.price * (1 - g.discount / 100));
         });
         // WB сам выводит товар из акции, когда цена перестаёт удовлетворять условиям
@@ -547,15 +550,15 @@ function createDemoApi(opts) {
         if (!g) { details.push({ taskId, nmID: it.nmID, sizeID: it.sizeID, status: 6, statusText: 'Ошибка', errorText: 'Товар не найден' }); continue; }
         const size = (g.sizes || []).find((s) => Number(s.sizeID) === Number(it.sizeID));
         if (!size) { details.push({ taskId, nmID: g.nmID, sizeID: it.sizeID, status: 6, statusText: 'Ошибка', errorText: 'Размер не найден у товара' }); continue; }
-        const oldSeller = Number(size.price) * (1 - (Number(size.discount) || 0) / 100);
-        const newSeller = Number(it.price) * (1 - (Number(it.discount) || 0) / 100);
+        const oldSeller = Number(size.price) * (1 - (Number(g.discount) || 0) / 100);
+        const newSeller = Number(it.price) * (1 - (Number(g.discount) || 0) / 100);
         const quarantine = oldSeller > 0 && newSeller < oldSeller / 3;
         if (quarantine) {
           details.push({ taskId, nmID: g.nmID, sizeID: it.sizeID, price: it.price, discount: it.discount, status: 6, statusText: 'Карантин цены', errorText: 'Новая цена со скидкой более чем в 3 раза ниже прежней — размер в карантине, цена не изменена.' });
           continue;
         }
         size.price = Math.round(Number(it.price));
-        size.discount = Math.round(Number(it.discount));
+        size.discount = Number(g.discount) || 0;
         size.discountedPrice = Math.round(size.price * (1 - size.discount / 100));
         // товар с поразмерными ценами: базовую цену пересчитываем из размеров
         if (g.editableSizePrice) {

@@ -368,7 +368,7 @@ function createTelegramNotifier(options) {
       if (channel === 'deferred' && (p.type === 'scheduled' || p.type === 'rescheduled')) {
         return enqueue('rateLimit', { name: p.name, title: p.title, retryAt: p.retryAt, message: p.reason || p.message });
       }
-    } catch (_) { /* never propagate notification errors into application services */ }
+    } catch (_) { /* ошибка уведомления не должна прерывать работу сервиса */ }
     return false;
   }
 

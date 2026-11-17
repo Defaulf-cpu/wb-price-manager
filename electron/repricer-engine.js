@@ -1265,7 +1265,8 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       priceFromSizes: !!ctx.priceFromSizes,
       sizePriceMin: num(ctx.sizePriceMin) || 0, sizePriceMax: num(ctx.sizePriceMax) || 0,
       // режим цен по размерам (none/sync/manual) — берётся из настроек товара/общих
-      sizePriceMode: ['none', 'sync', 'manual'].indexOf(I.sizePriceMode) >= 0 ? I.sizePriceMode : 'none',
+      sizePriceMode: ['none', 'sync', 'manual'].includes(I.sizePriceMode) ? I.sizePriceMode
+        : (['none', 'sync', 'manual'].includes(C.sizePriceMode) ? C.sizePriceMode : 'none'),
       competitorPrice: comp ? comp.price : null,
       plan: planProgress(marginCtx, I),
       marginMode: C.marginMode,
