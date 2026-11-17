@@ -2226,11 +2226,13 @@ SKU: без него непонятно, какого конкурента об�
 
 ---
 
-## 24. Веб-версия: HTTP-маршруты (`tools/web-server.js`)
+## 24. Веб-версия: HTTP-маршруты и безопасный доступ (`tools/web-server.js`)
 
-Веб-сервер использует **тот же слой бизнес-логики**, что и Electron: `createService(store, broadcast)`
-из `electron/service.js`. Поэтому любой канал из этого справочника одинаково работает в десктопе,
-в dev-сервере и в веб-версии — различается только транспорт и защита.
+Веб-сервер использует тот же слой бизнес-логики, что и Electron: `createService(store, broadcast)`
+из `electron/service.js`. Отличается транспорт и способ внешнего доступа. Запуск без аргументов
+(`npm run web` / `node tools/web-server.js`) выбирает режим **`tunnel`**: Node слушает только
+`127.0.0.1`, а доступ снаружи организуется через Cloudflare Tunnel или Tailscale Serve. Порт
+роутера наружу не пробрасывается.
 
 | Маршрут | Метод | Что делает | Без сессии |
 | --- | --- | --- | --- |
@@ -2239,34 +2241,75 @@ SKU: без него непонятно, какого конкурента об�
 | `/api/invoke` | POST | `{ channel, args: [] }` → `{ ok, data }` / `{ ok:false, error }` — как в Electron | `401` |
 | `/api/events` | GET | SSE-поток событий сервиса (`event: svc:<канал>`), heartbeat 25 с, лимит 50 клиентов | `401` |
 | `/api/logout` | POST | отозвать текущую сессию и очистить cookie | `401` |
-| `/` и статика | GET/HEAD | файлы `src/renderer` + общие модули `/economics.js`, `/repricer-engine.js` | `302 /login` |
+| `/` и статика | GET/HEAD | файлы `src/renderer` + `/economics.js`, `/repricer-engine.js` | `302 /login` |
 
-Отличия от Electron-транспорта:
+### Режимы доступа и туннель
+
+| Режим | Bind по умолчанию | Доступ |
+| --- | --- | --- |
+| `tunnel` (по умолчанию) | только `127.0.0.1` | туннель Cloudflare или Tailscale проксирует на loopback; внешний URL использует HTTPS |
+| `local` | `127.0.0.1` | только этот компьютер |
+| `lan` | `0.0.0.0` | только loopback и приватные IPv4/IPv6 ULA; публичный IP получает `403` |
+| `internet` | `0.0.0.0` | все IP; требует одновременно `--cert` и `--key`, либо явное небезопасное подтверждение |
+
+В `tunnel` автоматически ищется `cloudflared`, затем `tailscale` в `PATH`. Если утилита найдена
+и автозапуск не отключён, сервер запускает её как дочерний процесс. Для Cloudflare используется
+`cloudflared tunnel --url http://127.0.0.1:<port>`; выданный URL вида
+`https://<случайное-имя>.trycloudflare.com` печатается после появления в выводе процесса. Для
+Tailscale в foreground запускается `tailscale serve http://127.0.0.1:<port>` и останавливается
+вместе с веб-сервером; ожидаемый адрес устройства вида `https://<устройство>.<tailnet>.ts.net`
+выводится из состояния Tailscale или его можно узнать
+командой `tailscale serve status`. Если приложения нет в `PATH`, веб-сервер остаётся доступен
+только на loopback и выводит ссылки установки и обе команды ручного запуска.
+
+Параметры управления: `--start-tunnel` / `--no-tunnel-autostart`,
+`--tunnel-provider auto|cloudflare|tailscale|off`; environment: `WB_WEB_TUNNEL_AUTOSTART=0` и
+`WB_WEB_TUNNEL_PROVIDER`. В режиме `tunnel` cookies помечены `Secure`, поскольку внешний URL
+туннеля обслуживается через HTTPS (TLS завершается на стороне туннеля); origin приложения
+остаётся на loopback.
+
+Режим `internet` без пары сертификат/ключ не запустится: CLI напечатает причину и предложит
+HTTPS или `--insecure-i-know`. Последний флаг допускает HTTP только после явного подтверждения;
+консоль предупреждает об опасности, а на **каждой HTML-странице**, включая `/login`, появляется
+заметный предупреждающий баннер. Не используйте незашифрованный HTTP для внешнего доступа.
+
+`X-Forwarded-For` не считается доверенным источником IP — по нему нельзя ограничивать доступ
+или считать блокировки входа. Для этого используется TCP-адрес соединения.
+
+### Отличия от Electron-транспорта
 
 * **CSRF.** Каждый `POST /api/*` обязан нести заголовок `X-CSRF-Token`, совпадающий с cookie
-  `wb_web_csrf` и с токеном сессии. `src/renderer/js/api.js` добавляет его сам
-  (`csrfToken()` → заголовок), поэтому код интерфейса не знает, где работает.
+  `wb_web_csrf` и токеном сессии. `src/renderer/js/api.js` добавляет его автоматически.
 * **Сессия.** Cookie `wb_web_session` — HMAC-SHA256-подпись идентификатора сессии, сам
-  идентификатор хранится на сервере (`.data/web-sessions.json`). Срок 12 часов, `HttpOnly`,
-  `SameSite=Lax`, `Path=/`; подпись проверяется на каждом запросе.
+  идентификатор хранится на сервере (`.data/web-sessions.json`). Срок — 12 часов, `HttpOnly`,
+  `SameSite=Lax`, `Path=/`; в `tunnel` и при TLS она также получает `Secure`. Пароль хранится
+  только как scrypt-хеш с солью. После пяти ошибочных попыток с IP действует блокировка 15 минут.
 * **Выход.** `API.logout()` → `POST /api/logout` → `/login`. Кнопка «Выйти» в шапке появляется
-  только когда `API.webSession()` видит CSRF-cookie: в Electron и в dev-сервере `tools/serve.js`
-  сессии нет, и кнопки нет.
-* **Режимы доступа.** `local` (только `127.0.0.1`), `lan` (`0.0.0.0` + проверка, что IP приватный),
-  `internet` (без ограничения IP). `X-Forwarded-For` не используется — по нему нельзя ни
-  ограничивать доступ, ни считать блокировку попыток входа.
+  только в веб-версии.
 * **Заголовки.** CSP (`script-src 'self'` + SHA-256-хеши inline-скриптов `index.html`),
-  `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `Permissions-Policy`, `Cache-Control: no-store`
-  (для HTML — `no-cache`), лимит тела 25 МБ, `requestTimeout` 120 с.
-* **Опции встраивания в iframe** (по умолчанию выключены): `--allow-framing` снимает
-  `X-Frame-Options` и переключает CSP на `frame-ancestors *`; `--samesite none` выдаёт cookie
-  с `SameSite=None; Secure`. Нужны только для показа страницы внутри чужого портала.
-* **Канал `pricewatch:open`** в веб-версии возвращает `NO_BROWSER` (нет Electron) — это честно:
-  страницу WB нужно открыть в обычном браузере.
+  `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `Permissions-Policy`, `Cache-Control`.
+* **Размер запроса.** Обычные тела ограничены 25 МиБ; авторизованный `/api/invoke` принимает
+  до 220 МиБ для импорта `.wbpm.json` до 100 МиБ после JSON-кодирования.
+* **Iframe** (по умолчанию запрещён): `--allow-framing` снимает `X-Frame-Options` и меняет CSP
+  на `frame-ancestors *`; `--samesite none` выдаёт `SameSite=None; Secure`. Включайте только
+  для доверенного портала и при HTTPS на внешнем адресе.
+* **`pricewatch:open`** в веб-версии возвращает `NO_BROWSER` (нет Electron).
 
-Запуск: `npm run web` или `node tools/web-server.js --mode lan --port 8080`.
-Полная инструкция (туннели, HTTPS, смена пароля, отзыв сессий) — `docs/WEB.md`.
-Прогон: `npm run test:web` → `tools/checks/web-server-flow.js` (18 проверок).
+| Назначение | CLI | Переменная окружения | Значение по умолчанию |
+| --- | --- | --- | --- |
+| Режим | `--mode tunnel|local|lan|internet` | `WB_WEB_MODE` | `tunnel` |
+| Порт | `--port N` | `PORT` | `8080` |
+| Каталог данных | `--data <dir>` | `WB_WEB_DATA` | `<проект>/.data` |
+| Пользователь / пароль | `--user`, `--pass` | `WB_WEB_USER`, `WB_WEB_PASS` | `admin` / случайный пароль при первом запуске |
+| TLS-сертификат / ключ | `--cert`, `--key` | `WB_WEB_CERT`, `WB_WEB_KEY` | не нужны для туннеля; обязательны для `internet` |
+| Явно разрешить HTTP | `--insecure-i-know` | `WB_WEB_INSECURE_I_KNOW=1` | запрещено |
+| Автозапуск / провайдер туннеля | `--start-tunnel`, `--no-tunnel-autostart`, `--tunnel-provider` | `WB_WEB_TUNNEL_AUTOSTART`, `WB_WEB_TUNNEL_PROVIDER` | включён / `auto` |
+| Встраивание / SameSite | `--allow-framing`, `--samesite none|lax` | `WB_WEB_ALLOW_FRAMING`, `WB_WEB_SAMESITE` | запрещено / `lax` |
+
+Аргументы CLI перекрывают переменные окружения. Подробный порядок настройки Cloudflare, Tailscale,
+`local`/`lan`, HTTPS и веб-сессий — `docs/WEB.md`. Проверка: `npm run test:web` →
+`tools/checks/web-server-flow.js` (расширена проверками default tunnel, loopback-bind,
+защиты `internet`, insecure-banner, разбора флагов и запуска туннеля).
 
 ## 25. Остатки по складам WB — `stocks:*`
 

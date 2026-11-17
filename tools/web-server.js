@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn, spawnSync } = require('child_process');
 const { createStore } = require('../electron/store');
 const { createService } = require('../electron/service');
 const { createBackupManager } = require('../electron/backup');
@@ -19,6 +20,8 @@ const MAX_BODY_BYTES = 25 * 1024 * 1024;
 // Прочие тела запросов по-прежнему ограничены 25 МиБ.
 const MAX_INVOKE_BODY_BYTES = 220 * 1024 * 1024;
 const SSE_MAX = 50;
+const VALID_MODES = Object.freeze(['tunnel', 'local', 'lan', 'internet']);
+const VALID_TUNNEL_PROVIDERS = Object.freeze(['auto', 'cloudflare', 'tailscale', 'off']);
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -30,16 +33,57 @@ const MIME = {
   '.xml': 'application/xml; charset=utf-8', '.pdf': 'application/pdf'
 };
 
+function parseBoolean(value, fallback) {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (/^(1|true|yes|on|y)$/i.test(String(value).trim())) return true;
+  if (/^(0|false|no|off|n)$/i.test(String(value).trim())) return false;
+  return fallback;
+}
+
+function findExecutable(command, env, platform) {
+  const e = env || process.env;
+  const isWindows = (platform || process.platform) === 'win32';
+  const pathValue = e.PATH || e.Path || e.path || '';
+  const searchDirs = String(pathValue).split(isWindows ? ';' : path.delimiter).filter(Boolean);
+  const commandText = String(command || '');
+  const hasDirectory = /[\\/]/.test(commandText);
+  const directories = hasDirectory ? [''] : searchDirs;
+  const extensions = isWindows ? String(e.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean) : [''];
+  const names = isWindows && !path.extname(commandText)
+    ? extensions.map((extension) => commandText + extension.toLowerCase()).concat(extensions.map((extension) => commandText + extension.toUpperCase()))
+    : [commandText];
+  for (const directory of directories) {
+    for (const name of names) {
+      const candidate = directory ? path.resolve(directory, name) : path.resolve(name);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        if (!isWindows) fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch (_) { /* продолжить поиск в PATH */ }
+    }
+  }
+  return null;
+}
+
+function normalizeTunnelProvider(value) {
+  const provider = String(value || 'auto').trim().toLowerCase();
+  return provider === 'cloudflared' ? 'cloudflare' : provider;
+}
+
 function parseArgs(argv, env) {
   const e = env || process.env;
   const out = {
-    mode: e.WB_WEB_MODE || 'local',
+    mode: e.WB_WEB_MODE || 'tunnel',
     port: e.PORT === undefined ? 8080 : Number(e.PORT),
     dataDir: e.WB_WEB_DATA || path.join(PROJECT_ROOT, '.data'),
     user: e.WB_WEB_USER || '',
     pass: e.WB_WEB_PASS || '',
     cert: e.WB_WEB_CERT || '',
     key: e.WB_WEB_KEY || '',
+    insecureIKnow: parseBoolean(e.WB_WEB_INSECURE_I_KNOW, false),
+    tunnelAutostart: parseBoolean(e.WB_WEB_TUNNEL_AUTOSTART, true),
+    tunnelProvider: normalizeTunnelProvider(e.WB_WEB_TUNNEL_PROVIDER || 'auto'),
     allowFraming: /^(1|true|yes|on)$/i.test(String(e.WB_WEB_ALLOW_FRAMING || '')),
     sameSite: /^none$/i.test(String(e.WB_WEB_SAMESITE || '')) ? 'none' : 'lax'
   };
@@ -56,13 +100,18 @@ function parseArgs(argv, env) {
     else if (key === '--pass') { out.pass = value; if (eq < 0) i++; }
     else if (key === '--cert') { out.cert = value; if (eq < 0) i++; }
     else if (key === '--key') { out.key = value; if (eq < 0) i++; }
+    else if (key === '--insecure-i-know') out.insecureIKnow = eq >= 0 ? parseBoolean(value, false) : true;
+    else if (key === '--start-tunnel' || key === '--tunnel-autostart') out.tunnelAutostart = eq >= 0 ? parseBoolean(value, true) : true;
+    else if (key === '--no-start-tunnel' || key === '--no-tunnel-autostart') out.tunnelAutostart = false;
+    else if (key === '--tunnel-provider') { out.tunnelProvider = normalizeTunnelProvider(value); if (eq < 0) i++; }
     // флаг без значения: следующий аргумент не считаем его значением
-    else if (key === '--allow-framing') { out.allowFraming = eq >= 0 ? /^(1|true|yes|on)$/i.test(value) : true; }
+    else if (key === '--allow-framing') { out.allowFraming = eq >= 0 ? parseBoolean(value, false) : true; }
     else if (key === '--samesite') { out.sameSite = String(value || '').toLowerCase() === 'none' ? 'none' : 'lax'; if (eq < 0) i++; }
   }
   if (!out.user) out.user = 'admin';
   out.dataDir = path.resolve(PROJECT_ROOT, out.dataDir);
-  if (!['local', 'lan', 'internet'].includes(out.mode)) throw new Error('Недопустимый режим --mode: ' + out.mode);
+  if (!VALID_MODES.includes(out.mode)) throw new Error('Недопустимый режим --mode: ' + out.mode);
+  if (!VALID_TUNNEL_PROVIDERS.includes(out.tunnelProvider)) throw new Error('Недопустимый туннель --tunnel-provider: ' + out.tunnelProvider + ' (допустимо auto, cloudflare, tailscale или off).');
   if (!Number.isInteger(out.port) || out.port < 0 || out.port > 65535) throw new Error('Порт должен быть числом от 0 до 65535.');
   if (!!out.cert !== !!out.key) throw new Error('Для HTTPS задайте одновременно WB_WEB_CERT и WB_WEB_KEY.');
   return out;
@@ -191,18 +240,39 @@ function loginHtml(csrf, error) {
 
 function createWebServer(options) {
   const opts = Object.assign({}, options || {});
-  const mode = opts.mode || 'local';
-  if (!['local', 'lan', 'internet'].includes(mode)) throw new Error('Недопустимый режим: ' + mode);
+  const mode = opts.mode || 'tunnel';
+  if (!VALID_MODES.includes(mode)) throw new Error('Недопустимый режим: ' + mode);
+  const certSupplied = !!opts.cert;
+  const keySupplied = !!opts.key;
+  if (certSupplied !== keySupplied) throw new Error('Для HTTPS задайте одновременно --cert и --key (или WB_WEB_CERT и WB_WEB_KEY).');
+  const secure = certSupplied && keySupplied;
+  const insecureIKnow = opts.insecureIKnow === true;
+  if (mode === 'internet' && !secure && !insecureIKnow) {
+    throw new Error('Режим internet требует HTTPS: задайте --cert и --key (или WB_WEB_CERT и WB_WEB_KEY). Для явного небезопасного HTTP используйте --insecure-i-know; безопасный вариант для доступа извне — --mode tunnel.');
+  }
+  const tunnelAutostart = opts.tunnelAutostart !== false;
+  const tunnelProvider = normalizeTunnelProvider(opts.tunnelProvider || 'auto');
+  if (!VALID_TUNNEL_PROVIDERS.includes(tunnelProvider)) throw new Error('Недопустимый туннель --tunnel-provider: ' + tunnelProvider + '.');
   const port = opts.port === undefined ? 8080 : Number(opts.port);
-  const host = opts.host || (mode === 'local' ? '127.0.0.1' : '0.0.0.0');
+  const host = mode === 'tunnel' ? '127.0.0.1' : (opts.host || (mode === 'local' ? '127.0.0.1' : '0.0.0.0'));
   const dataDir = path.resolve(opts.dataDir || path.join(PROJECT_ROOT, '.data'));
-  const secure = !!(opts.cert && opts.key);
+  const tlsOptions = secure ? {
+    cert: fs.readFileSync(path.resolve(opts.cert)), key: fs.readFileSync(path.resolve(opts.key)),
+    minVersion: 'TLSv1.2'
+  } : {};
+  const insecureHttp = mode === 'internet' && !secure;
   const log = opts.log || ((line) => console.log(line));
   const errorLog = opts.errorLog || ((line) => console.error(line));
   const getIp = opts.getClientIp || getClientIp;
+  const tunnelEnv = opts.env || process.env;
+  const childSpawn = opts.spawn || spawn;
+  const childSpawnSync = opts.spawnSync || spawnSync;
+  const executableLookup = typeof opts.findExecutable === 'function'
+    ? opts.findExecutable
+    : (name) => findExecutable(name, tunnelEnv, opts.platform || process.platform);
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const sameSite = String(opts.sameSite || '').toLowerCase() === 'none' ? 'none' : 'lax';
-  const auth = new WebAuth(dataDir, { user: opts.user || 'admin', pass: opts.pass || '', secure, sameSite });
+  const auth = new WebAuth(dataDir, { user: opts.user || 'admin', pass: opts.pass || '', secure: secure || mode === 'tunnel', sameSite });
   const store = createStore(dataDir, null);
   const backupManager = createBackupManager({ store, dir: dataDir, appVersion: require('../package.json').version, now: opts.now });
   backupManager.startScheduler();
@@ -212,6 +282,144 @@ function createWebServer(options) {
   const indexHtml = fs.readFileSync(path.join(RENDERER_ROOT, 'index.html'), 'utf8');
   const csp = makeCsp(indexHtml, allowFraming);
   let stopping = false;
+  let activeTunnel = null;
+  let tunnelAttempted = false;
+
+  function decorateHtml(html) {
+    if (!insecureHttp) return html;
+    const banner = '<aside role="alert" aria-live="assertive" style="position:sticky;top:0;z-index:2147483647;padding:10px 16px;background:#7f1d1d;color:#fff;font:600 14px/1.4 system-ui,sans-serif;text-align:center;border-bottom:2px solid #fecaca">ВНИМАНИЕ: интернет-доступ работает по HTTP без TLS. Пароль и данные могут быть перехвачены. Отключите этот режим и используйте HTTPS или режим tunnel.</aside>';
+    const source = String(html);
+    const bodyStart = source.toLowerCase().indexOf('<body');
+    if (bodyStart < 0) return banner + source;
+    const bodyEnd = source.indexOf('>', bodyStart);
+    if (bodyEnd < 0) return banner + source;
+    return source.slice(0, bodyEnd + 1) + banner + source.slice(bodyEnd + 1);
+  }
+
+  function installHint(provider) {
+    if (provider === 'cloudflare') return 'Установите Cloudflare Tunnel (cloudflared): https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/';
+    if (provider === 'tailscale') return 'Установите Tailscale на сервер и клиент: https://tailscale.com/download';
+    return 'Установите один из туннелей: cloudflared (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) или Tailscale (https://tailscale.com/download).';
+  }
+
+  function tailscaleUrl(executable) {
+    try {
+      const result = childSpawnSync(executable, ['status', '--json'], {
+        encoding: 'utf8', timeout: 5000, windowsHide: true, env: tunnelEnv
+      });
+      if (result.error || result.status !== 0) return '';
+      const status = JSON.parse(String(result.stdout || ''));
+      let dnsName = String(status && status.Self && status.Self.DNSName || '').trim();
+      while (dnsName.endsWith('.')) dnsName = dnsName.slice(0, -1);
+      return dnsName ? 'https://' + dnsName : '';
+    } catch (_) { return ''; }
+  }
+
+  function extractExternalUrl(source, suffix) {
+    for (const part of String(source || '').split(' ')) {
+      let candidate = part.trim();
+      while (candidate) {
+        const last = candidate[candidate.length - 1];
+        if (last.charCodeAt(0) > 32 && !['\"', "'", '<', '>', ')', ',', '.', ';'].includes(last)) break;
+        candidate = candidate.slice(0, -1);
+      }
+      if (candidate.startsWith('https://') && candidate.toLowerCase().includes(suffix)) return candidate;
+    }
+    return '';
+  }
+
+  function startTunnel(actualPort) {
+    const targetPort = Number(actualPort || port);
+    const target = (secure ? 'https' : 'http') + '://127.0.0.1:' + targetPort;
+    const manualCommands = {
+      cloudflare: 'cloudflared tunnel --url ' + target + (secure ? ' --no-tls-verify' : ''),
+      tailscale: 'tailscale serve --bg ' + target
+    };
+    if (mode !== 'tunnel') return { started: false, reason: 'not-tunnel-mode' };
+    if (tunnelAttempted) return { started: !!activeTunnel, reason: 'already-attempted' };
+    tunnelAttempted = true;
+    if (!tunnelAutostart) {
+      log('[tunnel] Автозапуск выключен. Запустите вручную одну из команд: ' + manualCommands.cloudflare + '  |  ' + manualCommands.tailscale);
+      return { started: false, reason: 'autostart-disabled', commands: manualCommands };
+    }
+    if (tunnelProvider === 'off') {
+      log('[tunnel] Автозапуск отключён параметром --tunnel-provider off. Сервер доступен только локально: ' + target);
+      return { started: false, reason: 'provider-disabled', commands: manualCommands };
+    }
+    const candidates = tunnelProvider === 'auto' ? ['cloudflare', 'tailscale'] : [tunnelProvider];
+    let selected = null;
+    for (const provider of candidates) {
+      const binary = provider === 'cloudflare' ? 'cloudflared' : 'tailscale';
+      const executable = executableLookup(binary);
+      if (executable) { selected = { provider, binary, executable }; break; }
+    }
+    if (!selected) {
+      const missingProvider = tunnelProvider === 'auto' ? 'auto' : tunnelProvider;
+      const reason = 'Туннель не запущен: ' + (missingProvider === 'auto' ? 'cloudflared и tailscale' : (tunnelProvider === 'cloudflare' ? 'cloudflared' : 'tailscale')) + ' не найден(ы) в PATH. ' + installHint(missingProvider === 'auto' ? '' : missingProvider);
+      log('[tunnel] ' + reason);
+      log('[tunnel] Сервер продолжает работать только на ' + target + '. Команды для ручного запуска: ' + manualCommands.cloudflare + '  |  ' + manualCommands.tailscale);
+      return { started: false, reason: 'not-installed', message: reason, commands: manualCommands };
+    }
+
+    // Keep Tailscale Serve in the foreground so it belongs to this server lifecycle.
+    // The documented --bg command is printed separately for users who want to manage it themselves.
+    const args = selected.provider === 'cloudflare'
+      ? ['tunnel', '--url', target].concat(secure ? ['--no-tls-verify'] : [])
+      : ['serve', target];
+    const command = selected.binary + ' ' + args.join(' ');
+    log('[tunnel] Запускаю: ' + command);
+    let child;
+    try {
+      child = childSpawn(selected.executable, args, {
+        cwd: PROJECT_ROOT,
+        env: tunnelEnv,
+        windowsHide: true,
+        shell: process.platform === 'win32' && ['.cmd', '.bat'].includes(path.extname(selected.executable).toLowerCase()),
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (error) {
+      const reason = 'Не удалось запустить ' + selected.binary + ': ' + (error && error.message || error) + '. ' + installHint(selected.provider);
+      errorLog('[tunnel] ' + reason);
+      return { started: false, reason: 'spawn-failed', message: reason };
+    }
+    activeTunnel = child;
+    let output = '';
+    let announcedUrl = '';
+    const onOutput = (chunk) => {
+      const textValue = String(chunk || '');
+      output = (output + textValue).slice(-32768);
+      const suffix = selected.provider === 'cloudflare' ? '.trycloudflare.com' : '.ts.net';
+      const external = extractExternalUrl(textValue, suffix);
+      if (external && external !== announcedUrl) {
+        announcedUrl = external;
+        log('[tunnel] Внешний HTTPS-адрес: ' + announcedUrl);
+      }
+      if (textValue.trim()) log('[' + selected.binary + '] ' + textValue.trim());
+    };
+    if (child.stdout && typeof child.stdout.on === 'function') child.stdout.on('data', onOutput);
+    if (child.stderr && typeof child.stderr.on === 'function') child.stderr.on('data', onOutput);
+    if (selected.provider === 'tailscale') {
+      const external = tailscaleUrl(selected.executable);
+      if (external) {
+        announcedUrl = external;
+        log('[tunnel] Ожидаемый внешний HTTPS-адрес: ' + external);
+      }
+    }
+    child.once('error', (error) => {
+      if (activeTunnel === child) activeTunnel = null;
+      if (stopping) return;
+      const reason = 'Процесс ' + selected.binary + ' завершился с ошибкой: ' + (error && error.message || error) + '. ' + installHint(selected.provider);
+      errorLog('[tunnel] ' + reason);
+    });
+    child.once('close', (code, signal) => {
+      if (activeTunnel === child) activeTunnel = null;
+      if (stopping) return;
+      const details = 'Сервер продолжает работать только локально. ' + installHint(selected.provider);
+      if (code === 0) log('[tunnel] ' + selected.binary + ' завершился; ' + details);
+      else errorLog('[tunnel] ' + selected.binary + ' завершился (код ' + code + (signal ? ', сигнал ' + signal : '') + '). ' + details);
+    });
+    return { started: true, provider: selected.provider, command, target };
+  }
 
   function broadcast(channel, payload) {
     if (!sseClients.size) return;
@@ -229,10 +437,7 @@ function createWebServer(options) {
   const service = createService(store, broadcast, null, { backupManager, telegramNotifier });
   try { service.applyScheduler(); } catch (e) { errorLog('[web] Планировщик: ' + (e.stack || e.message || e)); }
 
-  const server = (secure ? https : http).createServer(secure ? {
-    cert: fs.readFileSync(path.resolve(opts.cert)), key: fs.readFileSync(path.resolve(opts.key)),
-    minVersion: 'TLSv1.2'
-  } : {}, (req, res) => {
+  const server = (secure ? https : http).createServer(tlsOptions, (req, res) => {
     const startAt = process.hrtime.bigint();
     let logged = false;
     const requestPath = (() => { try { return new URL(req.url, 'http://localhost').pathname; } catch (_) { return '<invalid>'; } })();
@@ -287,7 +492,7 @@ function createWebServer(options) {
         const setCookies = [];
         if (!csrf) setCookies.push(auth.cookieHeader(CSRF_COOKIE, token, { maxAge: 900 }));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...(setCookies.length ? { 'Set-Cookie': setCookies } : {}) });
-        return res.end(loginHtml(token));
+        return res.end(decorateHtml(loginHtml(token)));
       }
 
       if (pathname === '/login' && req.method === 'POST') {
@@ -301,7 +506,7 @@ function createWebServer(options) {
         if (!result.ok) {
           if (result.limited) return fail(429, 'Слишком много неудачных попыток входа. Повторите позже.', { 'Retry-After': String(result.retryAfter) });
           if (/application\/json/i.test(req.headers['content-type'] || '')) return json(res, 401, { ok: false, error: { message: 'Неверный логин или пароль.' } });
-          const body = loginHtml(cookies[CSRF_COOKIE], 'Неверный логин или пароль.');
+          const body = decorateHtml(loginHtml(cookies[CSRF_COOKIE], 'Неверный логин или пароль.'));
           res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
           return res.end(body);
         }
@@ -418,7 +623,8 @@ function createWebServer(options) {
             const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cacheOpts.cache };
             if (ext === '.html') headers['Content-Security-Policy'] = csp;
             response.writeHead(200, headers);
-            if (request.method === 'HEAD') response.end(); else response.end(buf);
+            if (request.method === 'HEAD') response.end();
+            else response.end(ext === '.html' && insecureHttp ? Buffer.from(decorateHtml(buf.toString('utf8')), 'utf8') : buf);
           });
         });
       });
@@ -448,18 +654,45 @@ function createWebServer(options) {
     if (service.sched && service.sched.timer) { clearInterval(service.sched.timer); service.sched.timer = null; }
     backupManager.stopScheduler();
     telegramNotifier.stop();
-    return new Promise((resolve) => {
+
+    const tunnel = activeTunnel;
+    activeTunnel = null;
+    const stopTunnel = new Promise((resolve) => {
+      if (!tunnel || typeof tunnel.kill !== 'function' ||
+          (tunnel.exitCode !== null && tunnel.exitCode !== undefined) || tunnel.signalCode) return resolve();
+      let timer;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      if (typeof tunnel.once === 'function') {
+        tunnel.once('close', finish);
+        tunnel.once('error', finish);
+      }
+      timer = setTimeout(() => {
+        try { tunnel.kill(process.platform === 'win32' ? undefined : 'SIGKILL'); } catch (_) {}
+        finish();
+      }, 3000);
+      try { if (tunnel.kill() === false) finish(); }
+      catch (_) { finish(); }
+    });
+    const stopServer = new Promise((resolve) => {
       if (!server.listening) return resolve();
-      server.close(() => resolve());
-      const timer = setTimeout(() => {
+      let timer;
+      server.close(() => { if (timer) clearTimeout(timer); resolve(); });
+      timer = setTimeout(() => {
         if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
         resolve();
       }, 5000);
       if (timer.unref) timer.unref();
     });
+    return Promise.all([stopTunnel, stopServer]).then(() => {});
   }
 
-  return { server, store, service, auth, backupManager, telegramNotifier, sseClients, mode, host, port, dataDir, allowFraming, sameSite, listen, close, getClientIp: getIp };
+  return { server, store, service, auth, backupManager, telegramNotifier, sseClients, mode, host, port, dataDir, allowFraming, sameSite, secure, insecureHttp, tunnelAutostart, tunnelProvider, startTunnel, listen, close, getClientIp: getIp };
 }
 
 function localAddresses() {
@@ -471,34 +704,46 @@ function localAddresses() {
   return Array.from(new Set(out));
 }
 
-function printStartup(app, address) {
-  const scheme = app.auth.secure ? 'https' : 'http';
+function printStartup(app, address, logger) {
+  const log = logger && typeof logger.log === 'function' ? logger.log.bind(logger) : console.log.bind(console);
+  const warn = logger && typeof logger.warn === 'function' ? logger.warn.bind(logger) : console.warn.bind(console);
   const actualPort = address.port;
+  const scheme = app.secure ? 'https' : 'http';
   const local = scheme + '://127.0.0.1:' + actualPort;
-  console.log('\nWB Price Manager — веб-сервер');
-  console.log('Режим доступа: ' + app.mode);
-  console.log('Данные: ' + app.dataDir);
-  console.log('Локальный адрес: ' + local);
-  const addresses = localAddresses();
-  console.log('Адреса интерфейсов LAN' + (app.mode === 'local' ? ' (в режиме local не слушаются)' : '') + ': ' +
-    (addresses.length ? addresses.map((ip) => scheme + '://' + ip + ':' + actualPort).join(', ') : 'не найдены'));
-  console.log('Логин: ' + (app.auth.state.user || 'admin'));
-  if (app.auth.generatedPassword) console.log('Сгенерированный пароль (сохраните сейчас): ' + app.auth.generatedPassword);
+  log('');
+  log('WB Price Manager — веб-сервер');
+  log('Режим доступа: ' + app.mode);
+  log('Данные: ' + app.dataDir);
+  log('Локальный адрес: ' + local);
+  if (app.mode === 'tunnel') {
+    log('Сервер слушает только 127.0.0.1; наружу порт не пробрасывается.');
+    log('Команда для ручного Cloudflare Tunnel: cloudflared tunnel --url ' + local + (app.secure ? ' --no-tls-verify' : ''));
+    log('Ожидаемый адрес Cloudflare: https://<случайное-имя>.trycloudflare.com (фактический URL появится в выводе cloudflared).');
+    log('Команда для ручного Tailscale Serve: tailscale serve --bg ' + local);
+    log('Ожидаемый адрес Tailscale: https://<устройство>.<tailnet>.ts.net (точный адрес: tailscale serve status).');
+    log('Автозапуск туннеля: ' + (app.tunnelAutostart && app.tunnelProvider !== 'off' ? 'включён, провайдер ' + app.tunnelProvider : 'выключен; используйте команду выше вручную'));
+  } else if (app.mode === 'local') {
+    log('LAN-адреса не слушаются: сервер принимает соединения только с этого компьютера.');
+  } else {
+    const addresses = localAddresses();
+    log('Адреса интерфейсов LAN: ' + (addresses.length ? addresses.map((ip) => scheme + '://' + ip + ':' + actualPort).join(', ') : 'не найдены'));
+  }
+  log('Логин: ' + (app.auth.state.user || 'admin'));
+  if (app.auth.generatedPassword) log('Сгенерированный пароль (сохраните сейчас): ' + app.auth.generatedPassword);
   if (app.sameSite === 'none') {
-    console.warn('ВНИМАНИЕ: --samesite none разрешает отправлять cookie с чужих сайтов (нужно для iframe-портала). Работает только по HTTPS: без сертификата нужен туннель или прокси с TLS.');
+    warn('ВНИМАНИЕ: --samesite none разрешает отправлять cookie с чужих сайтов (нужно для iframe-портала). Требуется HTTPS на внешнем адресе.');
   }
-  if (app.allowFraming) console.warn('ВНИМАНИЕ: --allow-framing разрешает встраивать страницу в iframe на любом сайте. Защита от кликджекинга отключена — используйте только для доверенного портала.');
-  if (app.mode === 'internet') console.warn('ВНИМАНИЕ: режим internet доступен извне. Используйте HTTPS, надёжный пароль и туннель/фаервол; ключи WB хранятся на этом компьютере.');
-  if (!app.auth.secure) {
-    console.warn('ВНИМАНИЕ: сейчас HTTP без шифрования. Не используйте обычный HTTP через интернет.');
-    console.log('HTTPS: для LAN установите mkcert и выполните: mkcert -install; mkcert -cert-file lan.crt -key-file lan.key localhost 127.0.0.1 <IP-LAN>, затем задайте WB_WEB_CERT=lan.crt и WB_WEB_KEY=lan.key. Для публичного домена: certbot --nginx -d example.com (Let\'s Encrypt), затем WB_WEB_CERT=/etc/letsencrypt/live/example.com/fullchain.pem и WB_WEB_KEY=/etc/letsencrypt/live/example.com/privkey.pem.');
+  if (app.allowFraming) warn('ВНИМАНИЕ: --allow-framing разрешает встраивать страницу в iframe на любом сайте. Защита от кликджекинга отключена — используйте только для доверенного портала.');
+  if (app.mode === 'internet') warn('ВНИМАНИЕ: режим internet слушает внешний интерфейс. Используйте только с HTTPS, надёжным паролем и без проброса незашифрованного порта.');
+  if (app.insecureHttp) warn('ОПАСНО: HTTP без TLS включён флагом --insecure-i-know. На каждой HTML-странице показывается предупреждение; не используйте в публичной сети.');
+  else if (app.mode === 'lan' && !app.secure) warn('ВНИМАНИЕ: HTTP в LAN не шифрует трафик. Для недоверенной сети настройте локальный сертификат.');
+  if (app.mode === 'lan' && !app.secure) {
+    log('HTTPS в LAN: mkcert -install; mkcert -cert-file lan.crt -key-file lan.key localhost 127.0.0.1 <IP-LAN>, затем задайте WB_WEB_CERT=lan.crt и WB_WEB_KEY=lan.key.');
   }
-  if (app.mode === 'internet') {
-    console.log('Доступ без белого IP через Cloudflare Tunnel: cloudflared tunnel --url http://localhost:' + actualPort);
-    console.log('Через Tailscale Serve: tailscale serve --bg ' + actualPort);
-    console.log('Через SSH reverse tunnel (на сервере с публичным SSH): ssh -N -R 0.0.0.0:8443:localhost:' + actualPort + ' user@your-vps');
+  if (app.mode === 'internet' && app.secure) {
+    log('HTTPS активен на сервере; сертификат и ключ заданы через --cert/--key (или WB_WEB_CERT/WB_WEB_KEY).');
   }
-  console.log('');
+  log('');
 }
 
 async function main() {
@@ -513,6 +758,7 @@ async function main() {
   }
   const address = await app.listen();
   printStartup(app, address);
+  if (app.mode === 'tunnel') app.startTunnel(address.port);
   let shuttingDown = false;
   const shutdown = async (signal) => {
     if (shuttingDown) return;
@@ -531,4 +777,4 @@ if (require.main === module) {
   main().catch((err) => { console.error('[web] Не удалось запустить сервер: ' + (err && err.stack || err)); process.exitCode = 1; });
 }
 
-module.exports = { createWebServer, parseArgs, isPrivateIp, getClientIp, makeCsp, MAX_BODY_BYTES, MAX_INVOKE_BODY_BYTES, SSE_MAX };
+module.exports = { createWebServer, parseArgs, printStartup, findExecutable, isPrivateIp, getClientIp, makeCsp, MAX_BODY_BYTES, MAX_INVOKE_BODY_BYTES, SSE_MAX };
