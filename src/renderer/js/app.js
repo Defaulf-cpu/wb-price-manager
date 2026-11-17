@@ -5,17 +5,29 @@ window.App = (function () {
 
   const NAV = [
     { id: 'dashboard', ico: '▦', label: 'Панель' },
-    { id: 'prices', ico: '₽', label: 'Цены и скидки' },
     { id: 'repricer', ico: '⟳', label: 'Репрайсер' },
     { id: 'promos', ico: '％', label: 'Акции WB' },
-    { id: 'economics', ico: '∑', label: 'Экономика' },
-    { id: 'costs', ico: '⚙', label: 'Себестоимость' },
     { id: 'reports', ico: '🖶', label: 'Отчёты' },
     { id: 'pl-summary', ico: '∑', label: 'Сводка P&L' },
     { id: 'settings', ico: '⚿', label: 'Настройки' }
   ];
 
   function toast(msg, kind, ms) { UI.toast(msg, kind, ms); }
+
+  const THEME_KEY = 'wb.ui.theme';
+  let theme = 'dark';
+  function setTheme(value) {
+    theme = value === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* недоступное хранилище не мешает теме */ }
+    if (API.isElectron) API.invoke('ui:theme', theme).catch(() => {});
+    document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
+      button.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная';
+      button.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
+      button.setAttribute('aria-pressed', String(theme === 'light'));
+    });
+    return theme;
+  }
 
   let updatePromptVersion = '';
   let switchingProfile = false;
@@ -37,9 +49,11 @@ window.App = (function () {
     }
   }
   function resetViewsForProfile() {
+    window.__promoDecisions = null;
     for (const [view, defaults] of viewDefaults) {
       const subscribed = view._subscribed;
       if (view.updateStatusOff) view.updateStatusOff();
+      if (view._gridLayout) view._gridLayout.destroy();
       if (view._clickTimer) clearTimeout(view._clickTimer);
       for (const key of Object.keys(view)) if (!Object.prototype.hasOwnProperty.call(defaults, key)) delete view[key];
       for (const [key, descriptor] of Object.entries(defaults)) {
@@ -165,8 +179,11 @@ window.App = (function () {
     el.innerHTML = `${U.fmt(st.items.length)} товаров · ${st.demo ? 'демо' : 'WB API'}<br>обновлено ${U.date(when, true)}${facts}`;
   }
 
-  function go(id) {
+  function go(id, options) {
     if (switchingProfile) return;
+    const embedded = { prices: 'price-tools', economics: 'economics', costs: 'costs' };
+    if (embedded[id]) { Views.repricer.tab = embedded[id]; id = 'repricer'; }
+    else if (id === 'repricer' && !(options && options.keepTab)) Views.repricer.tab = 'prices';
     const view = Views[id];
     if (!view) { toast('Раздел не найден: ' + id, 'err'); return; }
     S.state.view = id;
@@ -322,7 +339,7 @@ window.App = (function () {
     updateNavCounts();
     updateSyncInfo();
     setModeBadge();
-    go(S.state.view);
+    go(S.state.view, { keepTab: true });
   }
 
   /**
@@ -430,6 +447,10 @@ window.App = (function () {
       });
     }
     if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
+    const themeButton = mk(theme === 'dark' ? '☀ Светлая' : '☾ Тёмная', 'btn-ghost', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
+    themeButton.dataset.themeToggle = '1';
+    themeButton.setAttribute('aria-label', 'Переключить светлую или тёмную тему');
+    themeButton.setAttribute('aria-pressed', String(theme === 'light'));
     mk('Справка', 'btn-ghost', showHelp);
     // в веб-версии (tools/web-server.js) нужна видимая кнопка выхода: сессия живёт 12 часов,
     // а компьютер может быть чужим. В Electron и в dev-сервере кнопки нет — там нет и сессии.
@@ -512,6 +533,8 @@ window.App = (function () {
   }
 
   async function init() {
+    try { theme = localStorage.getItem(THEME_KEY) || 'dark'; } catch (_) {}
+    setTheme(theme);
     rememberViewDefaults();
     const dirtyInput = (event) => { if (event.target && event.target.closest && event.target.closest('#view, #modal-root')) formDirty = true; };
     document.addEventListener('input', dirtyInput);
@@ -593,7 +616,7 @@ window.App = (function () {
     }
   }
 
-  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey, switchProfile, refreshProfiles, reloadProfileData, hasUnsavedProfileEdits };
+  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey, switchProfile, refreshProfiles, reloadProfileData, hasUnsavedProfileEdits, setTheme, getTheme: () => theme };
 })();
 
 document.addEventListener('DOMContentLoaded', () => App.init());

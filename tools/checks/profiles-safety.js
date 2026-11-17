@@ -311,7 +311,7 @@ module.exports = async function runSafety(check) {
     w.HTMLCanvasElement.prototype.getContext = () => null;
     try {
       w.eval(read('electron/economics.js')); w.eval(read('electron/repricer-engine.js'));
-      for (const match of html.matchAll(/<script src="\.\/(js\/[^"]+)"><\/script>/g)) w.eval(read('src/renderer/' + match[1]));
+      for (const match of html.matchAll(/<script src="\.\/(js\/[^"]+)"><\/script>/g)) w.eval(read('src/renderer/' + match[1].split('?')[0]));
       doc.dispatchEvent(new w.Event('DOMContentLoaded'));
       await sleep(80);
       check('L UI: запуск с несколькими профилями читает A', w.S.state.appState.activeProfileId === 'default' && w.S.state.costs['1001'].costPriceRub === 100);

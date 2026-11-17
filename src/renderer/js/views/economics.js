@@ -234,7 +234,8 @@ Views.economics = {
         acceptRub: U.num(s.acceptRub),
         acquiringPct: U.num(s.acquiringPct),
         taxMode: v(ids.tax).value,
-        taxRatePct: U.num((EC.TAX_MODES.find((m) => m.id === v(ids.tax).value) || {}).rate),
+        taxRatePct: EC.resolveTax(Object.assign({}, s, { taxRate: U.num((EC.TAX_MODES.find((m) => m.id === v(ids.tax).value) || {}).rate) }), v(ids.tax).value).effectiveRate,
+        taxDetails: EC.resolveTax(Object.assign({}, s, { taxRate: U.num((EC.TAX_MODES.find((m) => m.id === v(ids.tax).value) || {}).rate) }), v(ids.tax).value),
         sppPct: U.num(v(ids.spp).value),
         volumeLiters: 0
       };

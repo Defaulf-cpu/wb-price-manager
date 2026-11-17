@@ -36,7 +36,7 @@ function makeSecretBox() {
  */
 function registeredChannels() {
   const ui = [
-    'ui:export-csv', 'ui:import-csv', 'ui:open-external', 'ui:app-info', 'ui:theme',
+    'ui:export-csv', 'ui:import-csv', 'ui:import-file', 'ui:open-external', 'ui:app-info', 'ui:theme',
     'ui:update-state', 'ui:update-check', 'ui:update-enable', 'ui:update-restart',
     'ui:save-backup', 'ui:open-backup'
   ];
@@ -137,10 +137,10 @@ function registerIpc() {
       defaultPath: defaultPath || 'export.csv',
       filters: [{ name: 'CSV', extensions: ['csv'] }, { name: 'Все файлы', extensions: ['*'] }]
     });
-    if (canceled || !filePath) return { ok: false, canceled: true };
+    if (canceled || !filePath) return { ok: true, data: { canceled: true } };
     fs.writeFileSync(filePath, '\uFEFF' + content, 'utf8');
     shell.showItemInFolder(filePath);
-    return { ok: true, filePath };
+    return { ok: true, data: { filePath } };
   });
 
   ipcMain.handle('ui:import-csv', async () => {
@@ -149,8 +149,8 @@ function registerIpc() {
       properties: ['openFile'],
       filters: [{ name: 'CSV / TXT', extensions: ['csv', 'txt'] }]
     });
-    if (canceled || !filePaths || !filePaths.length) return { ok: false, canceled: true };
-    return { ok: true, content: fs.readFileSync(filePaths[0], 'utf8').replace(/^\uFEFF/, '') };
+    if (canceled || !filePaths || !filePaths.length) return { ok: true, data: { canceled: true } };
+    return { ok: true, data: { content: fs.readFileSync(filePaths[0], 'utf8').replace(/^\uFEFF/, '') } };
   });
 
   /**
@@ -168,14 +168,10 @@ function registerIpc() {
         { name: 'Все файлы', extensions: ['*'] }
       ]
     });
-    if (canceled || !filePaths || !filePaths.length) return { ok: false, canceled: true };
+    if (canceled || !filePaths || !filePaths.length) return { ok: true, data: { canceled: true } };
+    if (fs.statSync(filePaths[0]).size > MAX_BACKUP_BYTES) throw new Error('Файл больше 100 МБ: выберите меньшую таблицу.');
     const buf = fs.readFileSync(filePaths[0]);
-    return {
-      ok: true,
-      fileName: path.basename(filePaths[0]),
-      size: buf.length,
-      base64: buf.toString('base64')
-    };
+    return { ok: true, data: { fileName: path.basename(filePaths[0]), size: buf.length, base64: buf.toString('base64') } };
   });
 
   /** Файловые диалоги задания J: JSON без BOM, отмена не запускает скачивание. */

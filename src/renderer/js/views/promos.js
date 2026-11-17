@@ -121,13 +121,8 @@ Views.promos = {
       `);
       card.querySelector('[data-open]').onclick = () => this.openPromo(p);
       card.querySelector('[data-upload]').onclick = () => this.importNoms(p, () => this.renderList());
-      /**
-       * «Перейти к акции» открывает кабинет WB в системном браузере: там акция находится
-       * в «Календаре акций», а файл состава скачивается кнопками
-       * «Перейти к товарам для акции» → «Сформировать» → «Скачать».
-       * Прямого адреса конкретной акции WB не публикует, поэтому шаблон ссылки настраивается
-       * (Настройки → «Ссылка на акцию в кабинете WB»), а {id}/{name} подставляются сами.
-       */
+      // Открываем точный action=ID в системном браузере. Если WB потребует вход,
+      // авторизуйтесь в нём; приложение не подменяет ссылку общей главной страницей.
       card.querySelector('[data-link]').onclick = () => {
         const url = U.promoCabinetUrl({ id: p.id, name: card.querySelector('[data-link]').getAttribute('data-name') }, st.settings);
         API.openExternal(url);
@@ -208,72 +203,39 @@ Views.promos = {
    * считает вход/выход, плановую цену и экономику — так же, как если бы состав приехал из API.
    */
   async importNoms(p, after) {
-    const file = await API.importFile({
-      title: 'Список товаров акции «' + p.name + '»',
-      extensions: ['xlsx', 'csv', 'txt'],
-      filterName: 'Список товаров (XLSX, CSV)'
-    });
+    let file;
+    try { file = await API.importFile({ title: 'Товары акции «' + p.name + '»', extensions: ['xlsx', 'csv', 'txt'], filterName: 'Выгрузка WB (XLSX / CSV)' }); }
+    catch (error) { App.toast(error.message, 'err'); return; }
     if (!file) return;
-
-    const wait = UI.modal({
-      title: 'Загрузка списка товаров',
-      size: 'sm',
-      dismissable: false,
-      content: `<div class="loader"><div class="spinner"></div><span>Читаем ${U.esc(file.fileName)}…</span></div>`
-    });
-
+    const wait = UI.modal({ title: 'Чтение выгрузки WB', size: 'sm', dismissable: false, content: UI.loading('Читаем «' + file.fileName + '»…') });
+    const payload = { promotionID: p.id, fileName: file.fileName, base64: file.base64 };
     try {
-      const res = await API.invoke('promos:import-noms', {
-        promotionID: p.id, fileName: file.fileName, base64: file.base64
-      });
+      if (file.size > 50 * 1024 * 1024) throw new Error('Файл больше 50 МБ. Выгрузите меньшую таблицу.');
+      const result = await API.invoke('promos:import-noms', { ...payload, action: 'preview' });
       wait.close();
-
-      const sample = (res.sample || []).map((x) => `<tr>
-          <td class="mono">${x.nmID}</td>
-          <td>${U.esc(x.vendorCode || '—')}</td>
-          <td class="tiny">${U.esc(x.title || '—')}</td>
-          <td class="num">${x.planPrice ? U.money(x.planPrice) : '—'}</td>
-          <td class="num">${x.planDiscount ? U.pct(x.planDiscount, 0) : '—'}</td>
-          <td>${x.inAction ? UI.badge('в акции', 'ok') : UI.badge('кандидат', 'info')}</td>
-        </tr>`).join('');
-
-      UI.modal({
-        title: 'Список товаров загружен',
-        content: `
-          <div class="alert ok"><b>${U.fmt(res.count)}</b> товаров добавлено в акцию «${U.esc(p.name)}» из файла
-            <span class="mono">${U.esc(res.fileName || '')}</span>.
-            ${res.skipped ? ' Пропущено строк без артикула WB: <b>' + U.fmt(res.skipped) + '</b>.' : ''}</div>
-          <p class="hint">Распознанные колонки: <span class="mono">${U.esc((res.headers || []).join(' | ') || '—')}</span></p>
-          ${sample ? `<p class="hint" style="margin-top:8px">Первые строки:</p>
-            <table class="grid-table"><thead><tr><th>nmID</th><th>Артикул</th><th>Название</th>
-              <th class="num">Плановая цена</th><th class="num">Скидка</th><th>Статус</th></tr></thead>
-            <tbody>${sample}</tbody></table>` : ''}
-          <p class="hint" style="margin-top:10px">Репрайсер теперь видит эти товары в составе акции и считает по ним
-            вход, выход и цены. Список сохранён в данных приложения и переживёт перезапуск.</p>`,
-        buttons: [
-          { label: 'Удалить список', class: 'btn-ghost', onClick: async () => {
-              await API.invoke('promos:clear-noms', { promotionID: p.id });
-              window.__promoDecisions = null;
-              App.toast('Загруженный список удалён', 'ok');
-              if (after) after();
-            } },
-          { label: 'Закрыть', class: 'btn-primary', onClick: () => {
-              window.__promoDecisions = null;   // решения пересчитаются с новым составом
-              if (after) after();
-            } }
-        ]
-      });
-    } catch (e) {
+      const sample = (result.items || result.sample || []).slice(0, 100);
+      const modal = UI.modal({ title: 'Предпросмотр условий акции', size: 'lg',
+        content: `<div class="alert info">Прочитано <b>${U.fmt(result.count)}</b> товаров. Пока ничего не сохранено и не отправлено в WB.</div>
+          <p class="hint">Файл: ${U.esc(file.fileName)} · лист ${U.esc(result.sheet || 'таблица')} · заголовок ${result.headerRow || 'без заголовка'} · пропущено строк ${U.fmt(result.skipped)}.</p>
+          ${(result.warnings || []).map((text) => '<div class="alert warn">' + U.esc(text) + '</div>').join('')}
+          <p class="tiny muted">Колонки: ${U.esc((result.headers || []).join(' | '))}</p>
+          <div class="tablewrap" style="max-height:45vh"><table class="grid-table"><thead><tr><th>Артикул WB</th><th>Артикул продавца</th><th>Товар</th><th>Цена для акции, ₽</th><th>Статус из файла</th></tr></thead><tbody>
+          ${sample.map((row) => `<tr><td>${row.nmID}</td><td>${U.esc(row.vendorCode)}</td><td>${U.esc(row.title)}</td><td>${row.planPrice ? U.money(row.planPrice, 2) : 'порог не распознан'}</td><td>${row.inActionKnown ? row.inAction ? 'участвует на дату файла' : 'не участвует на дату файла' : 'не указан'}</td></tr>`).join('')}
+          </tbody></table></div><p class="hint">Показаны первые ${sample.length} строк. Сохранится весь список; участие затем отслеживается по фактической цене WB, а не по ручному черновику.</p><p id="promo-import-error" class="neg"></p>`,
+        buttons: [{ label: 'Отмена', class: 'btn-ghost' }, { label: 'Сохранить', class: 'btn-primary', keepOpen: true, onClick: async (dialog) => {
+          const button = dialog.foot.querySelector('.btn-primary'); button.disabled = true;
+          try {
+            await API.invoke('promos:import-noms', { ...payload, action: 'apply' });
+            dialog.close(); if (this.promoModal) this.promoModal.close();
+            window.__promoDecisions = null;
+            if (after) after();
+            App.toast('Условия сохранены для репрайсера. Цены в WB не отправлялись.', 'ok', 7000);
+            await this.openPromo(p);
+          } catch (error) { dialog.body.querySelector('#promo-import-error').textContent = error.message; button.disabled = false; }
+        } }] });
+    } catch (error) {
       wait.close();
-      UI.modal({
-        title: 'Не удалось загрузить список товаров',
-        size: 'sm',
-        content: `<div class="alert danger">${U.esc(e.message)}</div>
-          <p class="hint" style="margin-top:10px">Ожидается файл из кабинета WB: календарь акций → нужная акция →
-          «Настроить список товаров» → скачать. В первой строке должны быть заголовки, артикулы WB — числа.
-          Если файл в другом формате, сохраните его как CSV (разделитель «;») и загрузите снова.</p>`,
-        buttons: [{ label: 'Закрыть', class: 'btn-primary' }]
-      });
+      UI.modal({ title: 'Файл акции не прочитан', size: 'md', content: '<div class="alert danger">' + U.esc(error.message) + '</div><p class="hint">Нужна исходная выгрузка WB в XLSX/CSV с колонкой «Артикул WB / nmID». Лист с инструкцией и строки перед заголовком допускаются. Если файл всё равно не читается — пришлите сам файл, не скриншот.</p>', buttons: [{ label: 'Закрыть', class: 'btn-primary' }] });
     }
   },
 
@@ -300,7 +262,7 @@ Views.promos = {
     body.innerHTML = UI.loading('Загружаем товары акции…');
 
     const m = UI.modal({
-      title: `${p.name} — вход в акцию (скидка от ${U.pct(req, 0)})`,
+      title: `${p.name} — условия для репрайсера`,
       content: body,
       buttons: [
         { label: 'Перейти к акции в кабинете WB ↗', class: 'btn-ghost', keepOpen: true, onClick: () => {
@@ -310,7 +272,7 @@ Views.promos = {
         { label: 'Загрузить товары из файла', class: 'btn-ghost', keepOpen: true, onClick: () => this.importNoms(p, () => { m.close(); this.renderList(); }) },
         { label: 'Экспорт CSV', class: 'btn-ghost', keepOpen: true, onClick: () => this.exportPromo(p) },
         { label: 'Закрыть' },
-        { label: 'Ввести выбранные в акцию', class: 'btn-primary', keepOpen: true, onClick: () => this.joinSelected(p) }
+        { label: 'Сохранить', class: 'btn-primary', keepOpen: true, onClick: () => this.saveSelection(p) }
       ]
     });
 
@@ -349,10 +311,11 @@ Views.promos = {
 
     const buildRow = (n) => {
       const r = rowsMap.get(Number(n.nmID));
-      const item = r ? r.item : { nmID: n.nmID, vendorCode: n.vendorCode, brand: n.brand, price: n.price, discount: n.discount, categoryName: n.categoryName || '', volumeLiters: n.volumeLiters };
+      const item = r ? Object.assign({}, r.item, { price: n.price, discount: n.discount }) : { nmID: n.nmID, vendorCode: n.vendorCode, brand: n.brand, price: n.price, discount: n.discount, categoryName: n.categoryName || '', volumeLiters: n.volumeLiters };
       const ov = st.overrides[String(n.nmID)] || {};
-      const curDisc = U.num(r ? r.discount : n.discount);
-      const targetDisc = Math.max(req, curDisc);
+      const curDisc = U.num(n.discount);
+      const planDisc = n.planPrice > 0 && item.price > 0 ? 100 * (1 - n.planPrice / item.price) : req;
+      const targetDisc = Math.min(99, Math.max(planDisc, curDisc));
       const a = EC.analyze(st.settings, item, ov, { discountPct: targetDisc });
       const profit = a.next ? a.next.profit : a.current.profit;
       const margin = a.next ? a.next.marginPct : a.current.marginPct;
@@ -368,16 +331,17 @@ Views.promos = {
         gap: Math.max(0, req - curDisc),
         eligible: curDisc + 0.0001 >= req,
         sellerPrice: seller,
-        profit: r ? r.profit : a.current.profit,
+        profit: a.current.profit,
         promoProfit: profit,
         promoMargin: margin,
-        delta: profit - (r ? r.profit : a.current.profit),
+        delta: profit - a.current.profit,
         stock: U.num(n.stock !== undefined ? n.stock : (r && r.stock)),
         sales30: r ? r.sales30 : 0,
         // цифры из файла кабинета WB: плановая цена и плановая скидка акции
         planPrice: U.num(n.planPrice || n.plannedPrice),
         planDiscount: U.num(n.planDiscount || n.plannedDiscount),
         source: n.source || promoData.source || 'none',
+        observation: n.observation || null, managed: n.managed !== false,
         verdict: profit < 0 ? 'loss' : (margin < U.num(st.settings.targetMarginPct) ? 'below' : 'ok'),
         decision: decisionOf(n.nmID)
       };
@@ -385,7 +349,7 @@ Views.promos = {
 
     const candidates = nomenclatures.map(buildRow);
     const inside = inAction.map(buildRow);
-    st.promoSelection = st.promoSelection || new Set();
+    st.promoSelection = new Set(promoData.selectedOnly ? (promoData.selectedIds || []).map(Number) : allNoms.map((row) => Number(row.nmID)));
 
     const losses = candidates.filter((c) => c.verdict === 'loss');
     const below = candidates.filter((c) => c.verdict === 'below');
@@ -414,6 +378,7 @@ Views.promos = {
         ${promoData.apiError ? UI.badge('API: ' + U.esc(promoData.apiError), 'warn') : ''}
         <span class="hint">К WB за составом не обращаемся: окно строится из загруженного файла и данных ваших товаров.</span>
       </div>
+      <div class="alert info">«Сохранить» задаёт товары для управления репрайсером — без отправки цен. Участие по цене означает, что все известные размеры стоят не выше порога из файла во время акции; это не подтверждение состава от WB. Отправка — только в репрайсере или по явно включённому расписанию.</div>
       <div class="grid g5" style="margin-bottom:12px">
         <div class="card stat"><span class="label">Требуемая скидка</span><span class="value">${U.pct(req, 0)}</span><span class="hint">${U.esc(p.joinType || p.type || '')}</span></div>
         <div class="card stat"><span class="label">Кандидатов</span><span class="value">${candidates.length}</span><span class="hint">уже в акции: ${inside.length}</span></div>
@@ -425,7 +390,7 @@ Views.promos = {
         <div class="tab active" data-tab="candidates">Кандидаты на вход (${candidates.length})</div>
         <div class="tab" data-tab="safe">Только прибыльные (${okCount.length + below.length})</div>
         <div class="tab" data-tab="risky">Убыточные (${losses.length})</div>
-        <div class="tab" data-tab="inside">Уже в акции (${inside.length})</div>
+        <div class="tab" data-tab="inside">По цене / в файле (${inside.length})</div>
       </div>
       <div class="row wrap" style="margin-bottom:8px">
         <input id="promo-q" placeholder="Поиск по артикулу или названию" style="width:280px" />
@@ -478,10 +443,12 @@ Views.promos = {
               const m = map[a.action] || [a.action, ''];
               return `<div title="${U.esc(a.reason)}">${UI.badge(m[0], m[1])}<div class="tiny muted">${a.raiseTo ? 'поднять до ' + U.money(a.raiseTo) : (a.joinPrice ? 'цена ' + U.money(a.joinPrice) : '')}</div></div>`;
             } },
-          { title: '', render: (c) => tab === 'inside'
-              ? `<button class="btn btn-xs btn-danger" data-exit="${c.nmID}">Выйти из акции</button>`
-              : (c.decision && (c.decision.action === 'join' || c.decision.action === 'recommend')
-                  ? `<button class="btn btn-xs btn-ok" data-joinone="${c.nmID}">Войти</button>` : '') }
+          { title: 'Наблюдение цены', render: (c) => {
+              const names = { 'by-price': 'Все размеры ≤ порога', 'above-price': 'Выше акционной цены',
+                'partial-sizes': 'Только часть размеров', ready: 'Готов к началу акции', 'not-started': 'Акция не началась',
+                ended: 'Акция завершена', 'unknown-price': 'Нет цены / порога', 'unknown-period': 'Неизвестен период' };
+              return c.observation ? UI.badge(names[c.observation.status] || 'Нет наблюдения', c.observation.inAction ? 'ok' : 'info') : '<span class="muted">Только данные файла</span>';
+            } }
         ],
         rows: list.slice(0, 500),
         select: {
@@ -588,54 +555,17 @@ Views.promos = {
     );
   },
 
-  async joinSelected(p) {
-    const st = S.state;
-    const req = U.num(p.requiredDiscountPct || p.participationPercentage);
-    const ids = Array.from(st.promoSelection || []);
-    if (!ids.length) { App.toast('Выберите товары для входа в акцию', 'warn'); return; }
-
-    const all = (this.promoRows.candidates || []).concat(this.promoRows.inside || []);
-    const chosen = all.filter((c) => ids.includes(c.nmID));
-    const loss = chosen.filter((c) => c.verdict === 'loss');
-    const below = chosen.filter((c) => c.verdict === 'below');
-
-    const nomenclatures = chosen.map((c) => ({
-      nmID: c.nmID,
-      price: Math.round(c.basePrice),
-      discount: Math.round(c.targetDiscount)
-    }));
-
-    UI.confirmDialog(
-      `Вход в акцию «${p.name}»`,
-      `<div class="alert ${loss.length ? 'danger' : (below.length ? 'warn' : 'info')}">
-         Выбрано товаров: <b>${chosen.length}</b>.<br>
-         Скидка будет установлена не ниже <b>${U.pct(req, 0)}</b>.<br>
-         ${loss.length ? `<b class="neg">${loss.length}</b> товаров станут убыточными.<br>` : ''}
-         ${below.length ? `<b>${below.length}</b> товаров окажутся ниже целевой маржи ${U.pct(st.settings.targetMarginPct, 0)}.` : ''}
-       </div>
-       <p class="hint" style="margin-top:10px">WB применит акционную цену по своему регламенту (обычно к началу акции).
-       ${st.demo ? '<b>Демо-режим:</b> изменения останутся в приложении.</b>' : ''}</p>`,
-      async () => {
-        try {
-          const res = await API.invoke('wb:promo-join', { promotionID: p.id, nomenclatures });
-          App.toast(`В акцию отправлено товаров: ${nomenclatures.length}`, 'ok');
-          st.promoSelection.clear();
-          st.promos = [];
-          await S.loadGoods(true);
-          S.invalidate();
-          if (this.promoModal) this.promoModal.close();
-          this.render(this.container);
-          if (res && res.results) {
-            const bad = res.results.filter((r) => !r.ok);
-            if (bad.length) App.toast(`WB отклонил ${bad.length} товаров`, 'warn');
-          }
-        } catch (e) {
-          UI.modal({ title: 'Ошибка входа в акцию', size: 'sm', content: `<div class="alert danger">${U.esc(e.message)}</div>`, buttons: [{ label: 'Закрыть', class: 'btn-primary' }] });
-        }
-      },
-      `Ввести ${chosen.length} товаров`
-    );
+  async saveSelection(p) {
+    try {
+      const result = await API.invoke('promos:save-selection', { promotionID: p.id, nmIDs: Array.from(S.state.promoSelection || []) });
+      window.__promoDecisions = null;
+      App.toast('Сохранено для репрайсера: ' + result.saved + ' товаров. В WB ничего не отправлялось.', 'ok', 7000);
+      if (this.promoModal) this.promoModal.close();
+      if (this.container && this.container.isConnected) this.renderList();
+    } catch (error) { App.toast(error.message, 'err', 7000); }
   },
+
+  async joinSelected(p) { return this.saveSelection(p); },
 
   exportPromo(p) {
     const rows = (this.promoRows.candidates || []).map((c) => ({

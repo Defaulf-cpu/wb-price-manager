@@ -375,7 +375,7 @@ table.grid-table tfoot td {
 #rp-grid .rp-photo { width: 34px; height: 45px; flex: 0 0 34px; object-fit: cover;
   border-radius: 5px; background: var(--bg-3); display: inline-flex; align-items: center; justify-content: center; }
 #rp-grid .rp-validation { max-width: 210px; white-space: normal; line-height: 1.3; }
-#rp-tabs .tab[data-t="prices"], #rp-tabs .tab[data-t^="journal-"] { border-radius: 16px; }
+#rp-tabs .tab { border-radius: 16px; }
 #rp-grid .grid-table td { vertical-align: top; }
 #rp-grid .rowtitle { min-width: 0; }
 #rp-grid .rp-product .trunc { max-width: 240px; }
@@ -457,3 +457,64 @@ table.grid-table.rp-sticky-first tfoot td:nth-child(2) { left: 34px; }
 #rp-grid .rp-wrap { white-space: normal; max-width: 230px; line-height: 1.35; word-break: break-word; }
 #rp-grid .rp-wrap.neg { color: var(--danger); }
 #rp-grid .rp-wrap .badge { white-space: nowrap; }
+
+/* ── Светлая/тёмная тема и единая контрастная сетка ── */
+:root { color-scheme: dark; --row-hover: #1d2635; --row-selected: #282039; --row-dirty: #342b1c; --grid-line: #46516a; --stripe: rgba(255,255,255,.025); }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef1f7; --bg-2: #fff; --bg-3: #e9edf5;
+  --text: #172138; --muted: #516078; --line: #c5cedd; --line-2: #aebbd0;
+  --accent: #7c24cf; --accent-2: #631cab; --accent-soft: #eee3fc;
+  --ok: #137744; --warn: #935500; --danger: #bd2443; --info: #1c60a6;
+  --shadow: 0 12px 32px rgba(31,47,75,.14);
+  --row-hover: #edf3ff; --row-selected: #ede1fc; --row-dirty: #fff2d6;
+  --grid-line: #aab7cd; --stripe: rgba(31,57,97,.035);
+}
+.tabs { gap: 6px; align-items: end; overflow-x: auto; scrollbar-width: thin; }
+.tab { flex: 0 0 auto; font-family: inherit; font-size: 13px; background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 16px; padding: 10px 14px; white-space: nowrap; cursor: pointer; color: var(--muted); }
+.tab.active { border-bottom-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 650; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+table.grid-table th, table.grid-table td { border-right: 1px solid var(--grid-line); border-bottom: 1px solid var(--grid-line); }
+table.grid-table tbody tr:nth-child(even) { background: var(--stripe); }
+table.grid-table tbody tr:hover { background: var(--row-hover); }
+table.grid-table tbody tr.selected, table.grid-table tbody tr.selected:hover { background: var(--row-selected); }
+table.grid-table.rp-sticky-first tbody tr:hover td:nth-child(1), table.grid-table.rp-sticky-first tbody tr:hover td:nth-child(2) { background: var(--row-hover); }
+table.grid-table.rp-sticky-first tbody tr.selected td:nth-child(1), table.grid-table.rp-sticky-first tbody tr.selected td:nth-child(2) { background: var(--row-selected); }
+table.grid-table.rp-sticky-first tbody tr.row-dirty td:nth-child(1), table.grid-table.rp-sticky-first tbody tr.row-dirty td:nth-child(2), .grid-table tbody tr.row-dirty > td { background: var(--row-dirty); }
+:root[data-theme="light"] .tab.active { color: #641eac; }
+:root[data-theme="light"] .badge-demo { color: #6c278b; background: #f2e8fc; }
+:root[data-theme="light"] .badge-live { color: #12683b; background: #e2f4eb; }
+:root[data-theme="light"] .nav-item.active { color: #631cab; }
+
+/* ── Размеры и перетаскивание таблицы репрайсера ── */
+#rp-grid .adjustable-grid td, #rp-grid .adjustable-grid th { min-width: 0; overflow-wrap: anywhere; }
+#rp-grid .adjustable-grid td { padding: 10px; white-space: normal; }
+#rp-grid .adjustable-grid td:first-child, #rp-grid .adjustable-grid th.rp-check { width: 42px; min-width: 42px; max-width: 42px; text-align: center; }
+#rp-grid .adjustable-grid.rp-sticky-first tbody td:nth-child(2), #rp-grid .adjustable-grid.rp-sticky-first thead tr:last-child th:nth-child(1), #rp-grid .adjustable-grid.rp-sticky-first tfoot td:nth-child(2) { left: 42px; }
+#rp-grid .adjustable-grid .rp-product { max-width: none; }
+#rp-grid .adjustable-grid .rp-product .trunc, #rp-grid .adjustable-grid .rp-wrap, #rp-grid .adjustable-grid .rp-validation { max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
+#rp-grid .adjustable-grid .rowtitle { flex: 1; }
+#rp-grid .adjustable-grid select { width: 100% !important; max-width: 100%; height: auto; min-height: 32px; font-size: 12px; padding: 5px 24px 5px 7px; }
+#rp-grid .adjustable-grid input:not([type="checkbox"]), #rp-grid .adjustable-grid .cellinput { max-width: 100%; min-height: 30px; }
+#rp-grid .adjustable-grid .row { flex-wrap: wrap; }
+#rp-grid .adjustable-grid .row > select { flex: 1 1 100px; }
+#rp-grid .adjustable-grid .rp-cost-hint { max-width: none; }
+.grid-column-head { position: relative; }
+.grid-column-title { display: block; cursor: grab; min-height: 20px; padding-right: 10px; }
+.grid-column-title[draggable="false"] { cursor: default; }
+.grid-col-resize { position: absolute; top: 0; bottom: 0; right: -3px; width: 9px; z-index: 8; cursor: col-resize; touch-action: none; border-right: 2px solid transparent; }
+.grid-col-resize:hover, .grid-col-resize:focus { border-right-color: var(--accent); background: var(--accent-soft); }
+#rp-grid .grid-row-control { position: sticky; padding-top: 30px; }
+.grid-row-grip { position: absolute; top: 3px; left: 7px; width: 28px; height: 24px; border: 0; border-radius: 4px; background: var(--bg-3); color: var(--muted); cursor: grab; font-size: 17px; line-height: 20px; }
+.grid-row-grip:hover { color: var(--accent); }
+.grid-row-resize { position: absolute; left: 0; right: 0; bottom: -2px; height: 8px; z-index: 4; cursor: row-resize; touch-action: none; }
+.grid-row-resize:hover, .grid-row-resize:focus { background: var(--accent-soft); border-bottom: 2px solid var(--accent); }
+.grid-drop-target { outline: 2px solid var(--accent); outline-offset: -2px; }
+.grid-resizing { user-select: none; }
+
+:root[data-theme="light"] .alert.info, :root[data-theme="light"] .badge-info { color: #1c5595; }
+:root[data-theme="light"] .alert.warn, :root[data-theme="light"] .badge-warn { color: #805000; }
+:root[data-theme="light"] .alert.danger, :root[data-theme="light"] .badge-danger, :root[data-theme="light"] .btn-danger { color: #b02340; }
+:root[data-theme="light"] .alert.ok, :root[data-theme="light"] .badge-ok, :root[data-theme="light"] .btn-ok { color: #12683b; }
+:root[data-theme="light"] .badge-accent, :root[data-theme="light"] .rp-shopname { color: #6520a3; }
+.logo-mark { color: #fff; }

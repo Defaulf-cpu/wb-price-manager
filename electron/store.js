@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE,
+  SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE, STOCK_HISTORY_FILE,
   PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
   REPRICER_FILE, COMPETITORS_FILE, ITEMCONFIGS_FILE, PRICES_HISTORY_FILE,
   REPRICER_RUNS_FILE, FACTCOSTS_FILE, PROMOEXITS_FILE, PROMONOMS_FILE
@@ -49,8 +49,15 @@ const DEFAULT_SETTINGS = {
   acceptRub: 0,
   storageRubPerUnit: 3,
   packagingRub: 12,
-  taxMode: 'usn6', // usn6 | usn15 | nds20 | selfemployed | none
+  taxMode: 'usn6', // налог и НДС настраиваются отдельно для кабинета
   taxRate: 6,
+  taxVatRate: 0,
+  taxInsuranceEnabled: false,
+  taxAnnualRevenue: null,
+  ipFixedContribution: 57390, // 2026: можно изменить для льготы / неполного года
+  ipExtraContributionCap: 321818,
+  ipDeductContributions: true,
+  ipHasEmployees: false,
   acquiringPct: 0,
   adPctDefault: 8,
   sppDefault: 15,
@@ -101,6 +108,8 @@ const DEFAULT_SETTINGS = {
    * в «Настройки → 3.3 Акции» без обновления приложения.
    */
   promoCabinetUrl: 'https://seller.wildberries.ru/dp-promo-calendar?action={id}',
+  /** Окно аналитики эффекта акций: N дней до входа и первые N дней участия. */
+  promoAnalyticsDays: 7,
   /**
    * Состав акции через API WB запрашивать НЕ нужно: метод /calendar/promotions/nomenclatures
    * помечен «Not applicable for auto promotions» и на практике отвечает HTTP 422 почти на всё.
@@ -175,6 +184,7 @@ function createStore(dir, secretBox) {
   const settingsPath = path.join(dir, SETTINGS_FILE);
   const priceWatchPath = path.join(dir, PRICEWATCH_FILE);
   const stocksPath = path.join(dir, STOCKS_FILE);
+  const stockHistoryPath = path.join(dir, STOCK_HISTORY_FILE);
   const costsPath = path.join(dir, COSTS_FILE);
   const tasksPath = path.join(dir, TASKS_FILE);
   const secretsPath = path.join(dir, SECRETS_FILE);
@@ -358,6 +368,46 @@ function createStore(dir, secretBox) {
         meta: Object.assign({}, api.loadStocks().meta, isObject(meta) ? meta : {}, { updatedAt: new Date().toISOString() })
       });
       return { items: clean, meta: api.loadStocks().meta };
+    },
+
+    /**
+     * История полных снимков остатков для аналитики акций.
+     * Храним по одному дню объединение наблюдавшихся нулевых остатков: если хотя бы
+     * один полный снимок за день показал товар без запаса, этот факт не теряется,
+     * даже если следующий снимок того же дня уже положительный.
+     */
+    loadStockHistory() {
+      const d = readJson(stockHistoryPath, { days: {} });
+      return { days: isObject(d.days) ? d.days : {}, updatedAt: d.updatedAt || null };
+    },
+
+    appendStockSnapshot(snapshot) {
+      const s = isObject(snapshot) ? snapshot : {};
+      if (s.complete === false) return api.loadStockHistory();
+      const at = s.at || new Date().toISOString();
+      const date = s.date ? String(s.date).slice(0, 10) : new Date(Date.parse(at) + 3 * 3600000).toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return api.loadStockHistory();
+      const history = api.loadStockHistory();
+      const days = history.days;
+      const prior = days[date] || {};
+      const zeros = new Set((Array.isArray(prior.zeroNms) ? prior.zeroNms : []).map(String));
+      (Array.isArray(s.zeroNms) ? s.zeroNms : []).forEach((nm) => {
+        const key = String(nm);
+        if (/^[1-9]\d*$/.test(key)) zeros.add(key);
+      });
+      days[date] = {
+        at,
+        source: s.source || prior.source || '',
+        complete: true,
+        observations: (Number(prior.observations) || 0) + 1,
+        zeroNms: Array.from(zeros).slice(0, 150000),
+        observedNms: [...new Set([...(prior.observedNms || prior.zeroNms || []), ...(s.observedNms || s.zeroNms || [])].map(String))]
+          .filter((nm) => /^[1-9]\d*$/.test(nm)).slice(0, 150000)
+      };
+      const cutoff = new Date(Date.now() - 730 * 86400000).toISOString().slice(0, 10);
+      Object.keys(days).forEach((d) => { if (d < cutoff) delete days[d]; });
+      writeJson(stockHistoryPath, { days, updatedAt: new Date().toISOString() });
+      return api.loadStockHistory();
     },
 
     loadCompetitors() {
@@ -650,6 +700,18 @@ function createStore(dir, secretBox) {
           action: e.action || 'exit',          // join | exit | restore | skip
           promoId: e.promoId ? Number(e.promoId) : null,
           promoName: e.promoName || '',
+          promoStartAt: e.promoStartAt || '',
+          promoEndAt: e.promoEndAt || '',
+          forecast: e.forecast && typeof e.forecast === 'object' ? {
+            profitMonthNow: e.forecast.profitMonthNow === null || e.forecast.profitMonthNow === undefined || e.forecast.profitMonthNow === ''
+              ? null : (Number.isFinite(Number(e.forecast.profitMonthNow)) ? Number(e.forecast.profitMonthNow) : null),
+            profitMonthWithPromo: e.forecast.profitMonthWithPromo === null || e.forecast.profitMonthWithPromo === undefined || e.forecast.profitMonthWithPromo === ''
+              ? null : (Number.isFinite(Number(e.forecast.profitMonthWithPromo)) ? Number(e.forecast.profitMonthWithPromo) : null),
+            salesUpliftPct: e.forecast.salesUpliftPct === null || e.forecast.salesUpliftPct === undefined || e.forecast.salesUpliftPct === ''
+              ? null : (Number.isFinite(Number(e.forecast.salesUpliftPct)) ? Number(e.forecast.salesUpliftPct) : null),
+            breakEvenUpliftPct: e.forecast.breakEvenUpliftPct === null || e.forecast.breakEvenUpliftPct === undefined || e.forecast.breakEvenUpliftPct === ''
+              ? null : (Number.isFinite(Number(e.forecast.breakEvenUpliftPct)) ? Number(e.forecast.breakEvenUpliftPct) : null)
+          } : null,
           priceBefore: Number(e.priceBefore) || 0,
           priceAfter: Number(e.priceAfter) || 0,
           reason: e.reason || '',

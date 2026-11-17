@@ -94,7 +94,7 @@ const MARKERS = [
   ['src/renderer/js/app.js', "mk('Выйти'", 'кнопка «Выйти» в веб-версии'],
   ['package.json', 'web-server-flow.js', 'прогон веб-сервера в npm test'],
   ['docs/WEB.md', 'cloudflared', 'инструкция по туннелю и HTTPS'],
-  ['src/renderer/js/views/repricer.js', 'data-t="prices">Товары</div>', 'вкладка «Товары» (прежнее название «Цены и стратегии»)'],
+  ['src/renderer/js/views/repricer.js', 'data-t="prices">Товары</button>', 'вкладка «Товары» (прежнее название «Цены и стратегии»)'],
   ['src/renderer/js/views/repricer.js', 'PAGE_SIZE: 100', 'страница товаров по 100 строк'],
   ['src/renderer/js/views/repricer.js', 'rowConfig(', 'правки переживают перерисовку и смену страницы'],
   ['electron/service.js', 'себестоимость должна быть больше 2', 'серверная блокировка себестоимости ≤ 2 ₽'],
@@ -205,7 +205,7 @@ const MARKERS = [
   ["package.json", "backup-integration-flow.js", "расширенная приёмка J в npm test"],
   ["tools/uitest.js", "замена показывает отдельное подтверждение", "проверки UI слияния и замены данных"],
   ["docs/API.md", "Самостоятельное задание J: объединение", "контракт ручного объединения самостоятельного J"],
-  ["docs/TASKS-for-agents.md", "A–L и N закрыты", "исправленные статусы J и N для следующих агентов"],
+  ["docs/TASKS-for-agents.md", "A–N закрыты", "исправленные статусы J и N для следующих агентов"],
 
   // ── L: профили, безопасная миграция и изоляция IPC/веба/renderer ──
   ['electron/profiles.js', 'MIGRATION_FILE', 'возобновляемая миграция профилей'],
@@ -224,6 +224,24 @@ const MARKERS = [
   ['tools/checks/profiles-flow.js', 'await tWebServerFixed()', 'профильный прогон ждёт все асинхронные проверки'],
   ['package.json', 'test:profiles', 'приёмка L включена в тесты'],
   ['docs/API.md', '27. Профили кабинетов WB', 'контракт профилей кабинетов'],
+
+  // ── M и замечания к рабочему месту ──
+  ['electron/promo-analytics.js', 'pairPromoEpisodes', 'аналитика акций по эпизодам'],
+  ['electron/service.js', 'priceStateUpdates', 'наблюдение участия по реальной цене'],
+  ['electron/store.js', 'observedNms', 'остаток неизвестного товара не подменяется нулём'],
+  ['electron/economics.js', "id: 'nds22'", 'актуальный НДС 22% отдельным режимом'],
+  ['electron/economics.js', 'function resolveTax', 'взносы ИП и НДС считаются раздельно'],
+  ['electron/main.js', 'data: { fileName', 'исправлен контракт нативного выбора XLSX'],
+  ['src/renderer/js/grid-layout.js', 'function attach', 'изменение размеров таблицы'],
+  ['src/renderer/js/grid-layout.js', 'grid-row-resize', 'изменение высоты строки'],
+  ['src/renderer/js/grid-layout.js', 'wb.grid.v1.', 'вид таблицы сохраняется по кабинету'],
+  ['src/renderer/js/app.js', "prices: 'price-tools'", 'старые разделы перенесены внутрь РП'],
+  ['src/renderer/js/app.js', 'getTheme: () => theme', 'сохраняемая светлая и тёмная тема'],
+  ['src/renderer/js/views/promos.js', 'Предпросмотр условий акции', 'импорт файла с предпросмотром и Сохранить'],
+  ['electron/promo-import.js', 'bestPromoTable', 'выбор листа товаров после инструкции'],
+  ['electron/xlsx-lite.js', 'percentStyles', 'правильное чтение процентов Excel'],
+  ['tools/checks/web-server-flow.js', 'JS после обновления перепроверяется', 'защита от устаревшего веб-интерфейса'],
+  ['docs/API.md', '28. Рабочее место после M', 'контракты нового рабочего места'],
 
 ];
 
@@ -258,6 +276,10 @@ const REQUIRED_FILES = [
   'electron/updater.js', 'docs/BUILD.md', 'build/icon.ico',
   'build/icon.png', 'build/icon.svg',
   'electron/backup.js', 'electron/notifications.js', 'electron/profiles.js',
+  'electron/promo-analytics.js', 'electron/promo-import.js', 'electron/promo-observation.js',
+  'src/renderer/js/grid-layout.js', 'src/renderer/js/tax-ui.js',
+  'tools/checks/promo-analytics-flow.js', 'tools/checks/workspace-upgrade-flow.js', 'tools/checks/workspace-ui-safety.js',
+  'tools/checks/fixtures/promo-wb-export-synthetic.xlsx', 'tools/checks/fixtures/promo-wb-export-cp1251.csv', 'docs/ACCEPTANCE-M-WORKSPACE.md',
   'src/renderer/js/views/pl-summary.js',
   'tools/checks/profiles-flow.js', 'tools/checks/profiles-safety.js', 'docs/ACCEPTANCE-L.md',
   'tools/checks/backup-flow.js', 'tools/checks/notify-flow.js',

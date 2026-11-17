@@ -285,6 +285,7 @@ Views.settings = {
                 <select id="s-taxmode">${EC.TAX_MODES.map((m) => `<option value="${m.id}" ${s.taxMode === m.id ? 'selected' : ''}>${U.esc(m.label)}</option>`).join('')}</select>
               </label>
               <label class="field">Ставка налога, % (если своя)<input type="number" class="num" id="s-taxrate" value="${s.taxRate}" step="0.5" /></label>
+              ${TaxUI.fields('s', s)}
               <label class="field">Целевая маржинальность, %<input type="number" class="num" id="s-target" value="${s.targetMarginPct}" step="1" /></label>
               <label class="field">Порог «низкой маржи», %<input type="number" class="num" id="s-alert" value="${s.minMarginPctAlert}" step="1" /></label>
             </div>
@@ -409,12 +410,12 @@ Views.settings = {
             в приложение кнопкой «Загрузить товары из файла».
           </div>
           <label class="field">Адрес кабинета WB (шаблон ссылки)
-            <input id="s-promourl" value="${U.esc(s.promoCabinetUrl || '')}" style="width:100%"
+            <input id="s-promourl" readonly value="https://seller.wildberries.ru/dp-promo-calendar?action={id}" style="width:100%"
               placeholder="https://seller.wildberries.ru/dp-promo-calendar?action={id}" /></label>
           <p class="hint" style="margin-top:6px">Ссылка открывается <b>сразу на нужной акции</b>: в шаблон подставляется
-            <span class="mono">{id}</span> из календаря WB (доступна и подстановка <span class="mono">{name}</span>).
+            <span class="mono">{id}</span> из календаря WB.
             На странице остаётся нажать «Перейти к товарам для акции» → «Сформировать» → «Скачать».
-            Если WB поменяет адрес — поправьте эту строку, код менять не нужно.</p>
+            Старая сохранённая ссылка на главную больше не используется; ID подставляется автоматически.</p>
           <div class="row wrap" style="margin-top:10px">
             <button class="btn btn-sm" id="s-promourl-test">Открыть календарь акций сейчас</button>
             <button class="btn btn-sm btn-ghost" id="s-promourl-reset">Вернуть адрес по умолчанию</button>
@@ -630,6 +631,7 @@ Views.settings = {
     `;
 
     const $ = (id) => container.querySelector(id);
+    TaxUI.bind('s', s, container);
 
     function setBackupStatus(message, kind) {
       const host = $('#backup-status');
@@ -1170,6 +1172,8 @@ Views.settings = {
 
     // сохранение
     $('#save-all').onclick = async () => {
+      const saveButton = $('#save-all'); saveButton.disabled = true;
+      try {
       const patch = {
         model: $('#s-model').value,
         commissionDefault: U.num($('#s-comm').value),
@@ -1184,7 +1188,7 @@ Views.settings = {
         acquiringPct: U.num($('#s-acq').value),
         sppDefault: U.num($('#s-spp').value),
         taxMode: $('#s-taxmode').value,
-        taxRate: U.num($('#s-taxrate').value),
+        ...TaxUI.read('s', container),
         targetMarginPct: U.num($('#s-target').value),
         minMarginPctAlert: U.num($('#s-alert').value),
         useFactCosts: $('#f-use').checked,
@@ -1217,6 +1221,8 @@ Views.settings = {
       S.invalidate();
       App.toast('Настройки сохранены', 'ok');
       App.refreshCurrent();
+      } catch (error) { App.toast(error.message, 'err', 8000); }
+      finally { if (saveButton.isConnected) saveButton.disabled = false; }
     };
 
     // фактические расходы из отчёта WB
@@ -1347,8 +1353,9 @@ Views.settings = {
     $('#s-promourl-test').onclick = () => {
       const tpl = String($('#s-promourl').value || '').trim();
       if (!tpl) { App.toast('Укажите адрес кабинета WB', 'warn'); return; }
-      API.openExternal(U.promoCabinetUrl({ id: '{id}', name: '{name}' }, { promoCabinetUrl: tpl }));
-      App.toast('Открыли кабинет WB в браузере. Если страница не та — поправьте шаблон адреса и сохраните настройки.', 'ok', 8000);
+      const promo = S.state.promos[0] || { id: 3148 };
+      API.openExternal(U.promoCabinetUrl(promo));
+      App.toast('Открыта прямая ссылка на акцию ' + promo.id + '. Войдите в кабинет WB, если потребуется авторизация.', 'ok', 8000);
     };
 
     $('#s-promourl-reset').onclick = () => {

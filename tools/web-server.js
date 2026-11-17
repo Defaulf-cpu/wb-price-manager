@@ -606,7 +606,7 @@ function createWebServer(options) {
       // Эти общие модули используются HTML-интерфейсом и в dev-сервере.
       if (pathname === '/economics.js' || pathname === '/repricer-engine.js') {
         const file = path.join(PROJECT_ROOT, 'electron', pathname.slice(1));
-        return sendFile(file, req, res, { cache: 'public, max-age=3600' });
+        return sendFile(file, req, res, { cache: 'no-cache' });
       }
       let decoded;
       try { decoded = decodeURIComponent(pathname); }
@@ -616,7 +616,7 @@ function createWebServer(options) {
       const candidate = path.resolve(RENDERER_ROOT, '.' + decoded);
       const relative = path.relative(RENDERER_ROOT, candidate);
       if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) return fail(403, 'Путь за пределами каталога статики запрещён.');
-      return sendFile(candidate, req, res, { cache: path.extname(candidate).toLowerCase() === '.html' ? 'no-cache' : 'public, max-age=3600' });
+      return sendFile(candidate, req, res, { cache: ['.html', '.js', '.css'].includes(path.extname(candidate).toLowerCase()) ? 'no-cache' : 'public, max-age=3600' });
     })().catch((err) => {
       errorLog('[web] Ошибка запроса ' + req.method + ' ' + requestPath + ': ' + (err && err.stack || err));
       fail(500, 'Внутренняя ошибка сервера.');

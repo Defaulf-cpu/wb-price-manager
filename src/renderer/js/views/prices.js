@@ -143,8 +143,8 @@ Views.prices = {
 
   refresh() {
     const st = S.state;
-    // контейнер берём из DOM каждый раз — раздел могли перерисовать
-    this.container = document.getElementById('view');
+    // Панель может быть вложена в репрайсер: не подменяем её всем #view.
+    if (!this.container || !this.container.isConnected) return;
     const host = this.container && this.container.querySelector('#grid-host');
     if (!host) return;
     host.innerHTML = '';

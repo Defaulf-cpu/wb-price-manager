@@ -119,7 +119,7 @@ async function run() {
   const rendererScripts = [];
   const scriptRe = /<script src="\.\/(js\/[^"]+)"><\/script>/g;
   let sm;
-  while ((sm = scriptRe.exec(indexHtml))) rendererScripts.push(path.join(RENDERER, sm[1].replace(/\//g, path.sep)));
+  while ((sm = scriptRe.exec(indexHtml))) rendererScripts.push(path.join(RENDERER, sm[1].split('?')[0].replace(/\//g, path.sep)));
   if (rendererScripts.length < 5) throw new Error('Не удалось разобрать список скриптов из index.html');
   const scripts = [
     path.join(ROOT, 'electron', 'economics.js'),
@@ -162,7 +162,7 @@ async function run() {
   check('акции загружены', window.S.state.promos.length > 0, window.S.state.promos.length + ' шт');
 
   const navCount = doc.querySelectorAll('.nav-item').length;
-  check('навигация построена', navCount === 9, navCount + ' пунктов');
+  check('навигация построена', navCount === 6, navCount + ' пунктов');
   check('модуль репрайсера загружен в интерфейс', !!window.RP && typeof window.RP.computeItem === 'function');
 
   // обход всех разделов
@@ -242,16 +242,13 @@ async function run() {
     if (pm) {
       const selSafe = Array.from(pm.querySelectorAll('.btn')).find((b) => /Выбрать прибыльные/.test(b.textContent));
       if (selSafe) { selSafe.click(); await wait(300); }
-      const joinBtn = Array.from(pm.querySelectorAll('.modal-foot .btn')).find((b) => /Ввести выбранные/.test(b.textContent));
-      check('есть кнопка входа в акцию', !!joinBtn);
-      if (joinBtn && window.S.state.promoSelection && window.S.state.promoSelection.size) {
-        joinBtn.click();
-        await wait(600);
-        const confirmModal = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
-        check('появилось подтверждение входа в акцию', !!confirmModal && /Вход в акцию/.test(confirmModal.textContent));
-        const ok = confirmModal && Array.from(confirmModal.querySelectorAll('.btn')).find((b) => /Ввести/.test(b.textContent));
-        if (ok) { ok.click(); await wait(1500); }
-        check('вход в акцию выполнен без ошибок', !errors.some((e) => /promo-join/.test(e)));
+      const saveButton = Array.from(pm.querySelectorAll('.modal-foot .btn')).find((b) => b.textContent.trim() === 'Сохранить');
+      check('есть кнопка сохранения условий для репрайсера', !!saveButton && !/Ввести выбранные/.test(pm.textContent));
+      if (saveButton && window.S.state.promoSelection && window.S.state.promoSelection.size) {
+        const tasksBefore = store.loadTasks().length;
+        saveButton.click(); await wait(650);
+        check('условия акции сохранены локально', Object.values(store.loadPromoNoms()).some((record) => record.selectedOnly && record.selectedIds.length));
+        check('сохранение условий не отправило цены в WB', store.loadTasks().length === tasksBefore);
       }
     }
   }
@@ -454,12 +451,13 @@ async function run() {
   window.App.go('repricer');
   await wait(800);
   const rpTabs = doc.querySelectorAll('#rp-tabs .tab').length;
-  check('репрайсер: вкладки построены', rpTabs === 9, rpTabs + ' вкладок');
+  check('репрайсер: вкладки построены', rpTabs === 12, rpTabs + ' вкладок');
   check('репрайсер: есть журнал изменения цен',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал изменения цен/.test(t.textContent)));
   check('репрайсер: есть журнал участия в акциях',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал участия в акциях/.test(t.textContent)));
   check('репрайсер: есть вкладка «Акции»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Акции/.test(t.textContent)));
+  check('репрайсер: есть вкладка «Аналитика акций»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Аналитика акций/.test(t.textContent)));
   check('репрайсер: состояние загружено', !!window.Views.repricer.rstate && !!window.Views.repricer.rstate.config);
   check('репрайсер: лимит шага по умолчанию 19%', window.Views.repricer.rstate.config.limits.maxChangePerUpdatePct === 19);
   check('репрайсер: стратегий в движке 9', (window.RP.STRATEGIES || []).length === 9, (window.RP.STRATEGIES || []).length + ' шт');
@@ -538,6 +536,15 @@ async function run() {
       }
     }
   }
+
+  // Аналитика акций должна отрисоваться только на локальных данных.
+  window.Views.repricer.tab = 'promo-analytics';
+  await window.Views.repricer.draw();
+  await wait(250);
+  check('репрайсер: окно N для аналитики акций настраивается', !!doc.querySelector('#paa-days'));
+  check('репрайсер: доступны CSV и XLSX для аналитики акций', !!doc.querySelector('#paa-csv') && !!doc.querySelector('#paa-xlsx'));
+  check('репрайсер: аналитика получила ответ от локального кэша', !!window.Views.repricer.promoAnalyticsData &&
+    window.Views.repricer.promoAnalyticsData.ok === true);
 
   // история изменения цен записана
   const hist = await service.handlers['repricer:history']();
@@ -2335,9 +2342,9 @@ async function run() {
   window.App.go('repricer');
   await wait(900);
   const eTabs = Array.from(doc.querySelectorAll('#rp-tabs .tab')).map((t) => t.textContent.trim());
-  check('Е: в репрайсере девять вложенных вкладок', eTabs.length === 9, eTabs.join(' | '));
+  check('Е: в репрайсере двенадцать вложенных вкладок', eTabs.length === 12, eTabs.join(' | '));
   check('Е: порядок и названия вкладок как в задании',
-    eTabs.join('|') === 'Товары|Массовые правила|Себестоимость|Конкуренты|Акции|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
+    eTabs.join('|') === 'Товары|Цены и скидки|Экономика|Массовые правила|Себестоимость|Конкуренты|Акции|Аналитика акций|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
     eTabs.join('|'));
   check('Е: отдельных вкладок «Параметры товаров» и «История запусков» больше нет',
     !eTabs.some((t) => /Параметры товаров|История запусков/i.test(t)));
@@ -2506,7 +2513,7 @@ async function run() {
     eOpenBtn.click();
     await wait(1000);
     check('Е: ссылка открывает «Цены и скидки» с фильтром по товару',
-      window.S.state.view === 'prices' && String(window.S.state.filters.q) === String(eFirst.nmID) && !!doc.getElementById('grid-host'),
+      window.S.state.view === 'repricer' && window.Views.repricer.tab === 'price-tools' && String(window.S.state.filters.q) === String(eFirst.nmID) && !!doc.getElementById('grid-host'),
       'view=' + window.S.state.view + ', q=' + window.S.state.filters.q);
     await wait(600);
     window.S.state.filters.q = '';

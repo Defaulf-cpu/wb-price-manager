@@ -37,6 +37,7 @@ function stand(seed) {
     store.saveCosts({ 1001: { costPriceRub: 500 }, 1002: { costPriceRub: 700 } });
     store.savePriceWatch({ 1001: [{ price: 999, at: '2026-01-01' }] });
     store.saveStocks({ 1001: { total: 10, byWarehouse: {}, byRegion: {}, sizeRows: 1 } }, {});
+    store.appendStockSnapshot({ at: '2026-01-01T12:00:00Z', complete: true, zeroNms: ['1002'], observedNms: ['1001', '1002'] });
     store.saveTasks([{ taskId: 'j-task', total: 2, ok: 2, source: 'manual', createdAt: '2026-01-01' }]);
     store.saveFactCosts({ 1001: { logisticsAvg: 50 } }, { dateFrom: '2026-01-01' });
     store.savePromoExits({ 1001: { promoId: 5, raisedTo: 1200 } });

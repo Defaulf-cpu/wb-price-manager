@@ -486,6 +486,7 @@ function planPromos(ctx, cfg, itemCfg, extra) {
     const planPrice = num(pr.planPrice) > 0
       ? num(pr.planPrice)
       : r2(num(ctx.basePrice) * (1 - required / 100));
+    const absolutePlan = pr.absolutePlan === true && num(pr.planPrice) > 0;
     const isAuto = String(pr.type || '').toLowerCase() === 'auto';
     const inAction = !!pr.inAction;
     const eligible = pr.eligible !== false;
@@ -504,7 +505,7 @@ function planPromos(ctx, cfg, itemCfg, extra) {
       promoType: isAuto ? 'auto' : 'manual',
       started, daysToStart,
       requiredDiscountPct: r2(required),
-      planPrice,
+      planPrice, absolutePlanPrice: absolutePlan ? planPrice : null,
       buyerPriceForecast: buyerPrice,
       sppForecastPct: r2(sppForecast),
       profitAtPlan: econ.profit,
@@ -535,23 +536,32 @@ function planPromos(ctx, cfg, itemCfg, extra) {
         // плановая цена поднимется ровно так же, и товар останется в акции.
         // Единственный надёжный способ выйти — сделать скидку СТРОГО НИЖЕ порога акции.
         // Базовую цену при этом подбираем так, чтобы цена для покупателя не упала.
-        const alreadyAbove = num(ctx.discount) < required - 1e-9;
+        const alreadyAbove = absolutePlan ? curSeller > planPrice + .005 : num(ctx.discount) < required - 1e-9;
         // Выход меняет СТРУКТУРУ цены (скидка ниже порога акции), а не её уровень:
         // цену двигаем к рабочей цене стратегии, но не больше лимита шага за обновление
         // и никогда не ниже текущей цены. До цели товар дойдёт обычными пересчётами.
         const stepPctExit = num(C.limits.maxChangePerUpdatePct);
         const capExit = stepPctExit > 0 && curSeller > 0 ? curSeller * (1 + stepPctExit / 100) : Infinity;
-        const wanted = Math.max(curSeller, floor, Math.min(strategyPrice > 0 ? strategyPrice : curSeller, capExit));
-        const exitPair = exitPairForPromo(num(ctx.basePrice), required, wanted, {
+        const absoluteTarget = absolutePlan ? planPrice * (1 + Math.max(0, bufferPct) / 100) + .01 : 0;
+        if (absolutePlan && !alreadyAbove && absoluteTarget > capExit + .005) {
+          actions.push(Object.assign(base, { action: 'warn', reason: 'Выход по фиксированной цене файла требует превышения ' + Math.round(planPrice) + ' ₽, но мешает лимит шага. Лимит не обходится; пересчитайте рабочую цену или измените ограничение осознанно.' }));
+          continue;
+        }
+        const wanted = Math.max(curSeller, floor, absoluteTarget, Math.min(strategyPrice > 0 ? strategyPrice : curSeller, capExit));
+        const exitPair = absolutePlan ? toBaseAndDiscount(wanted, { basePrice: ctx.basePrice, discount: ctx.discount }, C, I) : exitPairForPromo(num(ctx.basePrice), required, wanted, {
           canChangeBasePrice: (C.priceEdit || {}).canChangeBasePrice,
           canCancelDiscount: (C.priceEdit || {}).canCancelDiscount,
           stepLimitPct: num(C.limits.maxChangePerUpdatePct),
           curSeller
         });
-        const exitDiscountPct = exitPair.maxDiscount;
+        const exitDiscountPct = absolutePlan ? exitPair.discount : exitPair.maxDiscount;
         const exitBasePrice = exitPair.basePrice;
         const exitDisc = exitPair.discount;
-        const raiseTo = exitPair.sellerPrice;
+        const raiseTo = r2(exitPair.basePrice * (1 - exitPair.discount / 100));
+        if (absolutePlan && !alreadyAbove && raiseTo <= planPrice + .005) {
+          actions.push(Object.assign(base, { action: 'warn', reason: 'Фиксированный порог файла недостижим при запрете изменения базы/скидки. Выход не объявляется выполненным.' }));
+          continue;
+        }
         actions.push(Object.assign(base, {
           action: 'exit',
           raiseTo,
@@ -560,7 +570,8 @@ function planPromos(ctx, cfg, itemCfg, extra) {
           exitBasePrice,
           noChangeNeeded: alreadyAbove,
           restoreSellerPrice: r2(strategyPrice),
-          reason: alreadyAbove
+          absoluteExitPrice: absolutePlan ? absoluteTarget : null,
+          reason: absolutePlan ? 'Выход по фиксированному порогу файла: итоговая цена продавца должна быть строго выше ' + r2(planPrice) + ' ₽. Менять скидку ниже процента календаря не обязательно; после отправки проверяется фактическая цена WB.' : alreadyAbove
             ? `Выход из ${isAuto ? 'авто-акции' : 'акции'}: ${why}. Скидка ${r2(num(ctx.discount))}% уже ниже порога ${r2(required)}% — товар не соответствует условиям акции, менять цену не нужно, ждём вывода из акции.`
             // Итоговые цифры (скидка, база, цена) определяет самая «мягкая» из акций товара,
             // поэтому здесь — только порог этой акции и суть приёма. Подробное объяснение
@@ -653,22 +664,29 @@ function planPromos(ctx, cfg, itemCfg, extra) {
     // при нескольких акциях скидка должна быть ниже порога самой «мягкой» из них
     // самая «мягкая» акция задаёт порог: скидка должна быть ниже него, иначе товар
     // выйдет из одной акции, но останется в другой
-    const requiredMin = Math.min.apply(null, exits.map((a) => num(a.requiredDiscountPct)));
+    const relativeExits = exits.filter((a) => !a.absolutePlanPrice);
+    const absoluteTarget = Math.max(0, ...exits.map((a) => num(a.absoluteExitPrice)));
+    const absoluteThreshold = Math.max(0, ...exits.map((a) => num(a.absolutePlanPrice)));
+    const requiredMin = relativeExits.length ? Math.min.apply(null, relativeExits.map((a) => num(a.requiredDiscountPct))) : 0;
     const requiredMax = Math.max.apply(null, exits.map((a) => num(a.requiredDiscountPct)));
     // та же логика, что и для одной акции: цена в пределах шага и не ниже текущей
     const stepPctChosen = num(C.limits.maxChangePerUpdatePct);
     const capChosen = stepPctChosen > 0 && curSeller > 0 ? curSeller * (1 + stepPctChosen / 100) : Infinity;
-    const wanted = Math.max(curSeller, floor, Math.min(strategyPrice > 0 ? strategyPrice : curSeller, capChosen));
-    const pairExit = exitPairForPromo(num(ctx.basePrice), requiredMin, wanted, {
+    const wanted = Math.max(curSeller, floor, absoluteTarget, Math.min(strategyPrice > 0 ? strategyPrice : curSeller, capChosen));
+    const pairExit = relativeExits.length ? exitPairForPromo(num(ctx.basePrice), requiredMin, wanted, {
       canChangeBasePrice: (C.priceEdit || {}).canChangeBasePrice,
       canCancelDiscount: (C.priceEdit || {}).canCancelDiscount,
       stepLimitPct: num(C.limits.maxChangePerUpdatePct),
       curSeller
-    });
-    const exitDiscountPct = pairExit.maxDiscount;
+    }) : toBaseAndDiscount(wanted, { basePrice: ctx.basePrice, discount: ctx.discount }, C, I);
+    const exitDiscountPct = relativeExits.length ? pairExit.maxDiscount : pairExit.discount;
     const exitBasePrice = pairExit.basePrice;
     const exitDisc = pairExit.discount;
     const allAlreadyAbove = exits.every((a) => a.noChangeNeeded);
+    if (absoluteThreshold && !allAlreadyAbove && pairExit.basePrice * (1 - pairExit.discount / 100) <= absoluteThreshold + .005) {
+      actions.push({ action: 'warn', reason: 'При общих ограничениях цены выйти выше фиксированного порога файла не удалось; выход не подтверждается.' });
+      return { actions, chosen: null, sppForecastPct: sppForecast };
+    }
     chosen = {
       type: 'exit',
       price: allAlreadyAbove ? r2(curSeller) : r2(exitBasePrice * (1 - exitDisc / 100)),
@@ -678,6 +696,7 @@ function planPromos(ctx, cfg, itemCfg, extra) {
       requiredDiscountPct: r2(requiredMax),
       // минимальная цена, при которой товар гарантированно покидает акцию
       minExitSellerPrice: r2(Math.min.apply(null, exits.map((a) => num(a.raiseTo)))),
+      absolutePlanThreshold: absoluteThreshold || null,
       promoIds: exits.map((a) => a.promoId),
       promoNames: exits.map((a) => a.promoName),
       restoreSellerPrice: r2(strategyPrice),
@@ -685,6 +704,7 @@ function planPromos(ctx, cfg, itemCfg, extra) {
       // и склеенные причины отдельных акций противоречат друг другу по процентам
       reason: (function () {
         const names = exits.map((a) => a.promoName).join(', ');
+        if (absoluteThreshold) return 'Выход из акций (' + names + '): фиксированный порог из файла ' + r2(absoluteThreshold) + ' ₽, итоговая цена ' + r2(pairExit.basePrice * (1 - pairExit.discount / 100)) + ' ₽. Состав WB не подтверждён: после отправки проверяем фактическую цену; лимиты и размерная безопасность остаются в силе.';
         const finalPrice = allAlreadyAbove ? curSeller : exitBasePrice * (1 - exitDisc / 100);
         const why = exits.map((a) => a.promoName + ' — ' + (a.reason || '').split(':')[0]).join('; ');
         const head = allAlreadyAbove

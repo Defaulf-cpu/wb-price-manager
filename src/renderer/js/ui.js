@@ -183,7 +183,13 @@ window.UI = (function () {
           if (o.select.toggleAll) o.select.toggleAll(o.rows, cb.checked);
           else o.rows.forEach((r) => o.select.set(r, cb.checked));
           if (o.onSelect) o.onSelect();
-          renderBody();
+          // Не пересоздаём tbody: это теряло обработчики полей и маркеры размеров.
+          tbl.querySelectorAll('tbody tr').forEach((row, i) => {
+            const item = o.rows[i]; if (!item) return;
+            const selected = o.select.get(item); row.classList.toggle('selected', selected);
+            const checkbox = row.querySelector('td:first-child input[type="checkbox"]');
+            if (checkbox) checkbox.checked = selected;
+          });
         };
         th.appendChild(cb);
         (trTop || tr).appendChild(th);
@@ -223,6 +229,7 @@ window.UI = (function () {
           th.onclick = () => o.sort.onSort(c.key);
         }
         if (c.group) th.setAttribute('data-group', String(c.group));
+        if (c.colId) th.dataset.colId = c.colId;
         tr.appendChild(th);
       });
       return thead;
@@ -265,6 +272,7 @@ window.UI = (function () {
           cols.forEach((c) => {
             const td = document.createElement('td');
             if (c.num) td.className = 'num';
+            if (c.colId) td.dataset.colId = c.colId;
             if (c.cls) td.className += ' ' + c.cls;
             if (c.render) {
               const out = c.render(r);

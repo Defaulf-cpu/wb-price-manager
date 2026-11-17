@@ -211,24 +211,15 @@ window.U = (function () {
   }
 
   /**
-   * Прямая ссылка на акцию в кабинете продавца.
-   *
-   * Шаблон берётся из настройки `promoCabinetUrl`
-   * (по умолчанию `https://seller.wildberries.ru/dp-promo-calendar?action={id}`),
-   * а `{id}` и `{name}` подставляются из календаря WB. Страница открывается сразу
-   * на нужной акции: остаётся «Перейти к товарам для акции» → «Сформировать» → «Скачать».
-   * Если WB поменяет адрес — правится одна строка в настройках, код трогать не нужно.
-   *
-   * @param {{id?: *, name?: *}} promo
-   * @param {object} [settings]
+   * Точная ссылка WB по ID. Старый шаблон/главная страница игнорируются.
+   * Редиректы после открытия (например, авторизация) контролируются сайтом WB.
    */
   function promoCabinetUrl(promo, settings) {
-    const tpl = String((settings && settings.promoCabinetUrl) ||
-      'https://seller.wildberries.ru/dp-promo-calendar?action={id}');
-    const p = promo || {};
-    return tpl
-      .replace(/\{id\}/g, encodeURIComponent(p.id === undefined ? (p.promoId || '') : p.id))
-      .replace(/\{name\}/g, encodeURIComponent(p.name === undefined ? (p.promoName || '') : p.name));
+    const p = promo || {}, id = Number(p.id ?? p.promoId ?? p.promotionID);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('У акции нет корректного ID: обновите календарь WB.');
+    // Сохранённый раньше адрес главной/общего календаря не должен ломать deep link.
+    // Прямая ссылка WB задаётся контрактом, а не ненадёжным p.url из календаря.
+    return 'https://seller.wildberries.ru/dp-promo-calendar?action=' + id;
   }
 
   /**

@@ -48,7 +48,10 @@ function round(v, digits = 2) {
 const TAX_MODES = [
   { id: 'usn6', label: 'УСН «Доходы» 6%', rate: 6 },
   { id: 'usn15', label: 'УСН «Доходы − расходы» 15%', rate: 15 },
-  { id: 'nds20', label: 'ОСНО / НДС 20%', rate: 20 },
+  { id: 'usn6_ip', label: 'ИП: УСН «Доходы» + взносы отдельно', rate: 6 },
+  { id: 'nds22', label: 'НДС 22% — из цены, без входных вычетов', rate: 22 },
+  { id: 'nds20', label: 'НДС 20% — старый расчёт / архив', rate: 20, legacy: true },
+  { id: 'manual', label: 'Расчётная налоговая нагрузка вручную', rate: 6 },
   { id: 'selfemployed', label: 'Самозанятый 4–6%', rate: 4 },
   { id: 'none', label: 'Без налога', rate: 0 }
 ];
@@ -56,6 +59,44 @@ const TAX_MODES = [
 function taxModeLabel(id) {
   const m = TAX_MODES.find((t) => t.id === id);
   return m ? m.label : id;
+}
+
+/**
+ * Расчётная нагрузка для юнит-экономики, не декларация. НДС из включающей его
+ * цены: ставка/(100+ставка). Взнос ИП — 1% только превышения годового дохода;
+ * фиксированная часть и уменьшение УСН учитываются отдельно, без плоских «7%».
+ * Годовой доход — всего ИП, а не отдельного товара/кабинета; распределение пропорционально выручке.
+ */
+function resolveTax(settings, mode, nominalOverride) {
+  const s = settings || {}, taxMode = mode || s.taxMode || 'usn6';
+  const preset = TAX_MODES.find((m) => m.id === taxMode) || {};
+  const explicit = nominalOverride !== undefined && nominalOverride !== null && nominalOverride !== '';
+  let nominal = Math.max(0, Math.min(100, explicit ? num(nominalOverride) : num(s.taxRate, preset.rate || 0)));
+  if (taxMode === 'none') nominal = 0;
+  const modernVat = taxMode === 'nds22';
+  if (modernVat) nominal = 0; // это отдельный НДС, а не процент доходного налога
+  const vatNominal = modernVat ? 22 : Math.max(0, Math.min(100, num(s.taxVatRate)));
+  const vatEffective = vatNominal > 0 ? vatNominal / (100 + vatNominal) * 100 : 0;
+  const incomeEffective = nominal * (1 - vatEffective / 100);
+  const ipEnabled = /^usn6/.test(taxMode) && (taxMode === 'usn6_ip' || s.taxInsuranceEnabled === true);
+  const annualGross = Math.max(0, num(s.taxAnnualRevenue));
+  const annualBase = annualGross * (1 - vatEffective / 100);
+  const extraAnnual = ipEnabled && annualGross > 0 ? Math.min(Math.max(0, annualBase - 300000) * .01, Math.max(0, num(s.ipExtraContributionCap, 321818))) : 0;
+  const fixedAnnual = ipEnabled ? Math.max(0, num(s.ipFixedContribution, 57390)) : 0;
+  const contributions = extraAnnual + fixedAnnual;
+  const usnAnnual = annualGross * incomeEffective / 100;
+  const deductible = ipEnabled && annualGross > 0 && s.ipDeductContributions !== false && /^usn6/.test(taxMode)
+    ? Math.min(contributions, usnAnnual * (s.ipHasEmployees === true ? .5 : 1)) : 0;
+  const insuranceEffective = annualGross > 0 && ipEnabled ? contributions / annualGross * 100 : 0;
+  const deductionEffective = annualGross > 0 ? deductible / annualGross * 100 : 0;
+  const warnings = [];
+  if (ipEnabled && !annualGross) warnings.push('Не указан годовой доход всего ИП: годовые взносы не распределены на товары.');
+  if (modernVat || vatNominal > 0) warnings.push('Входной НДС, налог на прибыль/НДФЛ ОСНО и налоговые льготы здесь не рассчитываются.');
+  if (taxMode === 'usn15') warnings.push('Для УСН «Доходы − расходы» задайте расчётную эффективную нагрузку: это не расчёт налоговой базы декларации.');
+  if (taxMode === 'nds20') warnings.push('Старый режим 20% сохранён для совместимости. Для текущего НДС выберите 22%.');
+  return { mode: taxMode, nominalRate: modernVat ? 22 : nominal, vatNominal, vatEffective, incomeEffective,
+    insuranceEffective, deductionEffective, effectiveRate: vatEffective + incomeEffective + insuranceEffective - deductionEffective,
+    extraAnnual, fixedAnnual, deductibleAnnual: deductible, annualGross, ipEnabled, warnings };
 }
 
 /**
@@ -139,6 +180,7 @@ function resolveParams(settings, item, overrides, facts) {
     return Number.isFinite(n) && n >= 0 && n <= 100 ? n : undefined;
   })();
 
+  const taxDetails = resolveTax(s, taxMode, o.taxRatePct);
   return {
     categoryName: cat,
     brand: (item && item.brand) || o.brand || '',
@@ -158,7 +200,8 @@ function resolveParams(settings, item, overrides, facts) {
     costPriceRub: pickNum(o.costPriceRub),
     adRub: pickNum(o.adRub),
     taxMode,
-    taxRatePct: pickNum(o.taxRatePct, s.taxRate, (TAX_MODES.find((t) => t.id === taxMode) || {}).rate),
+    taxRatePct: taxDetails.effectiveRate,
+    taxDetails,
     acquiringPct: pickNum(o.acquiringPct, factAcquiringPct, s.acquiringPct),
     adPct: pickNum(o.adPct, catDef.adPct, s.adPctDefault),
     volumeLiters: pickNum(o.volumeLiters, item && item.volumeLiters),
@@ -283,6 +326,7 @@ function calcUnit(sellerPrice, p) {
     ad: round(ad),
     adPctSum: round(adPctSum),
     tax: round(tax),
+    taxParts: p.taxDetails ? { vat: round(revenue * p.taxDetails.vatEffective / 100), income: round(revenue * p.taxDetails.incomeEffective / 100), insurance: round(revenue * p.taxDetails.insuranceEffective / 100), deduction: round(revenue * p.taxDetails.deductionEffective / 100) } : null,
     wbTotal: round(wbTotal),
     totalCosts: round(wbTotal + ad + packaging + cogs + tax),
     fixedCosts: round(fixedCosts),
@@ -505,7 +549,7 @@ function applyRule(settings, item, overrides, rule, facts) {
 }
 
 return {
-  TAX_MODES,
+  TAX_MODES, resolveTax,
   taxModeLabel,
   num,
   round,

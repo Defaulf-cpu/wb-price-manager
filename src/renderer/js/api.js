@@ -174,10 +174,10 @@ window.API = (function () {
   async function exportCsv(filename, content) {
     if (isElectron) {
       const res = await window.wbApp.invoke('ui:export-csv', { defaultPath: filename, content });
-      if (res && res.ok && res.data && res.data.filePath) return res.data.filePath;
-      if (res && res.ok && res.data && res.data.canceled) return null;
-      U.download(filename, content);
-      return filename;
+      const data = res && (res.data || res);
+      if (data && data.canceled) return null;
+      if (res && res.ok && data.filePath) return data.filePath;
+      throw new Error(res && res.error && res.error.message || 'Приложение не подтвердило сохранение CSV.');
     }
     U.download(filename, content);
     return filename;
@@ -186,8 +186,10 @@ window.API = (function () {
   async function importCsvRaw() {
     if (isElectron) {
       const res = await window.wbApp.invoke('ui:import-csv');
-      if (res && res.ok && res.data && res.data.content) return res.data.content;
-      return null;
+      const data = res && (res.data || res);
+      if (data && data.canceled) return null;
+      if (res && res.ok && typeof data.content === 'string') return data.content;
+      throw new Error(res && res.error && res.error.message || 'Не удалось прочитать выбранный CSV.');
     }
     return new Promise((resolve) => {
       const inp = document.createElement('input');
@@ -215,8 +217,10 @@ window.API = (function () {
       const res = await window.wbApp.invoke('ui:import-file', {
         title: o.title, extensions: o.extensions, filterName: o.filterName
       });
-      if (res && res.ok && res.data && res.data.base64) return res.data;
-      return null;
+      const data = res && (res.data || res);
+      if (data && data.canceled) return null;
+      if (res && res.ok && typeof data.base64 === 'string') return data;
+      throw new Error(res && res.error && res.error.message || 'Не удалось получить содержимое выбранного файла.');
     }
     return new Promise((resolve) => {
       const inp = document.createElement('input');
