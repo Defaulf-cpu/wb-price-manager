@@ -178,6 +178,46 @@ function registerIpc() {
 
   ipcMain.handle('ui:open-external', async (_e, url) => { shell.openExternal(String(url)); return { ok: true }; });
 
+  /**
+   * Сохранить резервную копию (`.wbpm.json`) через диалог «Сохранить».
+   * Отдельный канал от ui:export-csv: CSV добавляет BOM, который ломает JSON,
+   * а резервная копия пишется атомарно (временный файл + rename).
+   */
+  ipcMain.handle('ui:save-backup', async (_e, payload) => {
+    const { defaultPath, content } = payload || {};
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'Сохранить резервную копию',
+      defaultPath: defaultPath || 'wb-price-manager-backup.wbpm.json',
+      filters: [{ name: 'WBPM backup', extensions: ['wbpm.json'] }, { name: 'Все файлы', extensions: ['*'] }]
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, String(content || ''), 'utf8');
+    fs.renameSync(tmp, filePath);
+    shell.showItemInFolder(filePath);
+    return { ok: true, filePath };
+  });
+
+  /**
+   * Выбор файла резервной копии (`.wbpm.json`) для импорта/восстановления.
+   * Читает как текст — резервная копия это JSON.
+   */
+  ipcMain.handle('ui:open-backup', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: 'Выберите файл резервной копии',
+      properties: ['openFile'],
+      filters: [{ name: 'WBPM backup', extensions: ['wbpm.json'] }, { name: 'Все файлы', extensions: ['*'] }]
+    });
+    if (canceled || !filePaths || !filePaths.length) return { ok: false, canceled: true };
+    return {
+      ok: true,
+      fileName: path.basename(filePaths[0]),
+      filePath: filePaths[0],
+      content: fs.readFileSync(filePaths[0], 'utf8')
+    };
+  });
+
   ipcMain.handle('ui:app-info', async () => ({
     ok: true,
     data: {
@@ -265,7 +305,10 @@ if (!gotLock) {
     registerEconProtocol();
     const dir = app.getPath('userData');
     store = createStore(dir, makeSecretBox());
-    service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden });
+    service = createService(store, (channel, payload) => send('svc:' + channel, payload), {
+      openHidden: openPriceWatchHidden,
+      appVersion: app.getVersion()
+    });
     updateManager = createUpdateManager({
       app,
       platform: process.platform,
@@ -285,6 +328,13 @@ if (!gotLock) {
       if (st.enabled) console.log('[repricer] планировщик запущен, следующий пересчёт:', st.nextRunAt);
     } catch (e) {
       console.error('[repricer] не удалось запустить планировщик:', e.message);
+    }
+
+    // авто-резервирование данных (если включено в настройках)
+    try {
+      service.applyBackupSchedule();
+    } catch (e) {
+      console.error('[backup] не удалось запустить планировщик резервного копирования:', e.message);
     }
 
     app.on('activate', () => {

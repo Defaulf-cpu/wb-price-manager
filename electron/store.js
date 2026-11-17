@@ -4,17 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE,
-  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE
+  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
+  REPRICER_FILE, COMPETITORS_FILE, ITEMCONFIGS_FILE, PRICES_HISTORY_FILE,
+  REPRICER_RUNS_FILE, FACTCOSTS_FILE, PROMOEXITS_FILE, PROMONOMS_FILE, BACKUPS_DIR
 } = require('./config');
-
-const REPRICER_FILE = 'repricer.json';
-const COMPETITORS_FILE = 'competitors.json';
-const ITEMCONFIGS_FILE = 'itemconfigs.json';
-const PRICES_HISTORY_FILE = 'price-history.json';
-const REPRICER_RUNS_FILE = 'repricer-runs.json';
-const FACTCOSTS_FILE = 'factcosts.json';
-const PROMOEXITS_FILE = 'promoexits.json';
-const PROMONOMS_FILE = 'promonoms.json';
 
 /** Настройки по умолчанию (все значения пользователь может изменить в разделе «Настройки»). */
 const DEFAULT_SETTINGS = {
@@ -104,6 +97,14 @@ const DEFAULT_SETTINGS = {
   /** Дополнять состав по факту скидки товара (скидка ≥ требуемой = товар в условиях акции). */
   promosInferFromDiscount: true,
   /** Справочник комиссий по категориям — значения ориентировочные, редактируются пользователем. */
+  /**
+   * Авто-резервирование данных приложения в `.data/backups/`.
+   * Резервная копия создаётся по расписанию, старые удаляются, остаются последние N.
+   */
+  backupAutoEnabled: false,
+  backupAutoFreq: 'daily',   // daily | weekly
+  backupAutoKeep: 7,         // сколько последних копий хранить
+  backupLastAt: null,
   categoryDefaults: {
     'Женская одежда': { commissionPct: 22.5, adPct: 8, taxMode: 'inherit', packagingRub: 15 },
     'Мужская одежда': { commissionPct: 22.5, adPct: 8, taxMode: 'inherit', packagingRub: 15 },

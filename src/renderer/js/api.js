@@ -237,5 +237,45 @@ window.API = (function () {
     return { version: 'web-preview', platform: navigator.platform, appDir: 'tools/.data', electron: '—', encryption: '—' };
   }
 
-  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron };
+  /**
+   * Сохранить резервную копию через диалог «Сохранить». В браузере — скачивание файла.
+   * Возвращает путь файла (Electron) или имя (браузер), либо null, если отменено.
+   */
+  async function saveBackup(defaultPath, content) {
+    if (isElectron) {
+      const res = await window.wbApp.invoke('ui:save-backup', { defaultPath, content });
+      if (res && res.ok && res.data && res.data.filePath) return res.data.filePath;
+      if (res && res.ok && res.data && res.data.canceled) return null;
+    }
+    const name = defaultPath || 'wb-price-manager-backup.wbpm.json';
+    U.download(name, content);
+    return name;
+  }
+
+  /**
+   * Выбрать файл резервной копии (`.wbpm.json`) для импорта.
+   * Возвращает { fileName, filePath, content } или null, если отменено.
+   */
+  async function openBackup() {
+    if (isElectron) {
+      const res = await window.wbApp.invoke('ui:open-backup');
+      if (res && res.ok && res.data && res.data.content) return res.data;
+      return null;
+    }
+    return new Promise((resolve) => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = '.wbpm.json,application/json';
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return resolve(null);
+        const fr = new FileReader();
+        fr.onload = () => resolve({ fileName: f.name, filePath: f.name, content: String(fr.result || '') });
+        fr.readAsText(f, 'utf-8');
+      };
+      inp.click();
+    });
+  }
+
+  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron, saveBackup, openBackup };
 })();

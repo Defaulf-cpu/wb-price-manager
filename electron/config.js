@@ -23,6 +23,21 @@ const RECALC_HISTORY_FILE = 'repricer-history.json';
 /** Журнал участия в акциях: входы, выходы и возвраты цены после автоакций. */
 const PROMOJOURNAL_FILE = 'promojournal.json';
 
+/** Конфигурация репрайсера (расписание, настройки автоцикла). */
+const REPRICER_FILE = 'repricer.json';
+/** Справочник конкурентов по артикулам. */
+const COMPETITORS_FILE = 'competitors.json';
+/** Персональная конфигурация по артикулу (себестоимость, комиссия, таксы). */
+const ITEMCONFIGS_FILE = 'itemconfigs.json';
+/** История цен по артикулу (последние изменения цены). */
+const PRICES_HISTORY_FILE = 'price-history.json';
+/** Запись прогонов репрайсера (история выполнений). */
+const REPRICER_RUNS_FILE = 'repricer-runs.json';
+/** Списки товаров акций, загруженные пользователем вручную. */
+const PROMONOMS_FILE = 'promonoms.json';
+/** Каталог резервных копий (авто-резервирование и закупка/восстановление). */
+const BACKUPS_DIR = 'backups';
+
 /** Хосты Wildberries API (боевой контур и песочница). */
 const WB_HOSTS = {
   prod: {
@@ -134,6 +149,13 @@ module.exports = {
   PROPOSALS_FILE,
   RECALC_HISTORY_FILE,
   PROMOJOURNAL_FILE,
+  REPRICER_FILE,
+  COMPETITORS_FILE,
+  ITEMCONFIGS_FILE,
+  PRICES_HISTORY_FILE,
+  REPRICER_RUNS_FILE,
+  PROMONOMS_FILE,
+  BACKUPS_DIR,
   WB_HOSTS,
   DEMO_KEY,
   RATE_LIMITS,

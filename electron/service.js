@@ -8,6 +8,7 @@ const { createPriceWatcher } = require('./price-watcher');
 const EC = require('./economics');
 const { readTable } = require('./xlsx-lite');
 const { buildXlsx } = require('./xlsx-write');
+const BP = require('./backup');
 
 const CACHE_TTL_MS = 120000;
 
@@ -2593,6 +2594,83 @@ function createService(store, emit, electron) {
       const dateFrom = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
       if (isDemo()) return getDemo().getSalesReportsList({ dateFrom, dateTo, period: s.factCostsPeriod || 'daily' });
       return getClient().getSalesReportsList({ dateFrom, dateTo, period: s.factCostsPeriod || 'daily' });
+    },
+
+    // ───────────────────────── Резервное копирование ─────────────────────────
+
+    /**
+     * Выгрузка всех данных приложения в один файл `.wbpm.json`.
+     * Ключи WB по умолчанию НЕ включаются — только при includeKeys и с паролем.
+     */
+    'backup:export': async (payload) => {
+      const p = payload || {};
+      const backup = BP.buildBackup(store, {
+        includeKeys: !!p.includeKeys,
+        password: p.password,
+        appVersion: (electron && electron.appVersion) || ''
+      });
+      // Возвращаем как строку — запись в файл делает главный процесс (диалог «Сохранить»).
+      return { ok: true, content: JSON.stringify(backup, null, 2), backup };
+    },
+
+    /**
+     * Предпросмотр композиции импортируемой копии: что будет добавлено, что перезаписано.
+     * Ничего не записывает.
+     */
+    'backup:import': async (payload) => {
+      const p = payload || {};
+      let backup;
+      if (p.content !== undefined && p.content !== null) {
+        let obj;
+        try { obj = JSON.parse(p.content); }
+        catch (e) { return { ok: false, error: { message: 'Файл резервной копии повреждён: не корректный JSON (' + (e.message || 'ошибка парсинга') + ')' } }; }
+        try { backup = BP.parseBackup(obj); }
+        catch (e) { return { ok: false, error: { message: e.message } }; }
+      } else if (p.file) {
+        try { backup = BP.readBackupFile(p.file); }
+        catch (e) { return { ok: false, error: { message: e.message } }; }
+      } else {
+        return { ok: false, error: { message: 'Не указан файл или содержимое резервной копии' } };
+      }
+      const mode = p.mode === 'replace' ? 'replace' : 'merge';
+      return { ok: true, preview: BP.previewBackup(store, backup, mode) };
+    },
+
+    /** Список авто-резервных копий в `.data/backups/`. */
+    'backup:list': async () => ({ ok: true, items: BP.listBackups(store) }),
+
+    /**
+     * Восстановление из резервной копии.
+     * Создает резервную копию текущего состояния, затем применяет merge/replace.
+     * Ключи восстанавливаются только при наличии пароля.
+     */
+    'backup:restore': async (payload) => {
+      const p = payload || {};
+      let backup;
+      if (p.content !== undefined && p.content !== null) {
+        let obj;
+        try { obj = JSON.parse(p.content); }
+        catch (e) { return { ok: false, error: { message: 'Файл резервной копии повреждён: не корректный JSON (' + (e.message || 'ошибка парсинга') + ')' } }; }
+        try { backup = BP.parseBackup(obj); }
+        catch (e) { return { ok: false, error: { message: e.message } }; }
+      } else if (p.file) {
+        try { backup = BP.readBackupFile(p.file); }
+        catch (e) { return { ok: false, error: { message: e.message } }; }
+      } else {
+        return { ok: false, error: { message: 'Не указан файл или содержимое резервной копии' } };
+      }
+      try {
+        const result = BP.applyBackup(store, backup, {
+          mode: p.mode === 'replace' ? 'replace' : 'merge',
+          password: p.password,
+          appVersion: (electron && electron.appVersion) || ''
+        });
+        // Обновляем отметку последнего авто-резервирования.
+        const next = store.saveSettings({ backupLastAt: result.restoredAt });
+        return { ok: true, result: Object.assign({}, result, { settings: next }) };
+      } catch (e) {
+        return { ok: false, error: { message: e.message || String(e) } };
+      }
     }
   };
 
@@ -4123,9 +4201,36 @@ function createService(store, emit, electron) {
     return { enabled: true, nextRunAt: sched.nextRunAt.toISOString() };
   }
 
+  // ───────────────────────── Авто-резервирование ─────────────────────────
+
+  const backupSched = { timer: null, lastCheck: null };
+
+  /**
+   * Планировщик авто-резервирования: раз в час проверяет, пора ли создать копию
+   * (настройки backupAutoEnabled / backupAutoFreq / backupAutoKeep), создаёт её и
+   * удаляет старые, оставляя последние N.
+   */
+  function applyBackupSchedule() {
+    if (backupSched.timer) { clearInterval(backupSched.timer); backupSched.timer = null; }
+    backupSched.timer = setInterval(async () => {
+      try {
+        const s = getSettings();
+        if (!BP.isAutoBackupDue(s)) return;
+        const created = BP.createAutoBackup(store, { appVersion: (electron && electron.appVersion) || '' });
+        const rot = BP.rotateBackups(store, s.backupAutoKeep);
+        store.saveSettings({ backupLastAt: created.createdAt });
+        notify('backup', { type: 'auto', file: created.name, kept: rot.keep, removed: rot.removed });
+      } catch (e) {
+        notify('warn', { where: 'backup', message: 'Авто-резервирование не выполнено: ' + (e.message || e) });
+      }
+    }, 60 * 60000);
+    if (backupSched.timer.unref) backupSched.timer.unref();
+    return { running: true };
+  }
+
   return {
     handlers, isDemo, getSettings, getClient, getDemo, cache,
-    calcRepricer, sendPrices, applyScheduler, sched, repricerCfg, priceWatcher
+    calcRepricer, sendPrices, applyScheduler, applyBackupSchedule, sched, repricerCfg, priceWatcher
   };
 }
 

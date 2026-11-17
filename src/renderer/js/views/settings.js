@@ -521,6 +521,47 @@ Views.settings = {
         ` : ''}
       </div>
 
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>5.1 Резервное копирование и восстановление</h2></div>
+        <p class="hint" style="margin:0 0 10px">
+          Выгрузка всех данных приложения одним файлом <span class="mono">.wbpm.json</span> — настройки,
+          себестоимости, цены, репрайсер, историю, акции. Ключи WB по умолчанию НЕ включаются.
+        </p>
+        <div class="row wrap" style="gap:10px">
+          <label class="row tiny" style="gap:8px;align-items:center;cursor:pointer">
+            <input id="bk-include-keys" type="checkbox">
+            Включить ключи WB (зашифровать паролем)
+          </label>
+          <div class="grow"></div>
+          <button class="btn btn-sm btn-primary" id="bk-export" type="button">Выгрузить всё</button>
+          <button class="btn btn-sm" id="bk-import" type="button">Загрузить</button>
+          <button class="btn btn-sm" id="bk-refresh" type="button">Обновить список</button>
+        </div>
+        <p class="hint" id="bk-status" role="status" aria-live="polite" style="margin:8px 0 0"></p>
+        <div id="bk-list" style="margin-top:10px"></div>
+
+        <div style="border-top:1px solid var(--line);margin:12px 0 10px"></div>
+        <div class="row wrap" style="gap:10px">
+          <label class="row tiny" style="gap:8px;align-items:center;cursor:pointer">
+            <input id="bk-auto" type="checkbox" ${s.backupAutoEnabled === true ? 'checked' : ''}>
+            Авто-резервирование по расписанию
+          </label>
+          <label class="row tiny" style="gap:8px;align-items:center;cursor:pointer">
+            Период:
+            <select id="bk-freq" class="input-sm">
+              <option value="daily" ${s.backupAutoFreq !== 'weekly' ? 'selected' : ''}>Ежедневно</option>
+              <option value="weekly" ${s.backupAutoFreq === 'weekly' ? 'selected' : ''}>Еженедельно</option>
+            </select>
+          </label>
+          <label class="row tiny" style="gap:8px;align-items:center;cursor:pointer">
+            Хранить последних:
+            <input id="bk-keep" type="number" min="1" max="100" value="${s.backupAutoKeep || 7}" class="input-sm" style="width:54px">
+          </label>
+          <div class="grow"></div>
+          <span class="hint">Копии сохраняются в <span class="mono">.data/backups/</span>.</span>
+        </div>
+      </div>
+
       <div style="margin-top:14px" class="row wrap">
         <button class="btn btn-primary" id="save-all">Сохранить настройки</button>
         <span class="hint">После сохранения расчёты во всех разделах пересчитаются автоматически.</span>
@@ -1096,5 +1137,159 @@ Views.settings = {
         this.draw();
       }, 'Сбросить');
     };
+
+    // ───────────────────────── Резервное копирование ─────────────────────────
+
+    const bkStatus = (text, kind) => {
+      const el = $('#bk-status');
+      if (!el) return;
+      el.textContent = text;
+      el.className = 'hint' + (kind ? ' ' + kind : '');
+    };
+
+    async function refreshBackupList() {
+      const host = $('#bk-list');
+      if (!host) return;
+      const res = await API.invoke('backup:list');
+      const items = (res && res.items) ? res.items : [];
+      if (!items.length) {
+        host.innerHTML = '<span class="muted tiny">Резервных копий пока нет.</span>';
+        return;
+      }
+      host.innerHTML = `<table class="grid-table"><thead><tr>
+          <th>Файл</th><th>Создано</th><th class="num">Размер</th><th>Наборы</th><th>Ключи</th><th></th>
+        </tr></thead><tbody>${items.map((b) => `<tr>
+          <td class="mono">${U.esc(b.name)}</td>
+          <td>${b.createdAt ? U.date(b.createdAt, true) : '<span class="muted">—</span>'}</td>
+          <td class="num">${U.fmt(b.size)}</td>
+          <td>${(b.datasets || []).length}</td>
+          <td>${b.hasKeys ? '<b class="pos">✓</b>' : '<span class="muted">—</span>'}</td>
+          <td><button class="btn btn-sm bk-restore" data-name="${U.esc(b.name)}" type="button">Восстановить</button></td>
+        </tr>`).join('')}</tbody></table>`;
+      Array.from(host.querySelectorAll('.bk-restore')).forEach((btn) => {
+        btn.onclick = () => doRestore(btn.getAttribute('data-name'));
+      });
+    }
+
+    $('#bk-refresh').onclick = async () => {
+      bkStatus('Читаем список резервных копий…');
+      await refreshBackupList();
+      bkStatus('Список резервных копий обновлён.');
+    };
+
+    $('#bk-export').onclick = async () => {
+      const includeKeys = $('#bk-include-keys').checked;
+      let password = '';
+      if (includeKeys) {
+        password = window.prompt('Введите пароль для шифрования ключей WB. Запомните его — он не хранится в файле и не может быть восстановлен.');
+        if (password === null) return;
+        if (!password) { bkStatus('Для шифрования ключей нужен непустой пароль.', 'neg'); return; }
+      }
+      bkStatus('Формулирую резервную копию…');
+      try {
+        const res = await API.invoke('backup:export', { includeKeys, password });
+        if (!res || !res.ok) {
+          bkStatus((res && res.error && res.error.message) || 'Не удалось создать резервную копию', 'neg');
+          return;
+        }
+        const content = res.content;
+        const stamp = new Date().toISOString().slice(0, 10);
+        const path = await API.saveBackup('wb-price-manager-backup-' + stamp + '.wbpm.json', content);
+        if (path) {
+          bkStatus('Резервная копия сохранена: ' + U.esc(path) + (includeKeys ? ' (ключи зашифрованы паролем)' : ''), 'pos');
+          await refreshBackupList();
+        } else {
+          bkStatus('Сохранение отменено.', 'warnc');
+        }
+      } catch (e) {
+        bkStatus('Не удалось создать резервную копию: ' + e.message, 'neg');
+      }
+    };
+
+    $('#bk-import').onclick = async () => {
+      const picked = await API.openBackup();
+      if (!picked) { bkStatus('Файл не выбран.', 'warnc'); return; }
+      bkStatus('Анализирую состав резервной копии…');
+      const res = await API.invoke('backup:import', { content: picked.content, mode: 'merge' });
+      if (!res || !res.ok) {
+        bkStatus((res && res.error && res.error.message) || 'Не удалось прочитать резервную копию', 'neg');
+        return;
+      }
+      const p = res.preview;
+      let keysPassword = '';
+      if (p.keys && p.keys.included) {
+        keysPassword = window.prompt('В этой копии зашифрованы ключи WB. Введите пароль для восстановления (можно оставить пустым — ключи не будут восстановлены).');
+        if (keysPassword === null) return;
+      }
+      const sum = p.summary;
+      const body = `<p class="hint">Копия содержит <b>${sum.datasets}</b> наборов данных.
+        В режиме слияния будет добавлено <b class="pos">${sum.totalAdded}</b> записей,
+        существующие <b>${sum.totalExisting}</b> записей сохранятся.</p>
+        <table class="grid-table"><thead><tr><th>Набор</th><th class="num">Есть</th><th class="num">В копии</th>
+          <th class="num">Добавится</th><th>Действие</th></tr></thead><tbody>
+        ${p.datasets.filter((d) => d.present).map((d) => `<tr>
+          <td>${U.esc(d.name)}</td>
+          <td class="num">${d.existingCount}</td>
+          <td class="num">${d.incomingCount}</td>
+          <td class="num ${d.added ? 'pos' : 'muted'}">${d.added}</td>
+          <td>${d.action === 'merge' ? 'слияние' : 'замена'}</td>
+        </tr>`).join('')}</tbody></table>
+        ${p.keys && p.keys.included ? '<p class="hint warnc">Копии ключей требуют пароля.</p>' : ''}`;
+      UI.confirmDialog('Состав резервной копии', body, async () => {
+        bkStatus('Восстанавливаю данные…');
+        const applyRes = await API.invoke('backup:restore', {
+          content: picked.content, mode: 'merge', password: keysPassword
+        });
+        if (applyRes && applyRes.ok) {
+          const r = applyRes.result;
+          bkStatus('Восстановление завершено. Предварительная копия состояния: ' + U.esc(r.preBackupFile) +
+            (r.keysApplied ? '. Ключи восстановлены.' : (r.keysError ? '. Ключи не восстановлены: ' + U.esc(r.keysError) : '.')), 'pos');
+          await refreshBackupList();
+          await S.loadAppState();
+        } else {
+          bkStatus((applyRes && applyRes.error && applyRes.error.message) || 'Не удалось восстановить данные', 'neg');
+        }
+      }, 'Восстановить (слияние)');
+    };
+
+    async function doRestore(name) {
+      UI.confirmDialog('Восстановить из резервной копии', '<div class="alert warn">Перед восстановлением будет создана резервная копия текущего состояния. Существующие записи не будут затираны (слияние).</div>', async () => {
+        bkStatus('Восстанавливаю из ' + U.esc(name) + '…');
+        const listRes = await API.invoke('backup:list');
+        const item = ((listRes && listRes.items) || []).find((b) => b.name === name);
+        if (!item) { bkStatus('Не удалось найти файл ' + U.esc(name), 'neg'); return; }
+        const applyRes = await API.invoke('backup:restore', { file: item.file, mode: 'merge' });
+        if (applyRes && applyRes.ok) {
+          bkStatus('Восстановление из ' + U.esc(name) + ' завершено. Предварительная копия: ' + U.esc(applyRes.result.preBackupFile), 'pos');
+          await refreshBackupList();
+          await S.loadAppState();
+        } else {
+          bkStatus((applyRes && applyRes.error && applyRes.error.message) || 'Не удалось восстановить', 'neg');
+        }
+      }, 'Восстановить');
+    }
+
+    // Настройки авто-резервирования сохраняются сразу (как автообновление).
+    $('#bk-auto').onchange = async (event) => {
+      const enabled = event.currentTarget.checked;
+      event.currentTarget.disabled = true;
+      try {
+        const next = await API.invoke('settings:save', { backupAutoEnabled: enabled });
+        if (next) S.state.settings = next;
+        App.toast(enabled ? 'Авто-резервирование включено' : 'Авто-резервирование отключено', 'ok');
+      } finally { event.currentTarget.disabled = false; }
+    };
+    $('#bk-freq').onchange = async (event) => {
+      const next = await API.invoke('settings:save', { backupAutoFreq: event.currentTarget.value });
+      if (next) S.state.settings = next;
+    };
+    $('#bk-keep').onchange = async (event) => {
+      const keep = Math.max(1, Math.min(100, Number(event.currentTarget.value) || 7));
+      event.currentTarget.value = keep;
+      const next = await API.invoke('settings:save', { backupAutoKeep: keep });
+      if (next) S.state.settings = next;
+    };
+
+    refreshBackupList();
   }
 };
