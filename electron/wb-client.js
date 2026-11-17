@@ -671,24 +671,65 @@ class WBClient {
   /**
    * GET /api/v2/list/goods/filter — товары с ценами (постранично, до maxItems).
    */
+  /**
+   * Каталог цен WB. В реальном ответе listGoods поля total может не быть:
+   * отсутствие total НЕ означает, что первая тысяча — весь кабинет.
+   * По контракту WB offset увеличивается на limit, до пустой страницы.
+   * Усечение/повтор страницы явно помечаем, чтобы такой список нельзя было
+   * использовать как доказательство отсутствия nmID в кабинете.
+   */
   async getGoods(opts) {
-    const { limit = 1000, maxItems = 5000, filterNmID } = opts || {};
-    const out = [];
-    let offset = 0;
-    let total = Infinity;
-    while (out.length < Math.min(total, maxItems)) {
+    const { limit = 1000, maxItems = 100000, filterNmID } = opts || {};
+    const pageLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 1000), 1000));
+    const cap = Math.max(1, Math.min(Math.floor(Number(maxItems) || 100000), 100000));
+    const filtered = filterNmID !== undefined && filterNmID !== null;
+    const out = [], seen = new Set();
+    let offset = 0, pages = 0, reportedTotal = null, duplicate = false;
+    let complete = false, reason = 'page-limit';
+    // Ещё один запрос при точном достижении лимита: пустая страница подтверждает
+    // полный каталог, непустая — честное усечение. Память не растёт сверх cap.
+    const maxPages = Math.ceil(cap / pageLimit) + 1;
+    while (pages < maxPages) {
       const json = await this.request('prices', 'GET', '/api/v2/list/goods/filter', {
-        query: { limit: Math.min(limit, 1000), offset, filterNmID }
+        query: { limit: pageLimit, offset, filterNmID }
       });
-      const data = (json && json.data) || {};
-      const list = Array.isArray(data.goods) ? data.goods : (Array.isArray(data.listGoods) ? data.listGoods : []);
-      total = Number(data.total || list.length || 0);
-      list.forEach((g) => out.push(WBClient.normalizeGood(g)));
-      if (!list.length || out.length >= total) break;
-      offset += list.length;
-      if (offset > 100000) break; // защита от бесконечного цикла
+      pages++;
+      const data = json && json.data;
+      const list = data && (Array.isArray(data.listGoods) ? data.listGoods : Array.isArray(data.goods) ? data.goods : null);
+      if (!list || json.error === true) throw new WBError('WB вернул некорректный каталог товаров: нет массива listGoods.', { code: 'BAD_CATALOG', category: 'prices' });
+      if (data.total !== undefined && data.total !== null && data.total !== '') {
+        const total = Number(data.total);
+        if (Number.isSafeInteger(total) && total >= 0) reportedTotal = total;
+      }
+      if (!list.length) {
+        const consistent = reportedTotal === null || out.length === reportedTotal;
+        complete = !filtered && !duplicate && consistent;
+        reason = duplicate ? 'duplicate-nmids' : !consistent ? 'inconsistent-total' : 'empty-page'; break;
+      }
+      let added = 0, overflow = false;
+      for (const raw of list) {
+        const nm = Number(raw && raw.nmID);
+        if (!Number.isSafeInteger(nm) || nm <= 0) throw new WBError('В каталоге WB получен некорректный nmID. Полнота каталога не подтверждена.', { code: 'BAD_CATALOG', category: 'prices' });
+        if (seen.has(nm)) { duplicate = true; continue; }
+        if (out.length >= cap) { overflow = true; break; }
+        seen.add(nm); out.push(WBClient.normalizeGood(raw)); added++;
+      }
+      if (filtered) { reason = 'filtered'; break; }
+      if (overflow) { reason = 'limit'; break; }
+      if (!added) { reason = 'repeated-page'; break; }
+      // Некоторые совместимые ответы содержат явный общий total. В отличие от
+      // старого кода мы никогда не подставляем вместо него длину страницы.
+      if (reportedTotal !== null && out.length >= reportedTotal) {
+        complete = !duplicate && out.length === reportedTotal;
+        reason = duplicate ? 'duplicate-nmids' : complete ? 'reported-total' : 'inconsistent-total';
+        break;
+      }
+      offset += pageLimit;
     }
-    return { items: out, total: out.length, source: 'wb' };
+    return { items: out, total: reportedTotal === null ? out.length : reportedTotal,
+      loadedCount: out.length, totalKnown: complete || reportedTotal !== null, source: 'wb',
+      scope: filtered ? 'filtered' : 'full', complete, truncated: !complete,
+      completionReason: reason, pages, maxItems: cap };
   }
 
   /** GET /api/v2/list/goods/size/nm — цены по размерам одного товара. */

@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { DEMO_KEY, TOKEN_SCOPES, RATE_FALLBACK_MS } = require('./config');
 const { WBClient, WBError } = require('./wb-client');
 const { createDemoApi } = require('./demo');
@@ -72,6 +73,7 @@ function createService(store, emit, electron, integrations) {
   let demoApi = null;
   let client = null;
   let clientSignature = '';
+  let catalogEpoch = 0, catalogSnapshot = null, catalogPending = null, catalogRequest = 0;
   const cache = { goods: null, goodsAt: 0, stats: null, statsAt: 0, statsErrors: [], statsMeta: null, cards: null, cardsAt: 0, stocks: null, stocksAt: 0, stocksMeta: null };
   const sched = { timer: null, nextRunAt: null, lastRun: null, running: false };
   let promoLifecycleReady = false;
@@ -100,7 +102,7 @@ function createService(store, emit, electron, integrations) {
     const s = getSettings();
     const secrets = store.loadSecrets();
     const wbSecretNames = WB_SECRET_NAMES.filter((name) => secrets[name]);
-    const sig = JSON.stringify({ s: !!s.sandbox, k: wbSecretNames.sort().map((name) => String(secrets[name] || '').slice(-4)).join('|'), n: wbSecretNames.length });
+    const sig = crypto.createHash('sha256').update(JSON.stringify({ s: !!s.sandbox, k: wbSecretNames.sort().map((name) => [name, String(secrets[name])]) })).digest('hex');
     if (!force && client && sig === clientSignature) return client;
     clientSignature = sig;
     client = new WBClient({
@@ -109,6 +111,91 @@ function createService(store, emit, electron, integrations) {
       onLog: (entry) => notify('log', entry)
     });
     return client;
+  }
+
+  function invalidateGoodsCache() {
+    cache.goods = null; cache.goodsAt = 0;
+    catalogSnapshot = null; catalogRequest++; catalogPending = null;
+  }
+
+  /** Контекст никогда не содержит открытого ключа в ответах/журнале. */
+  function catalogContext() {
+    const settings = getSettings(), secrets = store.loadSecrets();
+    return crypto.createHash('sha256').update(JSON.stringify({
+      profile: hooks.profileId || store.dir || 'single', epoch: catalogEpoch,
+      demo: isDemo(), sandbox: !!settings.sandbox,
+      keys: WB_SECRET_NAMES.map((name) => [name, String(secrets[name] || '')])
+    })).digest('hex');
+  }
+
+  function assertCatalogContext(context) {
+    if (disposed || context !== catalogContext()) throw new WBError(
+      'Кабинет, ключ или режим данных изменился во время проверки. Откройте предпросмотр заново; прежние условия не изменены.',
+      { code: 'PROMO_CABINET_CHANGED' });
+  }
+
+  function assertCatalogCurrent(catalog) {
+    assertCatalogContext(catalog.context);
+    if (catalog.request !== catalogRequest) throw new WBError(
+      'Каталог обновляется или изменился во время проверки. Дождитесь обновления и повторите предпросмотр; прежние условия не изменены.',
+      { code: 'PROMO_CATALOG_CHANGED' });
+  }
+
+  /** Только чтение WB; не пишет состав, настройки, историю или задачи отправки. */
+  async function loadGoodsCatalog(options) {
+    const o = options || {}, context = catalogContext(), now = Date.now();
+    if (!o.force && catalogSnapshot && catalogSnapshot.context === context && now - catalogSnapshot.at < CACHE_TTL_MS &&
+        (!o.requireComplete || catalogSnapshot.complete)) return catalogSnapshot;
+    if (!o.force && catalogPending && catalogPending.context === context &&
+        (!o.requireComplete || catalogPending.full)) return catalogPending.promise;
+    if (o.force) catalogSnapshot = null; // не возвращаем прошлую проверку после неудачного явного обновления
+    const request = ++catalogRequest, demo = isDemo(), api = demo ? getDemo() : getClient();
+    const maxItems = o.maxItems || 100000;
+    const promise = (async () => {
+      const result = await api.getGoods({ maxItems });
+      assertCatalogContext(context);
+      if (!result || !Array.isArray(result.items)) throw new WBError('Не удалось получить каталог текущего кабинета.', { code: 'BAD_CATALOG' });
+      const ids = new Set();
+      for (const item of result.items) {
+        const nm = Number(item && item.nmID);
+        if (!Number.isSafeInteger(nm) || nm <= 0 || ids.has(nm)) throw new WBError('Каталог содержит некорректные или повторяющиеся nmID. Проверка остановлена.', { code: 'BAD_CATALOG' });
+        ids.add(nm);
+      }
+      const snapshot = { ...result, context, request, at: Date.now(), ids,
+        complete: result.complete === true && result.truncated !== true && result.scope === 'full' && result.source === (demo ? 'demo' : 'wb') &&
+          (!result.totalKnown || Number(result.total) === result.items.length) };
+      // Более поздний force-запрос не затирается запоздавшим старым ответом.
+      assertCatalogCurrent(snapshot);
+      catalogSnapshot = snapshot;
+      return snapshot;
+    })();
+    catalogPending = { context, full: maxItems >= 100000, promise };
+    try { return await promise; }
+    finally { if (catalogPending && catalogPending.promise === promise) catalogPending = null; }
+  }
+
+  async function ownershipCatalog() {
+    let catalog;
+    try { catalog = await loadGoodsCatalog({ requireComplete: true }); }
+    catch (error) {
+      if (['PROMO_CABINET_CHANGED', 'PROMO_CATALOG_CHANGED'].includes(error.code)) throw error;
+      throw new WBError('Не удалось проверить принадлежность товаров текущему кабинету: каталог WB недоступен. ' +
+        (error.message || '') + ' Повторите после обновления каталога. Прежние условия не изменены.', { code: 'PROMO_CATALOG_UNAVAILABLE' });
+    }
+    assertCatalogCurrent(catalog);
+    if (!catalog.complete) throw new WBError('Принадлежность товаров не проверена: каталог текущего кабинета загружен не полностью (' +
+      catalog.items.length + ' товаров; ' + (catalog.completionReason || 'нет подтверждения полноты') + '). Обновите каталог и повторите импорт. Прежние условия не изменены.',
+      { code: 'PROMO_CATALOG_INCOMPLETE' });
+    return catalog;
+  }
+
+  function matchPromoOwnership(items, catalog) {
+    const matched = [], excluded = [];
+    for (const item of items || []) {
+      if (catalog.ids.has(Number(item.nmID))) matched.push(item);
+      else excluded.push({ ...item, reasonCode: 'NOT_IN_CABINET', reason: 'nmID отсутствует в полном каталоге текущего кабинета' });
+    }
+    return { matched, excluded };
   }
 
   function costsMap() {
@@ -482,21 +569,56 @@ function createService(store, emit, electron, integrations) {
     promoLifecycleReady = !demoMode;
   }
 
+  /** Единый состав для списка/таблицы акций и окна товаров; метрики не берут весь каталог. */
+  function promoComposition(promo, idx, file) {
+    const st = getSettings(), required = Number(promo.requiredDiscountPct || promo.participationPercentage || 0);
+    const entries = new Map();
+    const add = (nmID, data, source) => {
+      const nm = Number(nmID);
+      if (Number.isSafeInteger(nm) && nm > 0 && !entries.has(nm)) entries.set(nm, { nmID: nm, data, source });
+    };
+    if (file) (idx && idx.manualItems || []).forEach((row) => add(row.nmID, row, 'file'));
+    else {
+      if (st.promosFetchNomenclatures === true && !isAutoPromo(promo)) {
+        (idx && idx.apiItems || []).forEach((row) => add(row.nmID, row, 'api'));
+      }
+      if (st.promosInferFromDiscount !== false && required > 0) {
+        ((cache.goods && cache.goods.items) || []).forEach((g) => {
+          if (g.inPromo || Number(g.discount || 0) + 0.0001 >= required || Number(g.plannedPrice) > 0 || Number(g.plannedDiscount) > 0) add(g.nmID, {}, 'inferred');
+        });
+      }
+    }
+    const apiUsed = !file && st.promosFetchNomenclatures === true && !isAutoPromo(promo) && !!(idx && idx.apiUsed);
+    const values = Array.from(entries.values()), inferredCount = values.filter((entry) => entry.source === 'inferred').length;
+    const apiCount = values.filter((entry) => entry.source === 'api').length;
+    return { entries: values, inferredCount, apiCount, apiPartial: apiCount > 0 && !apiUsed,
+      source: file ? 'file' : apiCount || apiUsed ? 'api' : inferredCount ? 'inferred' : 'none', apiUsed,
+      apiError: !file && st.promosFetchNomenclatures === true ? idx && (idx.apiError || idx.noApi) || '' : '' };
+  }
+
   async function promoIndex(force) {
-    const revision = promoRevision;
-    if (!force && promoCache.index && Date.now() - promoCache.at < PROMO_TTL_MS) return promoCache;
+    const revision = promoRevision, context = catalogContext();
+    if (!force && promoCache.context === context && promoCache.index && promoCache.catalogRequest === catalogRequest &&
+        Date.now() - promoCache.at < PROMO_TTL_MS && Date.now() < (promoCache.ownershipExpiresAt || Infinity)) return promoCache;
     const promoResponse = await handlers['wb:promos']({ days: 60 }).catch(() => null);
+    assertCatalogContext(context);
     const promos = Array.isArray(promoResponse) ? promoResponse : [];
     // Сетевая ошибка не означает, что все акции закончились; обновляем базу только после валидного ответа.
     if (Array.isArray(promoResponse)) trackPromoLifecycle(promos);
     const uploadedNoms = store.loadPromoNoms();
+    let catalog = null, ownershipError = '';
+    if (Object.keys(uploadedNoms).length) {
+      try { catalog = await ownershipCatalog(); }
+      catch (error) { ownershipError = error.message; }
+      assertCatalogContext(context);
+    }
     /**
      * Состав акции выводится в том числе по факту скидки товара, поэтому список товаров
      * нужен всегда. Подгружаем его один раз, если кэш пуст (раздел «Акции» могли открыть
      * сразу после запуска). Это категория «Цены и скидки» — 10 запросов за 6 секунд,
      * в отличие от «Статистики» с её одним запросом в минуту.
      */
-    if ((st_promosInferEnabled() || Object.keys(uploadedNoms).length) && !((cache.goods && cache.goods.items) || []).length) {
+    if (!ownershipError && (st_promosInferEnabled() || Object.keys(uploadedNoms).length) && (!cache.goods || cache.goods.context !== context || !cache.goods.items.length || catalog && cache.goods.catalogAt !== new Date(catalog.at).toISOString())) {
       await handlers['wb:goods']({}).catch(() => null);
     }
     // явный «Обновить акции» сбрасывает память о недоступных акциях, обычный вход — нет
@@ -507,7 +629,7 @@ function createService(store, emit, electron, integrations) {
     for (const p of promos) {
       let inAction = [];
       let candidates = [];
-      let noApiReason = '';
+      let noApiReason = '', apiFailed = false, apiError = '';
       /**
        * Пропускаем запрос состава только в БОЕВОМ режиме: настоящий WB на автоакцию
        * отвечает 422, и запрос всё равно бесполезен. Демо-набор состав отдаёт —
@@ -531,18 +653,27 @@ function createService(store, emit, electron, integrations) {
           inAction = await handlers['wb:promo-nomenclatures']({ promotionID: p.id, inAction: true });
         } catch (e) {
           if (isNoCompositionError(e)) noApiReason = 'WB не отдаёт состав этой акции (HTTP 422) — загрузите файлом из кабинета';
-          else hardErrors.push((p.name || p.id) + ': ' + (e.message || e));
+          else { apiFailed = true; apiError = e.message || String(e); hardErrors.push((p.name || p.id) + ': ' + apiError); }
         }
         if (!noApiReason) {
           try {
             candidates = await handlers['wb:promo-nomenclatures']({ promotionID: p.id, inAction: false });
           } catch (e) {
             if (isNoCompositionError(e)) noApiReason = 'WB не отдаёт состав этой акции (HTTP 422) — загрузите файлом из кабинета';
-            else hardErrors.push((p.name || p.id) + ': ' + (e.message || e));
+            else { apiFailed = true; apiError = e.message || String(e); hardErrors.push((p.name || p.id) + ': ' + apiError); }
           }
         }
       }
       if (noApiReason) noApi[p.id] = noApiReason;
+      const manual = uploadedNoms[String(p.id)];
+      // В том числе старые файлы проверяются заново. Метка прежнего импорта —
+      // история, а не разрешение использовать nmID после смены ключа/кабинета.
+      const ownershipMatch = manual && catalog ? matchPromoOwnership(manual.items, catalog) : { matched: [], excluded: [] };
+      const manualItems = ownershipMatch.matched, manualIds = new Set(manualItems.map((x) => Number(x.nmID)));
+      if (manual) {
+        inAction = inAction.filter((x) => manualIds.has(Number(x.nmID)));
+        candidates = candidates.filter((x) => manualIds.has(Number(x.nmID)));
+      }
       const plan = new Map();
       const eligible = new Set();
       const isIn = new Set();
@@ -552,13 +683,12 @@ function createService(store, emit, electron, integrations) {
       // Список товаров, загруженный пользователем вручную из файла кабинета WB.
       // API отдаёт состав не для всех акций (автоакции не управляются вообще), поэтому
       // файл дополняет индекс: товары становятся известны репрайсеру вместе с плановой ценой.
-      const manual = uploadedNoms[String(p.id)];
       const observations = new Map();
-      const managedIds = manual && manual.selectedOnly === true ? new Set((manual.selectedIds || []).map(Number)) : null;
-      if (manual && Array.isArray(manual.items)) {
-        const live = new Map((((cache.goods && cache.goods.items) || [])).map((g) => [Number(g.nmID), g]));
+      const managedIds = manual && manual.selectedOnly === true ? new Set((manual.selectedIds || []).map(Number).filter((nm) => manualIds.has(nm))) : null;
+      if (manual && catalog) {
+        const live = new Map(catalog.items.map((g) => [Number(g.nmID), g]));
         const confirmedByApi = new Set(inAction.map((x) => Number(x.nmID)));
-        manual.items.forEach((x) => {
+        manualItems.forEach((x) => {
           const nm = Number(x.nmID); if (!(nm > 0)) return;
           eligible.add(nm);
           const target = Number(x.planPrice) || 0;
@@ -612,15 +742,26 @@ function createService(store, emit, electron, integrations) {
 
       index[p.id] = {
         inAction: isIn, eligible, plan,
-        manualCount: manual ? (manual.items || []).length : 0,
+        manualCount: manualItems.length, manualItems,
+        storedCount: manual ? (manual.items || []).length : 0,
+        ownership: manual ? { status: catalog ? 'verified' : 'blocked', error: ownershipError,
+          catalogAt: catalog ? new Date(catalog.at).toISOString() : '',
+          matchedCount: manualItems.length, excludedCount: catalog ? ownershipMatch.excluded.length : null,
+          excludedItems: ownershipMatch.excluded.map((x) => ({ nmID: x.nmID, vendorCode: x.vendorCode, reason: x.reason })) } : null,
         manualFile: manual ? (manual.fileName || '') : '',
         manualAt: manual ? (manual.at || '') : '',
         inferred,
-        source: manual ? 'file' : (inferred ? 'inferred' : 'none'),
+        source: manual ? 'file' : (inAction.length || candidates.length ? 'api' : inferred ? 'inferred' : 'none'),
+        apiItems: candidates.concat(inAction.map((x) => ({ ...x, inAction: true }))),
+        apiUsed: wantApi && !noApiReason && !apiFailed, apiError,
+        apiConfirmed: new Set(inAction.map((x) => Number(x.nmID))),
+        fileSnapshotCount: manualItems.filter((x) => x.inActionKnown !== false && x.inAction).length,
         noApi: noApiReason || '',
         auto: isAutoPromo(p), observations, managedIds
       };
     }
+    assertCatalogContext(context);
+    if (catalog) assertCatalogCurrent(catalog);
     if (revision !== promoRevision) return promoIndex(false);
     if (priceStateUpdates.length) {
       const latest = store.loadPromoNoms();
@@ -633,7 +774,8 @@ function createService(store, emit, electron, integrations) {
       store.savePromoNoms(latest);
       if (observedEvents.length) store.appendPromoJournal(observedEvents);
     }
-    promoCache.at = Date.now();
+    promoCache.at = Date.now(); promoCache.context = context; promoCache.catalogRequest = catalogRequest;
+    promoCache.ownershipExpiresAt = Object.keys(uploadedNoms).length ? (catalog ? catalog.at : promoCache.at) + CACHE_TTL_MS : Infinity;
     promoCache.index = index;
     promoCache.promos = promos;
     promoCache.noApi = noApi;
@@ -1104,15 +1246,19 @@ function createService(store, emit, electron, integrations) {
       const taxChanged = taxKeys.some((key) => Object.prototype.hasOwnProperty.call(input, key) && JSON.stringify(before[key]) !== JSON.stringify(input[key]));
       if (taxChanged && (activeHandlers > 1 || backgroundJobs || sched.running)) throw new WBError('Дождитесь окончания текущей операции кабинета перед изменением налогов.', { code: 'PROFILE_BUSY' });
       const saved = store.saveSettings(input);
+      if (['demoMode', 'sandbox'].some((key) => Object.prototype.hasOwnProperty.call(input, key) && !!before[key] !== !!input[key])) { client = null; invalidateAllCaches(); }
+      if (['promosInferFromDiscount', 'promosFetchNomenclatures'].some((key) => Object.prototype.hasOwnProperty.call(input, key) && before[key] !== input[key])) {
+        promoRevision++; promoCache.index = null; promoCache.at = 0; promoCache.noApi = {};
+      }
       if (taxChanged) {
         const proposal = store.loadProposals();
         if (proposal && proposal.phase === 'proposed') store.saveProposals({ ...proposal, phase: 'stale', staleReason: 'Изменились налоги кабинета — пересчитайте цены перед отправкой.' });
-        cache.goods = null; cache.goodsAt = 0;
+        invalidateGoodsCache();
       }
       return saved;
     },
 
-    'settings:reset': async () => store.resetSettings(),
+    'settings:reset': async () => { const result = store.resetSettings(); client = null; invalidateAllCaches(); return result; },
 
     'keys:set': async (payload) => {
       const secrets = store.loadSecrets();
@@ -1163,7 +1309,7 @@ function createService(store, emit, electron, integrations) {
       // Раньше это делалось безусловно, поэтому повторное нажатие «Сохранить» (поля пустые —
       // сохранённый ключ виден только в подсказке) опустошало интерфейс: товары, акции и статистика
       // пропадали, а «обновлено …» обнулялось, хотя ключи остались на месте.
-      const keysChanged = saved.length > 0 || cleared.length > 0;
+      const keysChanged = names.some((name) => secrets[name] !== secretsBefore[name]);
       if (keysChanged || demoChanged) {
         client = null;
         invalidateAllCaches();
@@ -1188,7 +1334,7 @@ function createService(store, emit, electron, integrations) {
       const secrets = store.loadSecrets();
       for (const key of WB_SECRET_NAMES) delete secrets[key];
       store.saveSecrets(secrets);
-      client = null;
+      client = null; invalidateAllCaches();
       return { ok: true };
     },
 
@@ -1228,14 +1374,16 @@ function createService(store, emit, electron, integrations) {
     /** Товары с ценами + пользовательские/демо-значения себестоимости + статистика. */
     'wb:goods': async (opts) => {
       const force = !!(opts && opts.force);
-      const s = getSettings();
-      if (!force && cache.goods && Date.now() - cache.goodsAt < CACHE_TTL_MS) {
+      const s = getSettings(), context = catalogContext();
+      if (!force && cache.goods && cache.goods.context === context && cache.goods.request === catalogRequest &&
+          (!catalogSnapshot || catalogSnapshot.at === cache.goodsAt) && Date.now() - cache.goodsAt < CACHE_TTL_MS) {
         const items = cache.goods.items;
         const overrides = overridesFor(items);
         if (isDemo()) mergeDemoOverrides(items, overrides);
         return {
           items,
-          total: items.length,
+          total: cache.goods.total, loadedCount: items.length, totalKnown: cache.goods.totalKnown,
+          complete: cache.goods.complete, truncated: !cache.goods.complete, catalogAt: cache.goods.catalogAt,
           overrides,
           stats: cache.stats || [],
           statsMeta: cache.statsMeta || null,
@@ -1248,21 +1396,18 @@ function createService(store, emit, electron, integrations) {
         };
       }
 
-      let result;
-      if (isDemo()) {
-        result = await getDemo().getGoods();
-      } else {
-        result = await getClient().getGoods({ maxItems: (opts && opts.maxItems) || 5000 });
-      }
-
-      const items = result.items || [];
-      cache.goods = { items, source: result.source || (isDemo() ? 'demo' : 'wb') };
-      cache.goodsAt = Date.now();
+      const result = await loadGoodsCatalog({ force, maxItems: opts && opts.maxItems });
+      assertCatalogCurrent(result);
+      const items = result.items;
+      cache.goods = { items, source: result.source, context, request: result.request, total: result.total, totalKnown: result.totalKnown,
+        complete: result.complete, catalogAt: new Date(result.at).toISOString() };
+      cache.goodsAt = result.at;
       promoCache.index = null; promoCache.at = 0;
 
       // подтягиваем карточки (габариты/названия) и статистику — по возможности
       try {
         const cards = isDemo() ? await getDemo().getCards() : await getClient().getCards({ maxCards: 2000 });
+        assertCatalogCurrent(result);
         cache.cards = cards;
         cache.cardsAt = Date.now();
         const byNm = new Map(cards.map((c) => [Number(c.nmID), c]));
@@ -1278,6 +1423,8 @@ function createService(store, emit, electron, integrations) {
       } catch (e) {
         notify('warn', { where: 'content', message: e.message });
       }
+
+      assertCatalogCurrent(result);
 
       // Статистику здесь больше НЕ грузим.
       // Раньше загрузка товаров сама делала два запроса к «Статистике» (продажи и заказы),
@@ -1300,13 +1447,15 @@ function createService(store, emit, electron, integrations) {
         });
       }
 
+      assertCatalogCurrent(result);
       const overrides = overridesFor(items);
       if (isDemo()) mergeDemoOverrides(items, overrides);
       store.saveSettings({ lastSync: new Date().toISOString() });
 
       return {
         items,
-        total: items.length,
+        total: result.total, loadedCount: items.length, totalKnown: result.totalKnown,
+        complete: result.complete, truncated: !result.complete, catalogAt: cache.goods.catalogAt,
         overrides,
         stats: cache.stats || [],
         statsMeta: cache.statsMeta || null,
@@ -1351,7 +1500,7 @@ function createService(store, emit, electron, integrations) {
 
       if (isDemo()) {
         const res = await getDemo().applyPrices(items);
-        cache.goods = null;
+        invalidateGoodsCache();
         return Object.assign({ demo: true, warnings }, res);
       }
 
@@ -1362,7 +1511,7 @@ function createService(store, emit, electron, integrations) {
         notify('app-event', { type: 'sendError', failed: items.length, message: error && error.message || String(error), source: payload && payload.source || '' });
         throw error;
       }
-      cache.goods = null;
+      invalidateGoodsCache();
       cache.goodsAt = 0;
 
       // сохраним задачу в историю
@@ -1449,7 +1598,7 @@ function createService(store, emit, electron, integrations) {
       const promotionID = Number(payload && payload.promotionID);
       if (!(promotionID > 0)) throw new WBError('Не указана акция.', { code: 'NO_PROMO' });
       const st = getSettings();
-      const pi = await promoIndex(!!(payload && payload.force)).catch(() => null);
+      const pi = await promoIndex(!!(payload && payload.force));
       const promo = ((pi && pi.promos) || []).find((x) => Number(x.id) === promotionID) || null;
       if (!promo) throw new WBError('Акция ' + promotionID + ' не найдена в календаре WB. Обновите список акций.', { code: 'NO_PROMO' });
 
@@ -1471,8 +1620,8 @@ function createService(store, emit, electron, integrations) {
         // Текущая скидка из файла — снимок на дату выгрузки, не замена свежей цене WB.
         const liveDiscount = g.discount !== undefined && g.discount !== null && g.discount !== '' && Number.isFinite(Number(g.discount)) && Number(g.discount) >= 0 && Number(g.discount) <= 100;
         const discount = Number(liveDiscount ? g.discount : (data.discount ?? 0));
-        const planPrice = Number(data.planPrice || 0) || (Number(g.plannedPrice) || 0);
-        const planDiscount = Number(data.planDiscount || 0) || (Number(g.plannedDiscount) || 0);
+        const planPrice = Number(data.planPrice || data.plannedPrice || 0) || (Number(g.plannedPrice) || 0);
+        const planDiscount = Number(data.planDiscount || data.plannedDiscount || 0) || (Number(g.plannedDiscount) || 0);
         items.push({
           nmID: nm,
           vendorCode: data.vendorCode || g.vendorCode || '',
@@ -1500,38 +1649,10 @@ function createService(store, emit, electron, integrations) {
         });
       };
 
-      // 1) файл из кабинета — самый точный источник
-      if (file && Array.isArray(file.items)) file.items.forEach((x) => push(x.nmID, x, 'file'));
-
-      // 2) вывод по товарам кабинета (если файла нет или он неполный)
-      if (!file && st.promosInferFromDiscount !== false && required > 0) {
-        goods.forEach((g) => {
-          const nm = Number(g.nmID);
-          const disc = Number(g.discount) || 0;
-          const hasPlan = Number(g.plannedPrice) > 0 || Number(g.plannedDiscount) > 0;
-          if (g.inPromo || disc + 0.0001 >= required || hasPlan) push(nm, {}, 'inferred');
-        });
-      }
-
-      // 3) API — только по явному желанию (и не для автоакций)
-      let apiUsed = false;
-      let apiError = '';
-      if (st.promosFetchNomenclatures === true && !isAutoPromo(promo)) {
-        try {
-          const list = await handlers['wb:promo-nomenclatures']({ promotionID, inAction: false });
-          (list || []).forEach((x) => push(x.nmID, x, 'api'));
-          const inside = await handlers['wb:promo-nomenclatures']({ promotionID, inAction: true });
-          (inside || []).forEach((x) => push(x.nmID, Object.assign({}, x, { inAction: true }), 'api'));
-          apiUsed = true;
-        } catch (e) {
-          apiError = isNoCompositionError(e)
-            ? 'WB не отдаёт состав этой акции через API (HTTP 422) — используем файл.'
-            : (e.message || String(e));
-        }
-      }
-
+      const composition = promoComposition(promo, idx, file);
+      composition.entries.forEach((entry) => push(entry.nmID, entry.data, entry.source));
+      const { source, apiUsed, apiError } = composition;
       const inActionCount = items.filter((x) => x.inAction).length;
-      const source = file ? 'file' : (apiUsed ? 'api' : (items.length ? 'inferred' : 'none'));
       return {
         ok: true,
         demo: isDemo(),
@@ -1543,13 +1664,15 @@ function createService(store, emit, electron, integrations) {
         startDateTime: promo.startDateTime || '',
         endDateTime: promo.endDateTime || '',
         participationPercentage: Number(promo.participationPercentage || 0),
-        source,
+        source, inferredCount: composition.inferredCount, apiCount: composition.apiCount, apiPartial: composition.apiPartial,
         items,
         total: items.length,
         inActionCount,
         candidatesCount: items.length - inActionCount,
-        selectedOnly: !!(file && file.selectedOnly), selectedIds: file && file.selectedIds || [],
-        fileInfo: file ? { fileName: file.fileName || '', at: file.at || '', count: (file.items || []).length } : null,
+        selectedOnly: !!(file && file.selectedOnly),
+        selectedIds: file && file.selectedOnly ? (file.selectedIds || []).map(Number).filter((nm) => seen.has(nm)) : [],
+        ownership: idx && idx.ownership || null,
+        fileInfo: file ? { fileName: file.fileName || '', at: file.at || '', count: items.length, storedCount: (file.items || []).length } : null,
         inferred: idx ? (idx.inferred || 0) : 0,
         apiUsed,
         apiError,
@@ -1596,7 +1719,7 @@ function createService(store, emit, electron, integrations) {
           };
         }));
       }
-      cache.goods = null;
+      invalidateGoodsCache();
       return res;
     },
 
@@ -1612,8 +1735,9 @@ function createService(store, emit, electron, integrations) {
      */
     'promos:import-noms': async (payload) => {
       const p = payload || {};
-      const promoId = String(p.promotionID || p.promoId || '').trim();
-      if (!promoId) throw new WBError('Не указана акция, в которую загружается список товаров.', { code: 'NO_PROMO' });
+      const id = Number(p.promotionID || p.promoId), promoId = String(id);
+      const context = catalogContext();
+      if (!Number.isSafeInteger(id) || id <= 0) throw new WBError('Не указана акция, в которую загружается список товаров.', { code: 'NO_PROMO' });
       if (p.base64 && String(p.base64).length > 70 * 1024 * 1024) throw new WBError('Файл акции превышает 50 МБ.', { code: 'FILE_TOO_LARGE' });
       if (!p.base64 && !p.rows) throw new WBError('Не передан файл со списком товаров.', { code: 'NO_FILE' });
 
@@ -1636,33 +1760,41 @@ function createService(store, emit, electron, integrations) {
         );
       }
 
-      if (p.action === 'preview') return { ok: true, preview: true, promotionID: promoId,
-        count: parsed.items.length, headers: parsed.headers, skipped: parsed.skipped,
-        items: parsed.items, sample: parsed.items.slice(0, 100), sheet: parsed.sheet,
-        headerRow: parsed.headerRow, warnings: parsed.warnings, fileName: p.fileName || '' };
-      const all = store.loadPromoNoms();
-      const prior = all[promoId] || {};
-      const importedIds = new Set(parsed.items.map((row) => row.nmID));
+      if (p.ownershipContext && p.ownershipContext !== context) assertCatalogContext(p.ownershipContext);
+      const catalog = await ownershipCatalog();
+      assertCatalogContext(context);
+      const { matched, excluded } = matchPromoOwnership(parsed.items, catalog);
+      const ownership = { status: 'verified', cabinetName: getSettings().shopName || 'Текущий кабинет',
+        demo: isDemo(), catalogCount: catalog.items.length, catalogAt: new Date(catalog.at).toISOString(),
+        matchedCount: matched.length, excludedCount: excluded.length, fileCount: parsed.items.length };
+      const ownershipDigest = crypto.createHash('sha256').update(JSON.stringify(matched.map((row) => row.nmID))).digest('hex');
+      if (p.action !== 'preview' && p.ownershipDigest && p.ownershipDigest !== ownershipDigest) throw new WBError('Принадлежность товаров изменилась после предпросмотра. Проверьте файл заново; прежние условия не изменены.', { code: 'PROMO_OWNERSHIP_CHANGED' });
+      const rejectionReason = matched.length ? '' : 'Файл отклонён: ни один nmID не найден в каталоге текущего кабинета. Выберите выгрузку этого кабинета.';
+      const response = { ok: true, promotionID: promoId, count: matched.length, fileCount: parsed.items.length,
+        matchedCount: matched.length, excludedCount: excluded.length, matched, excluded, ownership, ownershipContext: context, ownershipDigest,
+        headers: parsed.headers, skipped: parsed.skipped, items: matched, sample: matched.slice(0, 100),
+        sheet: parsed.sheet, headerRow: parsed.headerRow, warnings: parsed.warnings, fileName: p.fileName || '',
+        canApply: matched.length > 0, rejectionReason };
+      if (p.action === 'preview') return { ...response, preview: true };
+      if (!matched.length) throw new WBError(rejectionReason + ' Прежние условия не изменены.', { code: 'FOREIGN_PROMO_FILE' });
+      // Повторная серверная проверка обязательна и для apply без preview. Список
+      // «своих» от браузера не принимается; заново разбирается исходный файл.
+      assertCatalogContext(context);
+      const all = store.loadPromoNoms(), prior = all[promoId] || {};
+      const importedIds = new Set(matched.map((row) => row.nmID));
       all[promoId] = {
-        fileName: p.fileName || 'загружено из интерфейса',
-        at: new Date().toISOString(),
-        count: parsed.items.length,
-        skipped: parsed.skipped,
-        headers: parsed.headers,
-        items: parsed.items, sheet: parsed.sheet, warnings: parsed.warnings, absolutePrices: true,
-        selectedOnly: prior.selectedOnly === true, selectedIds: (prior.selectedIds || []).filter((nm) => importedIds.has(Number(nm)))
+        fileName: p.fileName || 'загружено из интерфейса', at: new Date().toISOString(),
+        count: matched.length, skipped: parsed.skipped, headers: parsed.headers,
+        items: matched, sheet: parsed.sheet, warnings: parsed.warnings, absolutePrices: true,
+        ownership, selectedOnly: prior.selectedOnly === true,
+        selectedIds: (prior.selectedIds || []).filter((nm) => importedIds.has(Number(nm)))
       };
       store.savePromoNoms(all);
-      // состав акции изменился — индекс нужно пересобрать
-      promoRevision++;
-      promoCache.index = null; promoCache.at = 0;
-      notify('info', { where: 'promo-import', message: `Загружено ${parsed.items.length} товаров в акцию ${promoId}` });
-      return {
-        ok: true, promotionID: promoId, count: parsed.items.length, skipped: parsed.skipped,
-        headers: parsed.headers, fileName: all[promoId].fileName,
-        sample: parsed.items.slice(0, 100), sheet: parsed.sheet, warnings: parsed.warnings,
-        message: `Загружено товаров: ${parsed.items.length}` + (parsed.skipped ? `, пропущено строк без артикула: ${parsed.skipped}` : '')
-      };
+      promoRevision++; promoCache.index = null; promoCache.at = 0;
+      const message = 'Сохранено своих товаров: ' + matched.length + (excluded.length ? ', исключено чужих nmID: ' + excluded.length : '');
+      notify('info', { where: 'promo-import', message });
+      return { ...response, sentToWb: false, fileName: all[promoId].fileName, message };
+
     },
 
     /**
@@ -1684,15 +1816,34 @@ function createService(store, emit, electron, integrations) {
       const out = (pi.promos || []).map((p) => {
         const idx = pi.index[p.id] || { inAction: new Set(), eligible: new Set(), plan: new Map(), manualCount: 0 };
         const rec = uploaded[String(p.id)];
+        const composition = promoComposition(p, idx, rec);
+        const observations = Array.from((idx.observations || new Map()).values());
+        const compositionKnown = (composition.source !== 'none' || composition.apiUsed) && !(idx.ownership && idx.ownership.status === 'blocked');
+        const selectedCount = idx.managedIds ? composition.entries.filter((entry) => idx.managedIds.has(entry.nmID)).length : composition.entries.length;
+        const live = new Map((((cache.goods && cache.goods.items) || [])).map((g) => [Number(g.nmID), g]));
+        const withPlanPrice = composition.entries.filter((entry) => Number(entry.data.planPrice || entry.data.plannedPrice || (live.get(entry.nmID) || {}).plannedPrice) > 0).length;
+        const priceControl = { matching: 0, above: 0, partial: 0, unknown: 0, ready: 0, ended: 0 };
+        observations.forEach((o) => {
+          const key = o.status === 'by-price' ? 'matching' : o.status === 'above-price' ? 'above' :
+            o.status === 'partial-sizes' ? 'partial' : ['ready', 'not-started'].includes(o.status) ? 'ready' : o.status === 'ended' ? 'ended' : 'unknown';
+          priceControl[key]++;
+        });
         return {
           promoId: p.id, promoName: p.name, type: p.type,
+          startDateTime: p.startDateTime || '', endDateTime: p.endDateTime || '',
+          source: composition.source, compositionKnown, inferredCount: composition.inferredCount, apiCount: composition.apiCount, apiPartial: composition.apiPartial,
+          compositionCount: compositionKnown ? composition.entries.length : null,
+          selectedCount: compositionKnown ? selectedCount : null,
+          apiConfirmedCount: idx.apiConfirmed ? idx.apiConfirmed.size : 0,
+          fileSnapshotCount: idx.fileSnapshotCount || 0, priceControl,
+          ownership: idx.ownership || null, storedCount: idx.storedCount || 0,
           auto: !!idx.auto,
           noApi: idx.noApi || '',
           requiredDiscountPct: Number(p.requiredDiscountPct || p.participationPercentage || 0),
           inAction: idx.inAction ? idx.inAction.size : 0,
           eligible: idx.eligible ? idx.eligible.size : 0,
-          withPlanPrice: idx.plan ? idx.plan.size : 0,
-          manualCount: rec ? (rec.items || []).length : 0,
+          withPlanPrice: compositionKnown ? withPlanPrice : null,
+          manualCount: idx.manualCount || 0,
           manualFile: rec ? rec.fileName : '',
           manualAt: rec ? rec.at : ''
         };
@@ -1725,14 +1876,19 @@ function createService(store, emit, electron, integrations) {
     'promos:save-selection': async (payload) => {
       const p = payload || {}, id = Number(p.promotionID);
       if (!Number.isSafeInteger(id) || id <= 0 || !Array.isArray(p.nmIDs)) throw new WBError('Не переданы акция и выбранные товары.', { code: 'BAD_PROMO_SELECTION' });
+      const context = catalogContext(), catalog = await ownershipCatalog();
       const composition = await handlers['promos:items']({ promotionID: id });
+      assertCatalogContext(context);
       const known = new Set(composition.items.map((row) => Number(row.nmID)));
       const ids = [...new Set(p.nmIDs.map(Number))];
-      if (ids.some((nm) => !known.has(nm))) throw new WBError('В выбранных товарах есть позиции вне состава акции.', { code: 'BAD_PROMO_SELECTION' });
+      if (ids.some((nm) => !Number.isSafeInteger(nm) || !catalog.ids.has(nm) || !known.has(nm))) throw new WBError('В выбранных товарах есть позиции вне текущего кабинета или состава акции.', { code: 'BAD_PROMO_SELECTION' });
       const all = store.loadPromoNoms(), old = all[String(id)] || {};
+      const { matched, excluded } = matchPromoOwnership(old.items || composition.items.map((row) => ({ ...row, inActionKnown: false })), catalog);
+      if (!matched.length && (old.items || []).length) throw new WBError('Сохранённый файл не содержит товаров текущего кабинета. Загрузите правильную выгрузку; прежние условия не изменены.', { code: 'FOREIGN_PROMO_FILE' });
       all[String(id)] = { ...old, fileName: old.fileName || 'Условия, сохранённые в приложении',
-        at: old.at || new Date().toISOString(), count: composition.items.length,
-        items: old.items || composition.items.map((row) => ({ ...row, inActionKnown: false })),
+        at: old.at || new Date().toISOString(), count: matched.length, items: matched,
+        ownership: { status: 'verified', catalogAt: new Date(catalog.at).toISOString(), catalogCount: catalog.items.length,
+          matchedCount: matched.length, excludedCount: excluded.length, demo: isDemo() },
         selectedOnly: true, selectedIds: ids, selectionSavedAt: new Date().toISOString() };
       store.savePromoNoms(all); promoRevision++; promoCache.index = null; promoCache.at = 0;
       return { ok: true, saved: ids.length, promotionID: id, sentToWb: false };
@@ -1746,7 +1902,7 @@ function createService(store, emit, electron, integrations) {
       } else {
         for (const k of Object.keys(all)) delete all[k];
       }
-      store.savePromoNoms(all);
+      store.savePromoNoms(all); promoRevision++;
       promoCache.index = null; promoCache.at = 0;
       return { ok: true, left: Object.keys(all).length };
     },
@@ -1858,7 +2014,7 @@ function createService(store, emit, electron, integrations) {
     },
 
     'cache:clear': async () => {
-      cache.goods = null; cache.goodsAt = 0;
+      invalidateGoodsCache();
       cache.stats = null; cache.statsAt = 0;
       cache.cards = null; cache.cardsAt = 0;
       return { ok: true };
@@ -2439,7 +2595,7 @@ function createService(store, emit, electron, integrations) {
         ok: true
       })));
 
-      cache.goods = null;
+      invalidateGoodsCache();
       promoCache.at = 0;
       return {
         ok: true,
@@ -2510,7 +2666,7 @@ function createService(store, emit, electron, integrations) {
 
     'facts:clear': async () => {
       store.clearFactCosts();
-      cache.goods = null; cache.goodsAt = 0;
+      invalidateGoodsCache();
       return { ok: true };
     },
 
@@ -3092,7 +3248,9 @@ function createService(store, emit, electron, integrations) {
    */
   function invalidateAllCaches(opts) {
     const keep = !!(opts && opts.keepExpensive);
-    cache.goods = null; cache.goodsAt = 0;
+    if (!keep) { catalogEpoch++; promoLifecycleReady = false; promoLifecycle = new Map(); promoCache.noApi = {}; }
+    promoRevision++;
+    invalidateGoodsCache();
     if (!keep) {
       cache.stats = null; cache.statsAt = 0; cache.statsErrors = []; cache.statsMeta = null;
       // Остатки — «сохранённые» данные, как статистика: при обновлении данных
@@ -3753,7 +3911,7 @@ function createService(store, emit, electron, integrations) {
       throw error;
     } finally {
       // Даже при сетевой ошибке часть пачек могла быть принята WB.
-      cache.goods = null; cache.goodsAt = 0;
+      invalidateGoodsCache();
     }
     const details = res.details || [];
     const failed = details.filter((d) => d.error || d.errorText || (d.status && d.status !== 3));
@@ -4070,7 +4228,7 @@ function createService(store, emit, electron, integrations) {
 
     store.saveFactCosts(items, meta);
     store.saveSettings({ factsLoadedAt: meta.loadedAt, factWindowDays: days, factCostsPeriod: usedPeriod });
-    cache.goods = null; cache.goodsAt = 0;   // экономика пересчитается с фактическими расходами
+    invalidateGoodsCache();   // экономика пересчитается с фактическими расходами
     const publicMeta = Object.assign({}, meta);
     delete publicMeta.byItemDay;
     delete publicMeta.coveredDates;
@@ -4394,7 +4552,7 @@ function createService(store, emit, electron, integrations) {
       Object.values(deferred).some((rec) => rec.state === 'running');
   }
 
-  function dispose() { disposed = true; stopScheduler(); }
+  function dispose() { disposed = true; catalogEpoch++; catalogSnapshot = null; stopScheduler(); }
 
   function resetAfterRestore() {
     stopScheduler();

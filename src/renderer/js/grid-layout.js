@@ -31,7 +31,7 @@ window.GridLayout = (function () {
     const rank = new Map(order.map((nm, i) => [nm, i]));
     return rows.slice().sort((a, b) => (rank.get(String(a.nmID)) ?? 1e9) - (rank.get(String(b.nmID)) ?? 1e9));
   }
-  const DEFAULT_WIDTHS = { item: 320, strategy: 250, offset: 290, competitor: 240, info: 220, stock: 180, plan: 180,
+  const DEFAULT_WIDTHS = { item: 360, strategy: 250, offset: 290, competitor: 240, info: 250, stock: 180, plan: 180,
     floor: 225, cost: 210, sizes: 260, promos: 240, status: 200, restore: 200, why: 110, barcode: 190, costDetail: 210 };
   const defaultWidth = (id) => DEFAULT_WIDTHS[id] || 165;
 

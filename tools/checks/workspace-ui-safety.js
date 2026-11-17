@@ -9,8 +9,14 @@ const { createService } = require('../../electron/service');
 const tick = (ms = 15) => new Promise((resolve) => setTimeout(resolve, ms));
 module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
   const errors = [], requests = [];
+  let extraCatalog = [];
   const from = new Date(Date.now() - 7 * 86400000).toISOString(), to = new Date(Date.now() + 7 * 86400000).toISOString();
   const promo = { id: 3148, name: 'Тестовая акция 3148', startDateTime: from, endDateTime: to, requiredDiscountPct: 10 };
+  const at = (days) => new Date(Date.now() + days * 86400000).toISOString();
+  const promos = [promo,
+    { id: 3149, name: 'Предстоящая тестовая акция', requiredDiscountPct: 70, startDateTime: at(10), endDateTime: at(20) },
+    { id: 3150, name: 'Завершённая тестовая акция', requiredDiscountPct: 70, startDateTime: at(-20), endDateTime: at(-10) },
+    { id: 3151, name: 'Акция без дат', requiredDiscountPct: 0 }];
   const goods = [
     { nmID: 100000101, price: 2000, discount: 10, vendorCode: 'SYN-1', title: 'Первый тестовый товар', categoryName: 'Тест' },
     { nmID: 100000102, price: 2000, discount: 50, vendorCode: 'SYN-2', title: 'Второй тестовый товар', categoryName: 'Тест' },
@@ -21,11 +27,12 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     store.saveCosts(Object.fromEntries(goods.map((g) => [String(g.nmID), { costPriceRub: 200 }])));
     store.saveItemConfigs(Object.fromEntries(goods.map((g) => [String(g.nmID), { minPrice: 300, basePrice: 2500 }])));
     const service = createService(store, emit, electron, hooks);
+    service.getDemo().getGoods = async () => ({ items: goods.concat([{ nmID: 1234567890 }], extraCatalog).map((g) => ({ ...g })), source: 'demo', complete: true, scope: 'full', total: goods.length + 1 + extraCatalog.length, totalKnown: true });
     service.handlers['wb:goods'] = async () => {
       const items = JSON.parse(JSON.stringify(goods)); service.cache.goods = { items, source: 'demo' }; service.cache.goodsAt = Date.now();
       return { demo: true, items, stats: [], overrides: store.loadCosts().items || {}, settings: service.getSettings() };
     };
-    service.handlers['wb:promos'] = async () => [promo];
+    service.handlers['wb:promos'] = async () => promos;
     return service;
   } }); hubs.push(hub);
   const store = hub.getActiveStore(), bid = (await hub.handlers['profiles:create']({ name: 'Второй' })).profile.id;
@@ -158,6 +165,7 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     await doc.querySelector('#pm-save').onclick();
     check('UI: НДС 22 сохраняется в текущем кабинете', store.loadSettings().taxMode === 'nds22' && store.loadSettings().taxVatRate === 22 && hub.getProfile(bid).store.loadSettings().taxMode === 'usn6');
     await until(() => !w.API.pending());
+    await require('./promo-workspace-ui')({ check, w, doc, until, modal, closeModals, requests, store, hub, bid, promo, promos, setCatalogExtras: (items) => { extraCatalog = items; } });
     check('UI: новые сценарии не создали ошибок JavaScript', errors.length === 0, errors.join(' | '));
   } finally { dom.window.close(); }
 };

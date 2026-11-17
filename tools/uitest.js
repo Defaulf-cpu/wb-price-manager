@@ -143,7 +143,8 @@ async function run() {
   // Общие UI-сценарии не нуждаются в 200 DOM-строках на каждом шаге.
   // Расчёты идут по всем товарам; штатные 100 строк проверяются отдельно ниже.
   const productionRepricerPageSize = window.Views.repricer.PAGE_SIZE;
-  window.Views.repricer.PAGE_SIZE = 40;
+  const generalRepricerPageSize = 20; // общий прогон хранит сотни старых DOM-ссылок; штатные 100 проверяются ниже отдельно
+  window.Views.repricer.PAGE_SIZE = generalRepricerPageSize;
 
   const report = [];
   const check = (name, cond, extra) => {
@@ -229,11 +230,11 @@ async function run() {
   // акции: открытие карточки
   window.App.go('promos');
   await wait(900);
-  const promoCards = doc.querySelectorAll('#promo-cards .card').length;
-  check('карточки акций отрисованы', promoCards > 0, promoCards + ' шт');
+  const promoCards = doc.querySelectorAll('#promo-list .promo-list-row').length;
+  check('общий список акций отрисован', promoCards > 0, promoCards + ' шт');
   // в карточке акции теперь две кнопки: «Загрузить товары из файла» и «Открыть товары».
   // Берём именно вторую (data-open), иначе тест откроет диалог выбора файла.
-  const openBtn = doc.querySelector('#promo-cards .card [data-open]') || doc.querySelector('#promo-cards .card button');
+  const openBtn = doc.querySelector('#promo-selected [data-open]');
   if (openBtn) {
     openBtn.click();
     await wait(900);
@@ -1748,13 +1749,13 @@ async function run() {
 
   // ── акции: состав из файла, а не из WB (метод nomenclatures отвечает 422) ──
   window.App.go('promos');
-  await wait(1400);
+  for (let i = 0; i < 100 && !doc.querySelector('#promo-list .promo-source .badge'); i++) await wait(50);
   const promosView = doc.getElementById('view');
   const promosText = promosView.textContent.replace(/\s+/g, ' ');
   check('акции: к WB за составом не обращаемся (настройка по умолчанию)',
     (await service.handlers['settings:get']({})).promosFetchNomenclatures === false);
-  check('акции: источник состава подписан на карточке акции',
-    /состав из файла|по скидке товара|состав не загружен/.test(promosText), promosText.slice(0, 90));
+  check('акции: источник состава подписан в общем списке',
+    /состав из файла|состав из WB API|по скидке товара|состав не загружен/.test(promosText), promosText.slice(0, 90));
   check('акции: ошибка 422 не показывается как ошибка раздела',
     !/422|Unprocessable/.test(promosText) || /файл/i.test(promosText));
   check('акции: есть кнопка перехода в кабинет WB', !!promosView.querySelector('[data-link]'));
@@ -1988,10 +1989,10 @@ async function run() {
   const colTh = () => doc.querySelectorAll('#rp-grid thead tr:last-child th').length;
   const visCount = () => {
     const vis = rpv.visibleCols();
-    return (rpv.COLUMNS || []).filter((c) => c.always || vis.has(c.id)).length;
+    return rpv.layoutColumns().filter((c) => c.always || vis.has(c.id)).length;
   };
   check('INDEEPA: справочник колонок совпадает с таблицей',
-    (rpv.COLUMNS || []).length === 32 && colTh() === visCount(),
+    rpv.layoutColumns().length === 28 && colTh() === visCount(),
     'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + colTh() + ', видимых ' + visCount());
   check('INDEEPA: по умолчанию показан полный набор (кроме дубля «Коридор»)',
     rpv.visibleCols().size >= 18 && !rpv.visibleCols().has('corridor'),
@@ -2033,14 +2034,14 @@ async function run() {
 
   // Ссылки на DOM объявлены через let и обнуляются в конце секции: в jsdom одна
   // ячейка держит ссылку на родителя, поэтому забытая строка оставляет в памяти
-  // всю старую таблицу (27 колонок × 40 строк) до конца прогона.
+  // всю старую таблицу (28 колонок × 20 строк) до конца прогона.
   let headRowsD = doc.querySelectorAll('#rp-grid thead tr');
   check('D: шапка таблицы двухрядная — блоки над колонками', headRowsD.length === 2, 'рядов ' + headRowsD.length);
   let groupThs = Array.from(doc.querySelectorAll('#rp-grid thead tr:first-child th[data-group]'));
   const groupNames = groupThs.map((th) => th.textContent.trim()).join(' | ');
   check('D: блоки колонок как в таблице INDEEPA', groupThs.length >= 7, groupNames);
-  check('D: блоки «Артикул», «Инфо о товаре», «Текущая цена», «Новая цена»',
-    groupNames.includes('Артикул') && groupNames.includes('Инфо о товаре') &&
+  check('D: объединённый блок «Товар и настройки», «Инфо о товаре», цены',
+    groupNames.includes('Товар и настройки') && groupNames.includes('Инфо о товаре') &&
       groupNames.includes('Текущая цена') && groupNames.includes('Новая цена'), groupNames);
   check('D: блоки «Мин цена (в акции)» и «Цена (вне акции)»',
     groupNames.includes('Мин цена (в акции)') && groupNames.includes('Цена (вне акции)'), groupNames);
@@ -2446,11 +2447,11 @@ async function run() {
 
   // ── «Акции» ──
   check('Е: вкладка «Акции» открывается', await eClick('promos', 2200));
-  check('Е: календарь акций встроен в репрайсер', !!doc.getElementById('promo-cards') &&
-    doc.querySelectorAll('#promo-cards .card').length > 0,
-    doc.querySelectorAll('#promo-cards .card').length + ' карточек');
+  check('Е: календарь акций встроен в репрайсер', !!doc.getElementById('promo-board') &&
+    doc.querySelectorAll('#promo-list .promo-list-row').length > 0,
+    doc.querySelectorAll('#promo-list .promo-list-row').length + ' акций');
   check('Е: решения по акциям и очередь возврата на месте', !!doc.getElementById('pa-grid') && !!doc.getElementById('pa-pending'));
-  check('Е: у акции есть загрузка состава файлом', !!doc.querySelector('#promo-cards [data-upload]'));
+  check('Е: у акции есть загрузка состава файлом', !!doc.querySelector('#promo-selected [data-upload]'));
   check('Е: ссылка на акцию формируется по шаблону WB',
     /dp-promo-calendar\?action=123/.test(window.U.promoCabinetUrl({ id: 123 })));
   if (global.gc) global.gc();
@@ -2596,7 +2597,7 @@ async function run() {
     'последняя страница: ' + (syntheticPage[0] || {}).nmID + ' … ' + rp.pageInfo.to);
   rp.pageOf([]);
   check('репрайсер: пустая выборка показывает 0 - 0 из 0', rp.pageInfo.from === 0 && rp.pageInfo.to === 0);
-  rp.PAGE_SIZE = 40;
+  rp.PAGE_SIZE = generalRepricerPageSize;
   rp.page = 1;
   rp.renderResults();
   if (rp.filteredResults().length > rp.PAGE_SIZE) {

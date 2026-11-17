@@ -88,7 +88,13 @@ const period = { startDateTime: '2026-01-01T00:00:00Z', endDateTime: '2026-12-31
   const sizes = observePromoPrice({ discount: 0, sizes: [{ price: 900 }, { price: 1200 }] }, 1000, period, '2026-06-01');
   check('Один дешёвый размер не выдаёт весь товар за участника', sizes.partial && !sizes.inAction);
 
-  const hub = createProfileHub({ dataDir: temp(), createService }); hubs.push(hub);
+  const hub = createProfileHub({ dataDir: temp(), createService: (store, emit, electron, hooks) => {
+    const service = createService(store, emit, electron, hooks);
+    // Синтетическая выгрузка принадлежит синтетическому кабинету, не демо-WB по умолчанию.
+    service.getDemo().getGoods = async () => ({ items: parsed.items.map((row) => ({ nmID: row.nmID, price: row.price || 2000, discount: 0 })),
+      source: 'demo', complete: true, scope: 'full', total: parsed.items.length, totalKnown: true });
+    return service;
+  } }); hubs.push(hub);
   const store = hub.getActiveStore();
   const preview = await hub.handlers['promos:import-noms']({ promotionID: 3148, fileName: 'wb.xlsx', base64: xlsx.toString('base64'), action: 'preview' });
   check('Предпросмотр файла не записывает состав акции', preview.preview && !store.loadPromoNoms()['3148']);

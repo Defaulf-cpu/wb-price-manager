@@ -460,8 +460,9 @@ function createDemoApi(opts) {
       for (const g of goods) overrides[String(g.nmID)] = demoOverrides(g.nmID);
       return {
         items: goods.slice(),
-        total: goods.length,
-        source: 'demo',
+        total: goods.length, loadedCount: goods.length, totalKnown: true,
+        source: 'demo', scope: 'full', complete: true, truncated: false,
+        completionReason: 'demo', pages: 1,
         overrides
       };
     },

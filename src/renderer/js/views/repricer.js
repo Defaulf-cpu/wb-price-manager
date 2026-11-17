@@ -77,8 +77,11 @@ Views.repricer = {
   },
 
   async draw() {
+    const ticket = this._drawTicket = (this._drawTicket || 0) + 1, epoch = API.generation(), tab = this.tab, container = this.container;
     if (this._gridLayout) { this._gridLayout.destroy(); this._gridLayout = null; }
-    const host = this.container.querySelector('#rp-host');
+    const host = container && container.querySelector('#rp-host');
+    if (!host) return;
+    const current = () => ticket === this._drawTicket && epoch === API.generation() && this.container === container && this.tab === tab && container.querySelector('#rp-host') === host;
     /**
      * Вложенные панели (себестоимость, календарь акций) держат ссылку на свой контейнер,
      * а через неё — весь отрисованный DOM. При смене вкладки этот DOM уже откреплён,
@@ -92,6 +95,7 @@ Views.repricer = {
     host.innerHTML = UI.loading();
     try {
       await this.loadState();
+      if (!current()) return;
       /**
        * Всё рабочее место — внутри репрайсера: таблица товаров, массовые правила,
        * себестоимость, конкуренты, акции, журналы, расписание и параметры. Отдельные
@@ -104,14 +108,14 @@ Views.repricer = {
       else if (this.tab === 'rules') await this.tabRules(host);
       else if (this.tab === 'costs') this.tabCosts(host);
       else if (this.tab === 'competitors') this.tabCompetitors(host);
-      else if (this.tab === 'promos') this.tabPromos(host);
+      else if (this.tab === 'promos') await this.tabPromos(host, current);
       else if (this.tab === 'promo-analytics') await this.tabPromoAnalytics(host);
       else if (this.tab === 'journal-prices') this.tabJournal(host, 'prices');
       else if (this.tab === 'journal-promos') this.tabJournal(host, 'promos');
       else if (this.tab === 'schedule') await this.tabSchedule(host);
       else await this.tabParams(host);
     } catch (e) {
-      host.innerHTML = `<div class="card"><div class="alert danger">${U.esc(e.message)}</div></div>`;
+      if (current()) host.innerHTML = `<div class="card"><div class="alert danger">${U.esc(e.message)}</div></div>`;
     }
   },
 
@@ -241,7 +245,7 @@ Views.repricer = {
     }
 
     $('#rp-cols').onclick = () => this.openColumnsPicker();
-    $('#rp-layout').onclick = () => GridLayout.openSettings('repricer-products', this.COLUMNS.map((c) => ({ ...c, colId: c.id })), () => this.renderResults());
+    $('#rp-layout').onclick = () => GridLayout.openSettings('repricer-products', this.layoutColumns().map((c) => ({ ...c, colId: c.id })), () => this.renderResults());
     $('#rp-q').oninput = U.debounce((e) => { this.itemFilter.q = e.target.value; this.page = 0; this.renderResults(); }, 220);
     // сегментированный фильтр (как «Все / Основной» в INDEEPA): один признак за раз,
     // вместо набора чекбоксов, которые непонятно как сочетаются
@@ -505,12 +509,12 @@ Views.repricer = {
     { id: 'item', title: 'Товар', always: true, group: 'article' },
     { id: 'vendorCode', title: 'Артикул продавца', group: 'article' },
     { id: 'barcode', title: 'Баркод', group: 'article' },
-    { id: 'allowSend', title: 'Отправка в WB', group: 'article' },
-    { id: 'tag', title: 'Метка', group: 'article' },
+    { id: 'allowSend', title: 'Отправка в WB', group: 'article', mergedInto: 'item' },
+    { id: 'tag', title: 'Метка', group: 'article', mergedInto: 'item' },
     // ── блок «Инфо о товаре» ──
     { id: 'info', title: 'Инфо о товаре', group: 'info' },
-    { id: 'stock', title: 'Остаток / оборач.', group: 'info' },
-    { id: 'plan', title: 'План продаж', group: 'info' },
+    { id: 'stock', title: 'Остаток / оборач.', group: 'info', mergedInto: 'info' },
+    { id: 'plan', title: 'План продаж', group: 'info', mergedInto: 'info' },
     // ── блок «Текущая цена» ──
     { id: 'priceNow', title: 'Цена на МП', always: true, group: 'now' },
     { id: 'myPrice', title: 'Моя цена', always: true, group: 'now' },
@@ -549,7 +553,7 @@ Views.repricer = {
    * Блок виден, если видна хотя бы одна его колонка.
    */
   GROUP_TITLES: {
-    article: 'Артикул',
+    article: 'Товар и настройки',
     info: 'Инфо о товаре',
     now: 'Текущая цена',
     next: 'Новая цена',
@@ -569,7 +573,7 @@ Views.repricer = {
    * (дублирует пороги).
    * Все они включаются в один клик в окне «Колонки» — целиком блоком или по отдельности.
    */
-  DEFAULT_COLUMNS: ['item', 'allowSend', 'tag', 'info', 'stock', 'plan',
+  DEFAULT_COLUMNS: ['item', 'info',
     'priceNow', 'myPrice', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'sizes', 'delta',
     'strategy', 'status', 'why', 'floor', 'promoMin', 'promos', 'restore',
     'cost', 'profit', 'margin', 'profitMonth',
@@ -578,24 +582,33 @@ Views.repricer = {
    * Компактный набор — по одной-две ключевые колонки из каждого блока,
    * для небольшого экрана. Обязательные колонки всегда внутри.
    */
-  COMPACT_COLUMNS: ['item', 'allowSend', 'priceNow', 'myPrice', 'value', 'priceNext',
+  COMPACT_COLUMNS: ['item', 'priceNow', 'myPrice', 'value', 'priceNext',
     'delta', 'strategy', 'floor', 'cost', 'profit', 'margin', 'status', 'why'],
   COLS_KEY: 'wb.repricer.columns',
 
-  /** Какие колонки показывать: из localStorage, иначе набор по умолчанию. */
+  /** Старые colId остаются в справочнике как миграционные ссылки, не дублируют поля. */
+  layoutColumns() { return this.COLUMNS.filter((col) => !col.mergedInto); },
+
+  colsStorageKey() { return this.COLS_KEY + '.' + (API.activeProfileId() || 'single'); },
+
+  /** Старые настройки колонок не удаляем: объединённые поля переводим в их блок. */
   visibleCols() {
+    let list = null;
     try {
-      const raw = window.localStorage && window.localStorage.getItem(this.COLS_KEY);
-      const list = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(list) && list.length) return new Set(list.map(String));
-    } catch (e) { /* повреждённое значение — берём набор по умолчанию */ }
-    return new Set(this.DEFAULT_COLUMNS);
+      const raw = localStorage.getItem(this.colsStorageKey()) || localStorage.getItem(this.COLS_KEY);
+      list = raw ? JSON.parse(raw) : null;
+    } catch (_) {}
+    if (!Array.isArray(list)) list = this.DEFAULT_COLUMNS;
+    const definitions = new Map(this.COLUMNS.map((col) => [col.id, col]));
+    const visible = new Set();
+    list.forEach((id) => { const col = definitions.get(String(id)); if (col) visible.add(col.mergedInto || col.id); });
+    this.layoutColumns().filter((col) => col.always).forEach((col) => visible.add(col.id));
+    return visible;
   },
 
   saveVisibleCols(set) {
-    try {
-      if (window.localStorage) window.localStorage.setItem(this.COLS_KEY, JSON.stringify(Array.from(set)));
-    } catch (e) { /* приватный режим браузера — не критично */ }
+    try { localStorage.setItem(this.colsStorageKey(), JSON.stringify(Array.from(set))); }
+    catch (_) { /* приватный режим — вид работает без записи */ }
   },
 
   /**
@@ -629,7 +642,7 @@ Views.repricer = {
     body.innerHTML = `
       <div class="alert info">Колонки разложены по блокам — как в таблице репрайсера INDEEPA.
         Включайте блок целиком или отдельные колонки: товар, текущая цена, новая цена,
-        изменение и кнопка «почему» показаны всегда.</div>
+        изменение и кнопка «почему» показаны всегда.<br>Отправка в WB и метка находятся внутри закреплённого «Товара»; остаток и план — внутри «Инфо о товаре». Отдельные широкие колонки для них больше не нужны.</div>
       <div class="colblocks">${blocks}</div>
       <div class="row wrap" style="gap:8px;margin-top:12px">
         <button class="btn btn-sm" id="cp-compact">Компактный набор (${this.COMPACT_COLUMNS.length} колонок)</button>
@@ -651,67 +664,48 @@ Views.repricer = {
             });
             this.saveVisibleCols(next);
             this.renderResults();
-            App.toast('Показывается колонок: ' + next.size + ' из ' + this.COLUMNS.length +
+            App.toast('Показывается колонок: ' + next.size + ' из ' + this.layoutColumns().length +
               ', блоков: ' + this.visibleGroupIds().length, 'ok', 5000);
           } }
       ]
     });
-    /** Чекбокс блока включает/выключает все его колонки (обязательные не трогаем). */
+    const syncBlocks = () => body.querySelectorAll('[data-block-toggle]').forEach((bt) => {
+      const cols = Array.from(body.querySelectorAll('[data-col][data-block="' + bt.getAttribute('data-block-toggle') + '"]'));
+      bt.checked = cols.some((cb) => cb.checked); bt.indeterminate = bt.checked && !cols.every((cb) => cb.checked);
+    });
     body.querySelectorAll('[data-block-toggle]').forEach((bt) => {
       bt.onchange = () => {
-        const gid = bt.getAttribute('data-block-toggle');
-        body.querySelectorAll('[data-col][data-block="' + gid + '"]').forEach((cb) => {
-          if (cb.disabled) return;
-          cb.checked = bt.checked;
-        });
+        body.querySelectorAll('[data-col][data-block="' + bt.getAttribute('data-block-toggle') + '"]').forEach((cb) => { if (!cb.disabled) cb.checked = bt.checked; });
+        syncBlocks();
       };
     });
-    /** Чекбокс колонки поддерживает состояние чекбокса блока. */
-    body.querySelectorAll('[data-col]').forEach((cb) => {
-      cb.onchange = () => {
-        const gid = cb.getAttribute('data-block');
-        const bt = body.querySelector('[data-block-toggle="' + gid + '"]');
-        if (!bt) return;
-        const list = Array.from(body.querySelectorAll('[data-col][data-block="' + gid + '"]'));
-        bt.checked = list.some((x) => x.checked || x.disabled);
-      };
-    });
+    body.querySelectorAll('[data-col]').forEach((cb) => { cb.onchange = syncBlocks; });
     const applySet = (ids) => {
-      body.querySelectorAll('[data-col]').forEach((cb) => {
-        const col = this.COLUMNS.find((c) => c.id === cb.getAttribute('data-col'));
-        if (col && col.always) return;
-        cb.checked = ids.includes(cb.getAttribute('data-col'));
-      });
-      body.querySelectorAll('[data-block-toggle]').forEach((bt) => { bt.onchange && bt.onchange(); });
+      body.querySelectorAll('[data-col]').forEach((cb) => { cb.checked = cb.disabled || ids.includes(cb.getAttribute('data-col')); });
+      // Нельзя вызывать onchange блока: его прежнее состояние затирало выбранный набор.
+      syncBlocks();
     };
     body.querySelector('#cp-compact').onclick = () => applySet(this.COMPACT_COLUMNS);
-    body.querySelector('#cp-full').onclick = () => {
-      body.querySelectorAll('[data-col]').forEach((cb) => { cb.checked = true; });
-      body.querySelectorAll('[data-block-toggle]').forEach((bt) => { bt.checked = true; });
-    };
+    body.querySelector('#cp-full').onclick = () => applySet(this.layoutColumns().map((col) => col.id));
     body.querySelector('#cp-default').onclick = () => applySet(this.DEFAULT_COLUMNS);
+    syncBlocks();
   },
 
   /** Оставляет только видимые колонки (обязательные — всегда). */
   filterCols(cols) {
-    const vis = this.visibleCols();
-    this._renderColumns = GridLayout.orderedColumns(cols.map((c, i) => ({ c, def: this.COLUMNS[i] }))
-      .filter((x) => (x.def && x.def.always) || vis.has(x.def ? x.def.id : ''))
-      .map((x) => {
-        // блок и id колонки берём из справочника: порядок массива обязан совпадать с COLUMNS
-        const c = Object.assign({}, x.c);
-        if (x.def) {
-          if (x.def.group) c.group = x.def.group;
-          if (x.def.id) c.colId = x.def.id;
-        }
-        return c;
-      }), 'repricer-products');
+    const vis = this.visibleCols(), definitions = new Map(this.COLUMNS.map((col) => [col.id, col]));
+    // Явный colId вместо позиционного соответствия двух массивов: перенос/слияние
+    // поля не может подставить цену под чужой заголовок или сломать сохранённый вид.
+    this._renderColumns = GridLayout.orderedColumns(cols.filter((col) => {
+      const def = definitions.get(col.colId);
+      return def && !def.mergedInto && (def.always || vis.has(def.id));
+    }).map((col) => ({ ...col, group: definitions.get(col.colId).group })), 'repricer-products');
     return this._renderColumns;
   },
 
   /** Колонки справочника, входящие в блок. */
   colsOfGroup(gid) {
-    return this.COLUMNS.filter((c) => c.group === gid);
+    return this.layoutColumns().filter((c) => c.group === gid);
   },
 
   /** Видимые колонки блока (обязательные считаются видимыми всегда). */
@@ -787,6 +781,42 @@ Views.repricer = {
     return ` <span title="Цена покупателю ${U.money(buyer)} = цена продавца − ${parts.join(' − ')}">· ${parts.join(' + ')}</span>`;
   },
 
+  /** Флаг отправки и метка теперь живут рядом с кодами товара, всегда слева. */
+  sendControlHtml(r) {
+    const cfg = this.rowConfig(r.nmID);
+    const on = cfg.allowSend === undefined ? r.allowSend !== false : cfg.allowSend !== false;
+    return `<label class="checkline tiny rp-sendline" title="Выключено — расчёт остаётся виден, но цена в WB не уйдёт">
+      <input type="checkbox" class="rp-allowsend" data-nm="${r.nmID}" ${on ? 'checked' : ''} /><span class="${on ? 'pos' : 'neg'}">${on ? 'Отправка в WB' : 'Не отправлять'}</span></label>`;
+  },
+
+  tagControlHtml(r) {
+    const cfg = this.rowConfig(r.nmID);
+    const val = cfg.tag === undefined ? r.tag || '' : cfg.tag || '';
+    return `<label class="rp-tag-field tiny muted">Метка <input type="text" class="cellinput rp-tag" data-nm="${r.nmID}" maxlength="24" placeholder="нет" value="${U.esc(val)}" title="Метка товара для фильтров и массовых правил" /></label>`;
+  },
+
+  productCellHtml(r) {
+    const item = this.itemsByNm.get(String(r.nmID)) || {}, card = (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
+    const raw = item.photo || item.photoUrl || card.photo || (item.photos && item.photos[0]);
+    const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
+    const title = card.title || r.title || item.title || r.vendorCode || String(r.nmID);
+    return `<div class="rp-product-block">
+      <div class="rp-product-identity">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
+        <div class="rowtitle"><button type="button" class="rp-product-title" data-item-card="${r.nmID}" title="${U.esc(title)}">${U.esc(title)}</button>
+          <span class="tiny"><span class="muted">SKU / nmID</span> <b>${r.nmID}</b></span>
+          <span class="tiny"><span class="muted">Арт.</span> ${U.esc(r.vendorCode || item.vendorCode || '—')}</span>
+          <span class="tiny muted">${U.esc(item.brand || card.brand || 'Бренд не указан')}</span></div></div>
+      <div class="rp-product-barcode tiny"><span class="muted">Баркод</span> ${this.barcodeCellHtml(r)}</div>
+      <div class="rp-product-controls"><span data-field-id="allowSend">${this.sendControlHtml(r)}</span><span data-field-id="tag">${this.tagControlHtml(r)}</span></div>
+    </div>`;
+  },
+
+  stockCellHtml(r) {
+    const c = r.context || {};
+    if (c.stock === undefined || c.stock === null) return '<span class="muted tiny">Остаток не загружен</span>';
+    return `<b>${U.fmt(c.stock)} шт</b>${U.stockWarn(c.stock, c.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : ''}<span class="tiny muted"> · ${c.turnoverDays >= 999 ? '∞' : Math.round(U.num(c.turnoverDays))} дн оборач.</span>`;
+  },
+
   /** Баркод товара: из карточки контент-API (в демо-данных баркодов нет). */
   barcodeCellHtml(r) {
     const card = (this.cardsByNm || new Map()).get(String(r.nmID)) || {};
@@ -810,7 +840,9 @@ Views.repricer = {
     if (item.editableSizePrice) badges.push(UI.badge('цены по размерам', 'info'));
     if (item.inPromo) badges.push(UI.badge('в акции', 'warn'));
     if (item.isBadTurnover) badges.push(UI.badge('плохая оборач.', 'warn'));
-    return `<div class="tiny rp-wrap">${rows.join(' · ') || '—'}${badges.length ? ' ' + badges.join(' ') : ''}</div>`;
+    return `<div class="rp-info-block"><div class="tiny rp-wrap">${rows.join(' · ') || 'Категория не указана'}${badges.length ? ' ' + badges.join(' ') : ''}</div>
+      <div class="rp-info-stock" data-field-id="stock"><span class="tiny muted">Остаток / оборачиваемость</span><div>${this.stockCellHtml(r)}</div></div>
+      <div class="rp-info-plan" data-field-id="plan"><span class="tiny muted">План продаж / месяц</span>${this.planCellHtml(r)}</div></div>`;
   },
 
   /**
@@ -1264,12 +1296,12 @@ Views.repricer = {
     const pl = (r.context && r.context.plan) || null;
     const input = `<input type="number" class="num rp-plan" data-nm="${r.nmID}" min="0" step="1" style="width:82px" title="План продаж на месяц, шт" value="${this.rowConfig(r.nmID).planQtyMonth || ''}" />`;
     if (!pl || !(U.num(pl.planQty) > 0)) {
-      return input + '<div class="muted tiny">⚪ План не заполнен, % выполнения не рассчитан</div>';
+      return '<div class="rp-plan-field">' + input + '<span class="muted tiny">План не заполнен, % выполнения не рассчитан</span></div>';
     }
     const ratio = U.num(pl.ratio) * 100;
     const cls = ratio >= 100 ? 'pos' : (ratio >= 60 ? 'warnc' : 'neg');
-    return `${input}<br><b class="${cls}">${U.pct(ratio, 0)}</b>
-      <div class="tiny muted">факт ${U.fmt(pl.fact || 0)} из ${U.fmt(pl.planQty)} шт</div>`;
+    return `<div class="rp-plan-field">${input}<span><b class="${cls}">${U.pct(ratio, 0)}</b>
+      <span class="tiny muted"> · факт ${U.fmt(pl.fact || 0)} из ${U.fmt(pl.planQty)} шт</span></span></div>`;
   },
 
   /** Размер страницы таблицы цен: тысячи строк с десятками полей ввода вешают браузер. */
@@ -1777,54 +1809,33 @@ Views.repricer = {
     host.innerHTML = '';
 
     const grid = UI.table({
-      // колонки фильтруются по выбору пользователя (кнопка «Колонки»):
-      // порядок массива обязан совпадать со справочником this.COLUMNS
+      // Колонки связываются со справочником по устойчивому colId, не по позиции.
       columns: this.filterCols([
         // ══ блок «Артикул» ══
-        { title: 'Товар', cls: 'rp-product', render: (r) => {
-            const item = this.itemsByNm.get(String(r.nmID)) || {};
-            const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
-            const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
-            return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
-              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
-          } },
-        { title: 'Артикул продавца', render: (r) => {
+        { colId: 'item', title: 'Товар', cls: 'rp-product', render: (r) => this.productCellHtml(r) },
+        { colId: 'vendorCode', title: 'Артикул продавца', render: (r) => {
             const item = this.itemsByNm.get(String(r.nmID)) || {};
             return `<div class="tiny rp-wrap"><b>${U.esc(r.vendorCode || item.vendorCode || '—')}</b> · нм-код ${r.nmID}${item.brand ? ' · ' + U.esc(item.brand) : ''}</div>`;
           } },
-        { title: 'Баркод', render: (r) => this.barcodeCellHtml(r) },
-        { title: 'Отправка в WB', render: (r) => {
-            const cfg = this.rowConfig(r.nmID);
-            const on = cfg.allowSend !== false && r.allowSend !== false;
-            return `<label class="checkline tiny rp-sendline" title="Если выключить — цена рассчитается и будет видна, но в WB не уйдёт">
-                <input type="checkbox" class="rp-allowsend" data-nm="${r.nmID}" ${on ? 'checked' : ''} />
-                ${on ? '<span class="ok">отправляем</span>' : '<span class="neg">не отправлять</span>'}
-              </label>`;
-          } },
-        { title: 'Метка', render: (r) => {
-            const cfg = this.rowConfig(r.nmID);
-            const pend = (this.pendingEdits.get(String(r.nmID)) || {}).config || {};
-            const val = pend.tag !== undefined ? pend.tag : (cfg.tag || r.tag || '');
-            return `<input type="text" class="cellinput rp-tag" data-nm="${r.nmID}" maxlength="24"
-                placeholder="нет" value="${U.esc(val)}"
-                title="Своя метка товара: по ней фильтрует список и работают массовые правила" />`;
-          } },
+        { colId: 'barcode', title: 'Баркод', render: (r) => this.barcodeCellHtml(r) },
+        { colId: 'allowSend', title: 'Отправка в WB', render: (r) => this.sendControlHtml(r) },
+        { colId: 'tag', title: 'Метка', render: (r) => this.tagControlHtml(r) },
         // ══ блок «Инфо о товаре» ══
-        { title: 'Инфо о товаре', render: (r) => this.itemInfoCellHtml(r) },
-        { title: 'Остаток / оборач.', num: true, render: (r) => `${U.fmt(r.context.stock)} шт${U.stockWarn(r.context.stock, r.context.turnoverDays, S.state.settings.stocksLowDays) ? ' ' + UI.badge('заканчивается', 'warn') : ''}<div class="tiny muted">${r.context.turnoverDays >= 999 ? '∞' : Math.round(r.context.turnoverDays) + ' дн'}</div>` },
-        { title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
+        { colId: 'info', title: 'Инфо о товаре', render: (r) => this.itemInfoCellHtml(r) },
+        { colId: 'stock', title: 'Остаток / оборач.', render: (r) => this.stockCellHtml(r) },
+        { colId: 'plan', title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
         // ══ блок «Текущая цена» ══
-        { title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
-        { title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
-        { title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
+        { colId: 'priceNow', title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
+        { colId: 'myPrice', title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
+        { colId: 'buyerNow', title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
             ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП${this.walletNote(r, 'now')}</div>`
             : '<span class="muted tiny">нет данных</span>' },
-        { title: 'Выгодность', render: (r) => {
+        { colId: 'value', title: 'Выгодность', render: (r) => {
             const v = this.valueStatus(r);
             return `${UI.badge(v.label, v.kind)}<div class="tiny muted" title="${U.esc(v.hint)}">${U.esc(v.hint)}</div>`;
           } },
         // ══ блок «Новая цена» ══
-        { title: 'Новая цена', num: true, render: (r) => {
+        { colId: 'priceNext', title: 'Новая цена', num: true, render: (r) => {
             /**
              * Если по товару сохранена своя цена, в WB уйдёт именно она, а не расчёт
              * репрайсера. Показываем это прямо в ячейке, иначе цифра в «Новой цене»
@@ -1837,12 +1848,12 @@ Views.repricer = {
               <div class="tiny muted">скидка ${U.pct(U.num(d.discount), 0)} · база ${U.money(d.basePrice)}</div>
               <div class="tiny muted">репрайсер предлагал ${U.money(r.proposed.sellerPrice)} — не отправится</div>`;
           } },
-        { title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
+        { colId: 'buyerNext', title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
             ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП${this.walletNote(r, 'next')}</div>`
             : '<span class="muted tiny">—</span>' },
-        { title: 'Размеры', render: (r) => this.sizesCellHtml(r) },
-        { title: 'Изменение', num: true, render: (r) => `<span class="${r.delta.abs > 0 ? 'pos' : (r.delta.abs < 0 ? 'neg' : 'muted')}">${U.signed(r.delta.abs)} ₽<br>${U.signed(r.delta.pct, 1)}%</span>` },
-        { title: 'Стратегия', render: (r) => {
+        { colId: 'sizes', title: 'Размеры', render: (r) => this.sizesCellHtml(r) },
+        { colId: 'delta', title: 'Изменение', num: true, render: (r) => `<span class="${r.delta.abs > 0 ? 'pos' : (r.delta.abs < 0 ? 'neg' : 'muted')}">${U.signed(r.delta.abs)} ₽<br>${U.signed(r.delta.pct, 1)}%</span>` },
+        { colId: 'strategy', title: 'Стратегия', render: (r) => {
             const cfg = this.rowConfig(r.nmID);
             const cur = cfg.strategy || '';
             return `<select class="rp-strategy" data-nm="${r.nmID}" style="width:170px">
@@ -1852,7 +1863,7 @@ Views.repricer = {
               <div class="tiny muted" style="margin-top:2px">сейчас: ${U.esc(r.strategyTitle || r.strategy)}</div>
               ${this.rowErrors(r).length ? `<div class="rp-validation neg tiny">ОШИБКА: ${U.esc(this.rowErrors(r).join('; '))}</div>` : ''}`;
           } },
-        { title: 'Статус', render: (r) => {
+        { colId: 'status', title: 'Статус', render: (r) => {
             const b = [];
             if (r.allowSend === false) b.push(UI.badge('отправка выключена', 'danger'));
             if (r.quarantine) b.push(UI.badge('карантин', 'danger'));
@@ -1863,30 +1874,30 @@ Views.repricer = {
             if (r.limitedBy === 'below-min') b.push(UI.badge('поднят до порога', 'info'));
             return b.join(' ');
           } },
-        { title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` },
+        { colId: 'why', title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` },
         // ══ блок «Мин цена (в акции)» ══
-        { title: 'Мин цена / базовая', num: true, render: (r) => {
+        { colId: 'floor', title: 'Мин цена / базовая', num: true, render: (r) => {
             const cfg = this.rowConfig(r.nmID);
             return `<input type="number" step="10" class="num rp-minprice" data-nm="${r.nmID}" value="${cfg.minPrice || ''}"
                 placeholder="${U.num(r.corridor.min)}" style="width:96px" title="Минимальная цена: ниже неё репрайсер не опустится" />
               <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
               <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
           } },
-        { title: 'Мин цена в акции', num: true, render: (r) => this.promoMinCellHtml(r) },
-        { title: 'Акции', render: (r) => this.promoCellHtml(r) },
+        { colId: 'promoMin', title: 'Мин цена в акции', num: true, render: (r) => this.promoMinCellHtml(r) },
+        { colId: 'promos', title: 'Акции', render: (r) => this.promoCellHtml(r) },
         // ══ блок «Цена (вне акции)» ══
-        { title: 'Цена вне акции', num: true, render: (r) => this.restoreCellHtml(r) },
-        { title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
+        { colId: 'restore', title: 'Цена вне акции', num: true, render: (r) => this.restoreCellHtml(r) },
+        { colId: 'corridor', title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
         // ══ блок «Себестоимость и экономика» ══
-        { title: 'Себестоимость', num: true, render: (r) => this.costCellHtml(r) },
-        { title: 'Расходы на единицу', num: true, render: (r) => this.costDetailCellHtml(r) },
-        { title: 'Безубыточность', num: true, render: (r) => this.breakEvenCellHtml(r) },
-        { title: 'Прибыль/шт', num: true, render: (r) => `<span class="muted">${U.money(r.current.profit)}</span> → <b class="${U.profitClass(r.proposed.profit)}">${U.money(r.proposed.profit)}</b>` },
-        { title: 'Маржа', num: true, render: (r) => `<span class="muted">${U.pct(r.current.marginPct)}</span> → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>` },
-        { title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
+        { colId: 'cost', title: 'Себестоимость', num: true, render: (r) => this.costCellHtml(r) },
+        { colId: 'costDetail', title: 'Расходы на единицу', num: true, render: (r) => this.costDetailCellHtml(r) },
+        { colId: 'breakEven', title: 'Безубыточность', num: true, render: (r) => this.breakEvenCellHtml(r) },
+        { colId: 'profit', title: 'Прибыль/шт', num: true, render: (r) => `<span class="muted">${U.money(r.current.profit)}</span> → <b class="${U.profitClass(r.proposed.profit)}">${U.money(r.proposed.profit)}</b>` },
+        { colId: 'margin', title: 'Маржа', num: true, render: (r) => `<span class="muted">${U.pct(r.current.marginPct)}</span> → <b class="${U.profitClass(r.proposed.marginPct)}">${U.pct(r.proposed.marginPct)}</b>` },
+        { colId: 'profitMonth', title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
         // ══ блок «Конкуренты» ══
-        { title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
-        { title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) }
+        { colId: 'competitor', title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
+        { colId: 'offset', title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) }
       ]),
       // верхний ряд шапки — блоки колонок (задание D)
       groupTitles: this.GROUP_TITLES,
@@ -1937,6 +1948,10 @@ Views.repricer = {
         (this.density === 'compact' ? ' · плотный режим' : '');
     }
 
+    const productGroup = tbl.querySelector('thead tr.rp-head-groups th[data-group="article"]');
+    if (productGroup && productGroup.colSpan === 1) productGroup.dataset.pinnedProduct = 'true';
+    host.querySelectorAll('[data-item-card]').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); Views.itemcard.open(Number(button.dataset.itemCard)); }; });
+
     host.querySelectorAll('[data-why]').forEach((b) => {
       b.onclick = (e) => {
         e.stopPropagation();
@@ -1962,7 +1977,11 @@ Views.repricer = {
         const patch = {};
         if (inp.classList.contains('rp-strategy')) patch.strategy = inp.value || null;
         // «Отправка в WB»: false обязан дойти до настроек товара, поэтому не чистится как пустое значение
-        else if (inp.classList.contains('rp-allowsend')) patch.allowSend = !!inp.checked;
+        else if (inp.classList.contains('rp-allowsend')) {
+          patch.allowSend = !!inp.checked;
+          const label = inp.closest('label').querySelector('span');
+          if (label) { label.className = inp.checked ? 'pos' : 'neg'; label.textContent = inp.checked ? 'Отправка в WB' : 'Не отправлять'; }
+        }
         else if (inp.classList.contains('rp-tag')) patch.tag = String(inp.value || '').trim() || null;
         else if (inp.classList.contains('rp-minprice')) {
           const v = U.num(inp.value);
@@ -2446,7 +2465,7 @@ Views.repricer = {
     Views.costs.mount(host.querySelector('#rp-costs-host'));
   },
 
-  async tabPromos(host) {
+  async tabPromos(host, current = () => this.tab === 'promos' && host.isConnected) {
     const rs = this.rstate;
     const cfg = rs.config;
     const P = cfg.promo || {};
@@ -2570,10 +2589,11 @@ Views.repricer = {
 
     if (this.promoRows.length) { this.drawPromoSummary(); this.renderPromoGrid(); }
     await this.renderPending();
+    if (!current()) return;
 
     /**
      * Календарь акций — тот же компонент, что в разделе «Акции»
-     * (Views.promos.mount): карточки акций, вход/выход выбранными товарами,
+     * (Views.promos.mount): общий список, Гант/таблица акций и сохранение состава,
      * импорт состава файлом из кабинета и прямая ссылка на акцию.
      * К WB за составом не ходим: метод nomenclatures отвечает HTTP 422.
      */

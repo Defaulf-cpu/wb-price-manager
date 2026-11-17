@@ -121,11 +121,14 @@ async function serviceCases() {
   service.handlers['wb:promo-nomenclatures'] = async () => { apiCalls++; throw new Error('API состава запрещён в тесте'); };
   service.handlers['wb:promos'] = async () => [{ id: 3148, name: 'Синтетическая акция', type: 'auto', requiredDiscountPct: 40,
     startDateTime: new Date(Date.now() - 86400000).toISOString(), endDateTime: new Date(Date.now() + 86400000).toISOString() }];
-  service.cache.goods = { items: [
+  const catalogItems = [
     { nmID: 100000101, price: 2200, discount: 0 },
     { nmID: 100000102, price: 2500, discount: 0 },
     { nmID: 100000103, price: 1800, discount: 0, editableSizePrice: true, sizes: [{ sizeID: 11, price: 1800 }, { sizeID: 12, price: 2100 }] }
-  ] };
+    , { nmID: 1234567890 } // свой товар без живой цены: проверяем честный снимок файла
+  ];
+  service.getClient().getGoods = async () => ({ items: catalogItems, total: catalogItems.length, totalKnown: true, source: 'wb', complete: true, scope: 'full' });
+  service.getClient().getCards = async () => [];
   const payload = { promotionID: 3148, fileName: 'synthetic.xlsx', base64: xlsx.toString('base64') };
   try {
     const before = JSON.stringify(store.loadPromoNoms()), config = JSON.stringify(store.loadRepricer());
