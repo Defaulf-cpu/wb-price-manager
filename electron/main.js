@@ -7,12 +7,16 @@ const crypto = require('crypto');
 const { createStore } = require('./store');
 const { createService } = require('./service');
 const { createUpdateManager } = require('./updater');
+const { createBackupManager } = require('./backup');
+const { createTelegramNotifier } = require('./notifications');
 const { APP_NAME } = require('./config');
 
 let win = null;
 let store = null;
 let service = null;
 let updateManager = null;
+let backupManager = null;
+let telegramNotifier = null;
 
 const DEV = process.argv.includes('--dev');
 
@@ -250,6 +254,11 @@ function registerEconProtocol() {
   }
 }
 
+app.on('before-quit', () => {
+  if (backupManager) backupManager.stopScheduler();
+  if (telegramNotifier) telegramNotifier.stop();
+});
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -265,7 +274,13 @@ if (!gotLock) {
     registerEconProtocol();
     const dir = app.getPath('userData');
     store = createStore(dir, makeSecretBox());
-    service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden });
+    backupManager = createBackupManager({ store, dir, appVersion: app.getVersion() });
+    backupManager.startScheduler();
+    telegramNotifier = createTelegramNotifier({ store });
+    service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden }, {
+      backupManager,
+      telegramNotifier
+    });
     updateManager = createUpdateManager({
       app,
       platform: process.platform,

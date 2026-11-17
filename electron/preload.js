@@ -92,7 +92,14 @@ const CHANNELS = [
   'ui:update-state',
   'ui:update-check',
   'ui:update-enable',
-  'ui:update-restart'
+  'ui:update-restart',
+  'backup:export',
+  'backup:import',
+  'backup:list',
+  'backup:restore',
+  'notify:get',
+  'notify:save',
+  'notify:test'
 ];
 
 /**

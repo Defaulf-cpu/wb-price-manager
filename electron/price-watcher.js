@@ -61,6 +61,7 @@ function createPriceWatcher(options) {
   let lastRequestAt = 0;
   let blocked = false;
   const log = typeof o.log === 'function' ? o.log : () => {};
+  const onCompetitorPriceChange = typeof o.onCompetitorPriceChange === 'function' ? o.onCompetitorPriceChange : () => {};
   const safeLog = (entry) => { try { log(entry); } catch (_) {} };
   const ttlMs = () => {
     const s = typeof store.loadSettings === 'function' ? store.loadSettings() : {};
@@ -74,12 +75,18 @@ function createPriceWatcher(options) {
     if (!sku || typeof store.loadCompetitors !== 'function') return;
     const items = store.loadCompetitors();
     let changed = false;
+    const priceChanges = [];
     for (const key of Object.keys(items)) {
       if (ownID && key !== ownID) continue;
       if (!Array.isArray(items[key])) continue;
       items[key] = items[key].map((c) => {
         if (!c || String(c.sku || c.competitorSKU || c.nmID || c.id) !== sku) return c;
         changed = true;
+        const oldPrice = Number(c.price);
+        const newPrice = patch && patch.price !== undefined ? Number(patch.price) : oldPrice;
+        if (oldPrice > 0 && newPrice > 0 && Math.abs(oldPrice - newPrice) >= 0.01) {
+          priceChanges.push({ sku: Number(sku), oldPrice, newPrice, nmID: ownID ? Number(ownID) : undefined });
+        }
         return Object.assign({}, c, patch, { sku: Number(sku) });
       });
     }
@@ -89,6 +96,9 @@ function createPriceWatcher(options) {
       changed = true;
     }
     if (changed) store.saveCompetitors(items);
+    for (const event of priceChanges) {
+      try { onCompetitorPriceChange(event); } catch (_) { /* уведомление не влияет на запись наблюдения */ }
+    }
   }
 
   function recordManual(input) {

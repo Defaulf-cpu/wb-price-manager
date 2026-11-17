@@ -4,17 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE,
-  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE
+  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
+  REPRICER_FILE, COMPETITORS_FILE, ITEMCONFIGS_FILE, PRICES_HISTORY_FILE,
+  REPRICER_RUNS_FILE, FACTCOSTS_FILE, PROMOEXITS_FILE, PROMONOMS_FILE
 } = require('./config');
-
-const REPRICER_FILE = 'repricer.json';
-const COMPETITORS_FILE = 'competitors.json';
-const ITEMCONFIGS_FILE = 'itemconfigs.json';
-const PRICES_HISTORY_FILE = 'price-history.json';
-const REPRICER_RUNS_FILE = 'repricer-runs.json';
-const FACTCOSTS_FILE = 'factcosts.json';
-const PROMOEXITS_FILE = 'promoexits.json';
-const PROMONOMS_FILE = 'promonoms.json';
 
 /** Настройки по умолчанию (все значения пользователь может изменить в разделе «Настройки»). */
 const DEFAULT_SETTINGS = {
@@ -28,6 +21,23 @@ const DEFAULT_SETTINGS = {
   stocksLowDays: 14,
   demoMode: true,
   autoUpdateEnabled: true,
+  backupSchedule: 'off', // off | daily | weekly
+  backupRetention: 10,
+  telegramNotifications: {
+    chatId: '',
+    events: {
+      proposalReady: false,
+      sendSuccess: false,
+      sendError: false,
+      quarantine: false,
+      rateLimit: false,
+      promoStarted: false,
+      promoEnded: false,
+      competitorPrice: false,
+      lowStock: false
+    },
+    quietHours: { enabled: false, start: '22:00', end: '08:00' }
+  },
   sandbox: false,
   model: 'marketplace', // marketplace | fbw
   currency: 'RUB',
@@ -130,10 +140,12 @@ function readJson(file, fallback) {
   }
 }
 
-function writeJson(file, data) {
+function writeJson(file, data, options) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  const writeOptions = { encoding: 'utf8' };
+  if (options && Number.isInteger(options.mode)) writeOptions.mode = options.mode;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), writeOptions);
   fs.renameSync(tmp, file);
 }
 
@@ -231,8 +243,7 @@ function createStore(dir, secretBox) {
       } else {
         stored = { v: 1, method: 'base64', data: Buffer.from(payload, 'utf8').toString('base64') };
       }
-      fs.mkdirSync(path.dirname(secretsPath), { recursive: true });
-      fs.writeFileSync(secretsPath, JSON.stringify(stored), 'utf8');
+      writeJson(secretsPath, stored, { mode: 0o600 });
       try { fs.chmodSync(secretsPath, 0o600); } catch (e) { /* Windows: игнорируем */ }
       api._secretsError = '';
       return { method: stored.method };
