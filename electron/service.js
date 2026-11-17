@@ -1468,7 +1468,9 @@ function createService(store, emit, electron, integrations) {
         seen.add(nm);
         const g = byNm.get(nm) || {};
         const price = Number(g.price || data.price || 0);
-        const discount = Number(data.discount !== undefined ? data.discount : (g.discount || 0));
+        // Текущая скидка из файла — снимок на дату выгрузки, не замена свежей цене WB.
+        const liveDiscount = g.discount !== undefined && g.discount !== null && g.discount !== '' && Number.isFinite(Number(g.discount)) && Number(g.discount) >= 0 && Number(g.discount) <= 100;
+        const discount = Number(liveDiscount ? g.discount : (data.discount ?? 0));
         const planPrice = Number(data.planPrice || 0) || (Number(g.plannedPrice) || 0);
         const planDiscount = Number(data.planDiscount || 0) || (Number(g.plannedDiscount) || 0);
         items.push({
@@ -1488,6 +1490,10 @@ function createService(store, emit, electron, integrations) {
           observation: idx && idx.observations ? idx.observations.get(nm) || null : null,
           managed: !file || file.selectedOnly !== true || (file.selectedIds || []).map(Number).includes(nm),
           stock: data.stock !== undefined ? Number(data.stock) : undefined,
+          stockWb: data.stockWb, stockSeller: data.stockSeller,
+          fileStatus: data.fileStatus || '', currency: data.currency || '',
+          priceSource: Number(g.price) > 0 ? 'wb' : source,
+          discountSource: liveDiscount ? 'wb' : data.discount !== undefined ? source : 'unknown',
           volumeLiters: g.volumeLiters,
           requiredDiscountPct: required,
           source

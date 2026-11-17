@@ -255,6 +255,9 @@ function readCsv(text) {
  */
 function readTable(data, fileName) {
   const name = String(fileName || '').toLowerCase();
+  if (/\.pdf$/.test(name) || (Buffer.isBuffer(data) ? data.subarray(0, 5).toString('ascii') : String(data).slice(0, 5)) === '%PDF-') {
+    throw new Error('PDF подходит для проверки заголовков, но не для импорта: страницы и округлённые nmID не сохраняют точные данные. Загрузите исходный XLSX из кабинета WB или CSV с полными артикулами.');
+  }
   if (/\.xls$/.test(name)) throw new Error('Старый формат .xls не поддерживается: скачайте XLSX или сохраните выгрузку как .xlsx / CSV.');
   const isXlsx = /\.xlsx$/.test(name) || (Buffer.isBuffer(data) && data.length > 4 && data.readUInt32LE(0) === 0x04034b50);
   if (isXlsx) return readXlsx(Buffer.isBuffer(data) ? data : Buffer.from(data, 'base64'));

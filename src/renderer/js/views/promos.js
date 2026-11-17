@@ -219,9 +219,9 @@ Views.promos = {
           <p class="hint">Файл: ${U.esc(file.fileName)} · лист ${U.esc(result.sheet || 'таблица')} · заголовок ${result.headerRow || 'без заголовка'} · пропущено строк ${U.fmt(result.skipped)}.</p>
           ${(result.warnings || []).map((text) => '<div class="alert warn">' + U.esc(text) + '</div>').join('')}
           <p class="tiny muted">Колонки: ${U.esc((result.headers || []).join(' | '))}</p>
-          <div class="tablewrap" style="max-height:45vh"><table class="grid-table"><thead><tr><th>Артикул WB</th><th>Артикул продавца</th><th>Товар</th><th>Цена для акции, ₽</th><th>Статус из файла</th></tr></thead><tbody>
-          ${sample.map((row) => `<tr><td>${row.nmID}</td><td>${U.esc(row.vendorCode)}</td><td>${U.esc(row.title)}</td><td>${row.planPrice ? U.money(row.planPrice, 2) : 'порог не распознан'}</td><td>${row.inActionKnown ? row.inAction ? 'участвует на дату файла' : 'не участвует на дату файла' : 'не указан'}</td></tr>`).join('')}
-          </tbody></table></div><p class="hint">Показаны первые ${sample.length} строк. Сохранится весь список; участие затем отслеживается по фактической цене WB, а не по ручному черновику.</p><p id="promo-import-error" class="neg"></p>`,
+          <div class="tablewrap" style="max-height:45vh"><table class="grid-table" style="min-width:1250px"><thead><tr><th>Артикул WB</th><th>Артикул продавца</th><th>Наименование / предмет</th><th>Плановая цена для акции, ₽</th><th>Розничная цена до скидки, ₽</th><th>Текущая скидка, %</th><th>Загружаемая скидка, %</th><th>Остаток WB</th><th>Склад продавца</th><th>Статус из файла</th></tr></thead><tbody>
+          ${sample.map((row) => `<tr><td>${row.nmID}</td><td>${U.esc(row.vendorCode)}</td><td>${U.esc(row.title)}<div class="tiny muted">${U.esc([row.categoryName, row.brand].filter(Boolean).join(' · '))}</div></td><td>${row.planPrice ? U.money(row.planPrice, 2) : 'порог не распознан'}</td><td>${row.price ? U.money(row.price, 2) : '—'}</td><td>${row.discount === undefined ? '—' : U.pct(row.discount, 0)}</td><td>${U.pct(row.planDiscount, 0)}</td><td>${row.stockWb === undefined ? '—' : U.fmt(row.stockWb)}</td><td>${row.stockSeller === undefined ? '—' : U.fmt(row.stockSeller)}</td><td>${U.esc(row.fileStatus || (row.inActionKnown ? row.inAction ? 'участвует на дату файла' : 'не участвует на дату файла' : 'не указан'))}</td></tr>`).join('')}
+          </tbody></table></div><p class="hint">Показаны первые ${sample.length} строк. Все значения здесь — на дату выгрузки. Плановая цена — точный порог; текущая и загружаемая скидки не смешиваются. Сохранится весь список, без отправки цен в WB. Дальнейшее участие отслеживается по фактической цене WB, а не по ручному черновику.</p><p id="promo-import-error" class="neg"></p>`,
         buttons: [{ label: 'Отмена', class: 'btn-ghost' }, { label: 'Сохранить', class: 'btn-primary', keepOpen: true, onClick: async (dialog) => {
           const button = dialog.foot.querySelector('.btn-primary'); button.disabled = true;
           try {
@@ -235,7 +235,7 @@ Views.promos = {
         } }] });
     } catch (error) {
       wait.close();
-      UI.modal({ title: 'Файл акции не прочитан', size: 'md', content: '<div class="alert danger">' + U.esc(error.message) + '</div><p class="hint">Нужна исходная выгрузка WB в XLSX/CSV с колонкой «Артикул WB / nmID». Лист с инструкцией и строки перед заголовком допускаются. Если файл всё равно не читается — пришлите сам файл, не скриншот.</p>', buttons: [{ label: 'Закрыть', class: 'btn-primary' }] });
+      UI.modal({ title: 'Файл акции не прочитан', size: 'md', content: '<div class="alert danger">' + U.esc(error.message) + '</div><p class="hint">Для загрузки в приложение выберите исходную выгрузку WB в XLSX/CSV с колонкой «Артикул WB / nmID». Лист с инструкцией и строки перед заголовком допускаются. PDF и скриншоты пригодны для сверки структуры, но не для импорта точных артикулов.</p>', buttons: [{ label: 'Закрыть', class: 'btn-primary' }] });
     }
   },
 
@@ -314,7 +314,9 @@ Views.promos = {
       const item = r ? Object.assign({}, r.item, { price: n.price, discount: n.discount }) : { nmID: n.nmID, vendorCode: n.vendorCode, brand: n.brand, price: n.price, discount: n.discount, categoryName: n.categoryName || '', volumeLiters: n.volumeLiters };
       const ov = st.overrides[String(n.nmID)] || {};
       const curDisc = U.num(n.discount);
-      const planDisc = n.planPrice > 0 && item.price > 0 ? 100 * (1 - n.planPrice / item.price) : req;
+      // Порог каждого товара из файла важнее общего процента календаря. Загружаемая
+      // скидка — снимок для старой базы: после её изменения процент считаем заново.
+      const planDisc = n.planPrice > 0 && item.price > 0 ? Math.max(0, 100 * (1 - n.planPrice / item.price)) : U.num(n.planDiscount) || req;
       const targetDisc = Math.min(99, Math.max(planDisc, curDisc));
       const a = EC.analyze(st.settings, item, ov, { discountPct: targetDisc });
       const profit = a.next ? a.next.profit : a.current.profit;
@@ -328,14 +330,16 @@ Views.promos = {
         basePrice: U.num(n.price || (r && r.basePrice)),
         curDiscount: curDisc,
         targetDiscount: targetDisc,
-        gap: Math.max(0, req - curDisc),
-        eligible: curDisc + 0.0001 >= req,
+        requiredDiscount: planDisc, gap: Math.max(0, planDisc - curDisc),
+        eligible: curDisc + 0.0001 >= planDisc,
         sellerPrice: seller,
         profit: a.current.profit,
         promoProfit: profit,
         promoMargin: margin,
         delta: profit - a.current.profit,
-        stock: U.num(n.stock !== undefined ? n.stock : (r && r.stock)),
+        stock: n.stock !== undefined ? U.num(n.stock) : n.source === 'file' ? null : r && r.stock !== undefined ? U.num(r.stock) : null,
+        stockWb: n.stockWb, stockSeller: n.stockSeller, stockFromFile: n.source === 'file' && [n.stock, n.stockWb, n.stockSeller].some((v) => v !== undefined),
+        fileStatus: n.fileStatus || '', priceSource: n.priceSource, discountSource: n.discountSource,
         sales30: r ? r.sales30 : 0,
         // цифры из файла кабинета WB: плановая цена и плановая скидка акции
         planPrice: U.num(n.planPrice || n.plannedPrice),
@@ -416,11 +420,11 @@ Views.promos = {
       const grid = UI.table({
         columns: [
           { title: 'Товар', render: (c) => `<div class="rowtitle"><b class="trunc">${U.esc(c.title)}</b><span class="tiny muted">${c.nmID} · ${U.esc(c.vendorCode)} · ${U.esc(c.category)}</span></div>` },
-          { title: 'Базовая цена', num: true, render: (c) => U.money(c.basePrice) },
-          { title: 'Скидка сейчас', num: true, render: (c) => U.pct(c.curDiscount, 0) },
-          { title: 'Нужно', num: true, render: (c) => `<b>${U.pct(req, 0)}</b>${c.gap > 0 ? ` <span class="warnc tiny">(+${U.pct(c.gap, 0)})</span>` : ' <span class="pos tiny">✓</span>'}` },
+          { title: 'Базовая цена', num: true, render: (c) => U.money(c.basePrice) + (c.priceSource === 'file' ? '<div class="tiny muted">на дату файла</div>' : '') },
+          { title: 'Скидка сейчас', num: true, render: (c) => U.pct(c.curDiscount, 0) + (c.discountSource === 'file' ? '<div class="tiny muted">на дату файла</div>' : '') },
+          { title: 'Скидка для порога', num: true, render: (c) => `<b>${U.pct(c.requiredDiscount, 2)}</b>${c.gap > 0 ? ` <span class="warnc tiny">(+${U.pct(c.gap, 2)})</span>` : ' <span class="pos tiny">✓</span>'}` },
           { title: 'Плановая цена WB', num: true, render: (c) => c.planPrice
-              ? `<b>${U.money(c.planPrice)}</b><div class="tiny muted">скидка ${U.pct(c.planDiscount, 0)}</div>`
+              ? `<b>${U.money(c.planPrice)}</b><div class="tiny muted">в файле: загружаемая скидка ${U.pct(c.planDiscount, 0)}</div>`
               : '<span class="muted tiny">нет в файле</span>' },
           { title: 'Источник', render: (c) => ({
                 file: UI.badge('из файла', 'ok'),
@@ -433,7 +437,7 @@ Views.promos = {
           { title: 'Прибыль в акции', num: true, render: (c) => `<b class="${U.profitClass(c.promoProfit)}">${U.money(c.promoProfit)}</b>` },
           { title: 'Маржа в акции', num: true, render: (c) => `<span class="${U.profitClass(c.promoMargin)}">${U.pct(c.promoMargin)}</span>` },
           { title: 'Δ прибыли', num: true, render: (c) => `<span class="${U.profitClass(c.delta)}">${U.signed(c.delta)} ₽</span>` },
-          { title: 'Остаток', num: true, render: (c) => U.fmt(c.stock) },
+          { title: 'Остаток', num: true, render: (c) => (c.stock === null ? '—' : U.fmt(c.stock)) + (c.stockFromFile ? `<div class="tiny muted">снимок из файла<br>WB: ${c.stockWb === undefined ? '—' : U.fmt(c.stockWb)} · продавец: ${c.stockSeller === undefined ? '—' : U.fmt(c.stockSeller)}</div>` : '') },
           { title: 'Продажи 30д', num: true, render: (c) => U.fmt(c.sales30) },
           { title: 'Вердикт', render: (c) => c.verdict === 'loss' ? UI.badge('убыток', 'danger') : (c.verdict === 'below' ? UI.badge('ниже цели', 'warn') : UI.badge('можно входить', 'ok')) },
           { title: 'Решение репрайсера', render: (c) => {
@@ -443,6 +447,7 @@ Views.promos = {
               const m = map[a.action] || [a.action, ''];
               return `<div title="${U.esc(a.reason)}">${UI.badge(m[0], m[1])}<div class="tiny muted">${a.raiseTo ? 'поднять до ' + U.money(a.raiseTo) : (a.joinPrice ? 'цена ' + U.money(a.joinPrice) : '')}</div></div>`;
             } },
+          { title: 'Статус на дату файла', render: (c) => c.fileStatus ? U.esc(c.fileStatus) : '<span class="muted">не указан</span>' },
           { title: 'Наблюдение цены', render: (c) => {
               const names = { 'by-price': 'Все размеры ≤ порога', 'above-price': 'Выше акционной цены',
                 'partial-sizes': 'Только часть размеров', ready: 'Готов к началу акции', 'not-started': 'Акция не началась',

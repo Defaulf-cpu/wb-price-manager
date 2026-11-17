@@ -269,10 +269,10 @@ async function main() {
     check('статика отдаётся с активной сессией', page.status === 200 && /WB Price Manager/.test(page.body), 'status=' + page.status);
     check('HTML имеет no-cache и security headers', page.headers['cache-control'] === 'no-cache' && page.headers['x-content-type-options'] === 'nosniff' && page.headers['x-frame-options'] === 'DENY');
 
-    const freshScript = await request(port, 'GET', '/js/app.js?v=workspace-m1', { headers: { Cookie: cookieHeader(sessionCookies) } });
+    const freshScript = await request(port, 'GET', '/js/app.js?v=promo-schema-m2', { headers: { Cookie: cookieHeader(sessionCookies) } });
     check('JS после обновления перепроверяется, не остаётся на час в старом кэше', freshScript.status === 200 && freshScript.headers['cache-control'] === 'no-cache');
-    const freshEconomics = await request(port, 'GET', '/economics.js?v=workspace-m1', { headers: { Cookie: cookieHeader(sessionCookies) } });
-    check('Общая экономика и новый HTML используют свежую ревизию', freshEconomics.status === 200 && freshEconomics.headers['cache-control'] === 'no-cache' && /workspace-m1/.test(page.body));
+    const freshEconomics = await request(port, 'GET', '/economics.js?v=promo-schema-m2', { headers: { Cookie: cookieHeader(sessionCookies) } });
+    check('Общая экономика и новый HTML используют свежую ревизию', freshEconomics.status === 200 && freshEconomics.headers['cache-control'] === 'no-cache' && /promo-schema-m2/.test(page.body));
 
     const csrf = sessionCookies.wb_web_csrf;
     const stateResponse = await request(port, 'POST', '/api/invoke', {

@@ -242,6 +242,13 @@ const MARKERS = [
   ['electron/xlsx-lite.js', 'percentStyles', 'правильное чтение процентов Excel'],
   ['tools/checks/web-server-flow.js', 'JS после обновления перепроверяется', 'защита от устаревшего веб-интерфейса'],
   ['docs/API.md', '28. Рабочее место после M', 'контракты нового рабочего места'],
+  ['electron/promo-import.js', "return 'categoryName'", 'предмет WB не подменяет название'],
+  ['electron/promo-import.js', "return 'stockSeller'", 'склад продавца читается отдельно от WB'],
+  ['electron/promo-import.js', 'conflictingStatuses', 'неоднозначное участие файла не подтверждается'],
+  ['electron/service.js', 'const liveDiscount =', 'текущая скидка WB важнее старого снимка'],
+  ['src/renderer/js/views/promos.js', 'Плановая цена — точный порог', 'импорт по реальным заголовкам PDF'],
+  ['src/renderer/index.html', 'promo-schema-m2', 'обновлённая ревизия интерфейса импорта'],
+  ['docs/API.md', '28.8 Сверка структуры по PDF владельца', 'контракт фактической структуры WB'],
 
 ];
 
@@ -280,6 +287,9 @@ const REQUIRED_FILES = [
   'src/renderer/js/grid-layout.js', 'src/renderer/js/tax-ui.js',
   'tools/checks/promo-analytics-flow.js', 'tools/checks/workspace-upgrade-flow.js', 'tools/checks/workspace-ui-safety.js',
   'tools/checks/fixtures/promo-wb-export-synthetic.xlsx', 'tools/checks/fixtures/promo-wb-export-cp1251.csv', 'docs/ACCEPTANCE-M-WORKSPACE.md',
+  'tools/checks/promo-export-schema-flow.js',
+  'tools/checks/fixtures/promo-wb-export-pdf-schema-synthetic.json', 'tools/checks/fixtures/promo-wb-export-pdf-schema-synthetic.xlsx',
+  'docs/ACCEPTANCE-PROMO-EXPORT.md',
   'src/renderer/js/views/pl-summary.js',
   'tools/checks/profiles-flow.js', 'tools/checks/profiles-safety.js', 'docs/ACCEPTANCE-L.md',
   'tools/checks/backup-flow.js', 'tools/checks/notify-flow.js',
