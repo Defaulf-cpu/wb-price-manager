@@ -537,6 +537,25 @@ Views.settings = {
       </div>
 
       <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>5.1 Профили кабинетов WB</h2>
+          <span class="hint">несколько кабинетов в одном приложении</span></div>
+        <div style="padding:14px 16px 16px">
+          <p class="hint" style="margin-top:0">Каждый профиль — свой кабинет WB со своими ключами, данными и лимитами запросов.
+            Данные профилей не пересекаются: переключение профиля не сбрасывает кэши другого кабинета, а лимиты WB
+            считаются отдельно на каждый кабинет. Экспорт/импорт — в формате резервной копии (.wbpm.json, формат J).</p>
+          <div class="row wrap" style="gap:8px;margin-bottom:10px">
+            <button class="btn btn-sm btn-primary" id="prof-create" type="button">Создать профиль</button>
+            <button class="btn btn-sm" id="prof-export" type="button">Экспортировать активный</button>
+            <button class="btn btn-sm" id="prof-import" type="button">Импортировать профиль</button>
+            <input id="prof-import-file" type="file" accept=".wbpm.json,application/json" hidden />
+            <div class="grow"></div>
+          </div>
+          <div id="prof-status" class="hint" role="status" aria-live="polite"></div>
+          <div id="prof-list-host"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
         <div class="card-head"><h2>6. Резервные копии</h2><span class="hint">один файл .wbpm.json</span></div>
         <div style="padding:14px 16px 16px">
           <p class="hint" style="margin-top:0">В копию входят настройки, расходы, параметры товаров, конкуренты, черновики, история цен, акции, остатки и данные репрайсера. Ключи WB по умолчанию исключены; при выгрузке с ключами они шифруются введённым паролем.</p>
@@ -684,6 +703,153 @@ Views.settings = {
       finally { button.disabled = false; }
     };
     $('#backup-refresh').onclick = refreshBackupList;
+
+    // ───────────────────────── Профили кабинетов ─────────────────────────
+
+    function setProfileStatus(message, kind) {
+      const host = $('#prof-status');
+      if (!host) return;
+      host.textContent = message || '';
+      host.className = 'hint' + (kind === 'error' ? ' neg' : (kind === 'ok' ? ' pos' : ''));
+    }
+
+    function renderProfileList(data) {
+      const host = $('#prof-list-host');
+      if (!host) return;
+      const profiles = (data && data.profiles) || [];
+      if (!profiles.length) { host.innerHTML = '<p class="hint">Профилей пока нет.</p>'; return; }
+      host.innerHTML = profiles.map((p) => `
+        <div class="row wrap" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+          <div class="grow">
+            <b>${U.esc(p.name)}</b>
+            ${p.active ? '<span class="badge badge-live">активный</span>' : ''}
+            ${p.id === 'default' ? '<span class="badge badge-demo">по умолчанию</span>' : ''}
+            <div class="tiny muted">id: ${U.esc(p.id)} · ${p.createdAt ? U.esc(U.date(p.createdAt, true)) : ''}${p.hasData ? ' · данные' : ' · без данных'}${p.secretsMethod ? ' · ' + U.esc(p.secretsMethod) : ''}</div>
+          </div>
+          ${(!p.active && p.id !== 'default') ? `<button class="btn btn-sm btn-ghost prof-rename" data-id="${U.esc(p.id)}" type="button">Переименовать</button>
+            <button class="btn btn-sm btn-danger prof-remove" data-id="${U.esc(p.id)}" type="button">Удалить</button>` : ''}
+        </div>`).join('');
+      host.querySelectorAll('.prof-rename').forEach((b) => { b.onclick = () => renameProfile(b.dataset.id); });
+      host.querySelectorAll('.prof-remove').forEach((b) => { b.onclick = () => removeProfile(b.dataset.id); });
+    }
+
+    async function refreshProfileList() {
+      try {
+        const data = await API.invoke('profiles:list');
+        renderProfileList(data);
+        return data;
+      } catch (error) {
+        setProfileStatus('Не удалось прочитать список профилей: ' + error.message, 'error');
+        return null;
+      }
+    }
+
+    function promptProfileName(title, current) {
+      return new Promise((resolve) => {
+        UI.modal({
+          title,
+          content: `<div class="col" style="gap:10px"><label class="field">Имя профиля
+              <input id="prof-name-input" type="text" maxlength="120" value="${U.esc(current || '')}" /></label>
+            <p id="prof-name-error" class="neg" role="alert"></p></div>`,
+          buttons: [
+            { label: 'Отмена', class: 'btn-ghost', onClick: (d) => { d.close(); resolve(null); } },
+            { label: 'Сохранить', class: 'btn-primary', keepOpen: true, onClick: (d) => {
+              const value = d.body.querySelector('#prof-name-input').value.trim();
+              if (!value) { d.body.querySelector('#prof-name-error').textContent = 'Имя не может быть пустым.'; return; }
+              d.close(); resolve(value);
+            } }
+          ]
+        });
+      });
+    }
+
+    async function renameProfile(id) {
+      const name = await promptProfileName('Переименовать профиль', '');
+      if (name === null) return;
+      try {
+        await API.invoke('profiles:rename', { profileId: id, name });
+        setProfileStatus('Профиль переименован.', 'ok');
+        await refreshProfileList();
+      } catch (error) { setProfileStatus(error.message, 'error'); }
+    }
+
+    async function removeProfile(id) {
+      UI.confirmDialog('Удалить профиль',
+        `<div class="alert warn">Профиль и все его данные будут удалены без возможности восстановления.
+           Ключи и данные этого кабинета останутся только в его экспортированной копии. Уверены?</div>`,
+        async () => {
+          try {
+            await API.invoke('profiles:remove', { profileId: id });
+            setProfileStatus('Профиль удалён.', 'ok');
+            await refreshProfileList();
+          } catch (error) { setProfileStatus(error.message, 'error'); }
+        });
+    }
+
+    $('#prof-create').onclick = async () => {
+      const name = await promptProfileName('Новый профиль кабинета', '');
+      if (name === null) return;
+      const button = $('#prof-create');
+      button.disabled = true;
+      try {
+        await API.invoke('profiles:create', { name });
+        setProfileStatus('Профиль создан.', 'ok');
+        await refreshProfileList();
+      } catch (error) { setProfileStatus(error.message, 'error'); }
+      finally { button.disabled = false; }
+    };
+
+    $('#prof-export').onclick = async () => {
+      const button = $('#prof-export');
+      button.disabled = true;
+      setProfileStatus('Формируем файл экспорта профиля (формат J)…');
+      try {
+        const result = await API.invoke('profiles:export', {});
+        downloadBackup(result);
+        setProfileStatus('Файл ' + result.fileName + ' подготовлен для скачивания (' + U.num(Math.ceil(result.sizeBytes / 1024)) + ' КБ).', 'ok');
+      } catch (error) { setProfileStatus(error.message, 'error'); }
+      finally { button.disabled = false; }
+    };
+
+    $('#prof-import').onclick = () => $('#prof-import-file').click();
+    $('#prof-import-file').onchange = async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const content = await file.text();
+        const preview = await API.invoke('profiles:import', { action: 'preview', content });
+        const rows = (preview.datasets || []).map((row) => `<tr><td>${U.esc(row.title)}</td><td>${U.esc(row.action)}</td></tr>`).join('');
+        UI.modal({
+          title: 'Импорт профиля (формат J)',
+          size: 'md',
+          content: `<p>Файл <b>${U.esc(file.name)}</b> · формат ${U.esc(preview.formatVersion)} · ${preview.datasets ? preview.datasets.length : 0} наборов.
+             Текущий активный профиль будет обновлён.</p>
+            <div style="overflow:auto;max-height:40vh"><table class="table"><thead><tr><th>Набор данных</th><th>Что произойдёт</th></tr></thead><tbody>${rows}</tbody></table></div>
+            <label class="checkline" style="margin-top:10px"><input id="prof-overwrite" type="checkbox"> Заменять совпадающие значения данными из файла.</label>
+            <p id="prof-import-error" class="neg" role="alert"></p>`,
+          buttons: [
+            { label: 'Отмена', class: 'btn-ghost' },
+            { label: 'Импортировать', class: 'btn-primary', keepOpen: true, onClick: async (d) => {
+              const overwriteExisting = !!d.body.querySelector('#prof-overwrite').checked;
+              d.body.querySelector('#prof-import-error').textContent = '';
+              const btn = d.foot.querySelector('.btn-primary');
+              btn.disabled = true;
+              try {
+                await API.invoke('profiles:import', { action: 'apply', content, overwriteExisting, overwriteConfirmed: true });
+                d.close();
+                setProfileStatus('Профиль импортирован.', 'ok');
+                await refreshProfileList();
+              } catch (error) {
+                d.body.querySelector('#prof-import-error').textContent = error.message;
+              } finally { btn.disabled = false; }
+            } }
+          ]
+        });
+      } catch (error) { setProfileStatus(error.message, 'error'); }
+      e.target.value = '';
+    };
+
+    await refreshProfileList();
 
     function openImportPreview(content, fileName, preview) {
       const hasKeys = !!(preview.keys && preview.keys.included);

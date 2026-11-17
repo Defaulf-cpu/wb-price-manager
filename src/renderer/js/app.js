@@ -11,6 +11,7 @@ window.App = (function () {
     { id: 'economics', ico: '∑', label: 'Экономика' },
     { id: 'costs', ico: '⚙', label: 'Себестоимость' },
     { id: 'reports', ico: '🖶', label: 'Отчёты' },
+    { id: 'pl-summary', ico: '∑', label: 'Сводка P&L' },
     { id: 'settings', ico: '⚿', label: 'Настройки' }
   ];
 
@@ -286,9 +287,48 @@ window.App = (function () {
     go(S.state.view);
   }
 
+  /**
+   * Переключатель профилей (кабинетов WB) в шапке.
+   * Показывается только когда профилей больше одного и переключение разрешено —
+   * при одном профиле интерфейс не требует лишних действий.
+   */
+  function renderProfileSwitcher(host) {
+    const st = S.state.appState;
+    const profiles = (st && st.profiles) || [];
+    if (profiles.length < 2 || (st && st.switchable === false)) return;
+    const sel = U.el('<select class="btn btn-sm profile-switcher" title="Кабинет WB"></select>');
+    for (const p of profiles) {
+      const opt = U.el('<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.active ? ' (активный)' : '') + '</option>');
+      if (p.active) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onchange = () => switchProfile(sel.value);
+    host.appendChild(sel);
+  }
+
+  /** Переключиться на другой профиль и перечитать данные этого кабинета. */
+  async function switchProfile(id) {
+    try {
+      await API.invoke('profiles:switch', { profileId: id });
+      toast('Переключились на кабинет: ' + id, 'ok');
+      await S.loadAppState();
+      setModeBadge();
+      S.invalidate();
+      await S.loadGoods(true);
+      try { await S.refreshFacts(); } catch (e) { /* факт не обязателен */ }
+      try { await S.loadPromos(); } catch (e) { /* акции не критичны */ }
+      updateNavCounts();
+      updateSyncInfo();
+      refreshCurrent();
+    } catch (err) {
+      toast(err.message, 'err', 6000);
+    }
+  }
+
   function renderTopActions(id) {
     const host = document.getElementById('topbar-actions');
     host.innerHTML = '';
+    renderProfileSwitcher(host);
     const mk = (label, cls, fn) => {
       const b = U.el(`<button class="btn btn-sm ${cls || ''}">${label}</button>`);
       b.onclick = fn;

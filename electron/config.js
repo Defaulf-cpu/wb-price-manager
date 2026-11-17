@@ -29,6 +29,19 @@ const PRICES_HISTORY_FILE = 'price-history.json';
 const REPRICER_RUNS_FILE = 'repricer-runs.json';
 const PROMONOMS_FILE = 'promonoms.json';
 
+/**
+ * Профили кабинетов WB в одном приложении.
+ *
+ * Каждый профиль — это имя, ключи WB и свой каталог данных
+ * (`.data/profiles/<id>/`). Существующий каталог `.data` при первом запуске
+ * переносится в профиль по умолчанию («Основной») без потери данных.
+ */
+const PROFILES_DIR = 'profiles';
+const PROFILES_FILE = 'profiles.json';
+const DEFAULT_PROFILE_ID = 'default';
+const DEFAULT_PROFILE_NAME = 'Основной';
+const BACKUPS_DIR = 'backups';
+
 /** Хосты Wildberries API (боевой контур и песочница). */
 const WB_HOSTS = {
   prod: {
@@ -146,6 +159,11 @@ module.exports = {
   PRICES_HISTORY_FILE,
   REPRICER_RUNS_FILE,
   PROMONOMS_FILE,
+  PROFILES_DIR,
+  PROFILES_FILE,
+  DEFAULT_PROFILE_ID,
+  DEFAULT_PROFILE_NAME,
+  BACKUPS_DIR,
   WB_HOSTS,
   DEMO_KEY,
   RATE_LIMITS,
