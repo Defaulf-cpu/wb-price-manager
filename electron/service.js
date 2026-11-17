@@ -10,6 +10,7 @@ const { readTable } = require('./xlsx-lite');
 const { buildXlsx } = require('./xlsx-write');
 
 const CACHE_TTL_MS = 120000;
+const WB_SECRET_NAMES = Object.freeze(['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace', 'master']);
 
 function maskKey(k) {
   if (!k) return '';
@@ -42,15 +43,30 @@ function daysAgoIso(days) {
  * @param {object} store   хранилище (настройки, себестоимости, секреты)
  * @param {function} emit   отправка событий в UI: emit(channel, payload)
  */
-function createService(store, emit, electron) {
-  const notify = typeof emit === 'function' ? emit : () => {};
-  const priceWatcher = createPriceWatcher({ store, electron, log: (entry) => notify('log', entry) });
+function createService(store, emit, electron, integrations) {
+  const sendEvent = typeof emit === 'function' ? emit : () => {};
+  const hooks = integrations || {};
+  const backupManager = hooks.backupManager || null;
+  const telegram = hooks.telegramNotifier || null;
+  const notify = (channel, payload) => {
+    try { sendEvent(channel, payload); } catch (_) { /* интерфейсный слушатель не должен прерывать бизнес-операцию */ }
+    try { if (telegram && typeof telegram.handleServiceEvent === 'function') telegram.handleServiceEvent(channel, payload); } catch (_) {}
+  };
+  const priceWatcher = createPriceWatcher({
+    store,
+    electron,
+    log: (entry) => notify('log', entry),
+    onCompetitorPriceChange: (entry) => notify('app-event', Object.assign({ type: 'competitorPrice' }, entry))
+  });
 
   let demoApi = null;
   let client = null;
   let clientSignature = '';
   const cache = { goods: null, goodsAt: 0, stats: null, statsAt: 0, statsErrors: [], statsMeta: null, cards: null, cardsAt: 0, stocks: null, stocksAt: 0, stocksMeta: null };
   const sched = { timer: null, nextRunAt: null, lastRun: null, running: false };
+  let promoLifecycleReady = false;
+  let promoLifecycle = new Map();
+  let lowStockNotified = new Set();
 
   function getSettings() {
     return store.loadSettings();
@@ -60,9 +76,7 @@ function createService(store, emit, electron) {
     const s = getSettings();
     if (s.demoMode) return true;
     const secrets = store.loadSecrets();
-    // один общий ключ тоже выключает демо-режим
-    const k = secrets.single || secrets.universal || secrets.all || secrets.prices || secrets.master || '';
-    return !k || k === DEMO_KEY;
+    return !WB_SECRET_NAMES.some((name) => secrets[name] && secrets[name] !== DEMO_KEY);
   }
 
   function getDemo() {
@@ -73,7 +87,8 @@ function createService(store, emit, electron) {
   function getClient(force) {
     const s = getSettings();
     const secrets = store.loadSecrets();
-    const sig = JSON.stringify({ s: !!s.sandbox, k: Object.keys(secrets).sort().map((x) => String(secrets[x] || '').slice(-4)).join('|'), n: Object.keys(secrets).length });
+    const wbSecretNames = WB_SECRET_NAMES.filter((name) => secrets[name]);
+    const sig = JSON.stringify({ s: !!s.sandbox, k: wbSecretNames.sort().map((name) => String(secrets[name] || '').slice(-4)).join('|'), n: wbSecretNames.length });
     if (!force && client && sig === clientSignature) return client;
     clientSignature = sig;
     client = new WBClient({
@@ -495,9 +510,44 @@ function createService(store, emit, electron) {
     return Number(e && e.status) === 422 || /Unprocessable/i.test(String((e && e.message) || ''));
   }
 
+  function trackPromoLifecycle(promos) {
+    const now = Date.now();
+    const next = new Map();
+    for (const promo of Array.isArray(promos) ? promos : []) {
+      if (!promo || promo.id === undefined || promo.id === null) continue;
+      const start = Date.parse(promo.startDateTime || promo.startAt || '');
+      const end = Date.parse(promo.endDateTime || promo.endAt || '');
+      const status = Number.isFinite(end) && end <= now ? 'ended'
+        : (Number.isFinite(start) && start <= now ? 'active' : 'upcoming');
+      const id = String(promo.id);
+      const previous = promoLifecycle.get(id);
+      if (promoLifecycleReady && !isDemo() && previous && previous.status !== status) {
+        if (previous.status === 'upcoming' && status === 'active') {
+          notify('app-event', { type: 'promoStarted', id, name: promo.name || promo.promoName || '', startDateTime: promo.startDateTime, endDateTime: promo.endDateTime });
+        } else if (previous.status === 'active' && status === 'ended') {
+          notify('app-event', { type: 'promoEnded', id, name: promo.name || promo.promoName || '', endDateTime: promo.endDateTime });
+        }
+      }
+      next.set(id, { status, name: String(promo.name || promo.promoName || '') });
+    }
+    const demoMode = isDemo();
+    if (promoLifecycleReady && !demoMode) {
+      // Акция могла исчезнуть из выдачи WB лишь после окончания: это тоже считаем завершением.
+      for (const [id, previous] of promoLifecycle) {
+        if (previous.status === 'active' && !next.has(id)) notify('app-event', { type: 'promoEnded', id, name: previous.name || '' });
+      }
+    }
+    promoLifecycle = next;
+    // Демо-календарь не становится базой сравнения для реального кабинета.
+    promoLifecycleReady = !demoMode;
+  }
+
   async function promoIndex(force) {
     if (!force && promoCache.index && Date.now() - promoCache.at < PROMO_TTL_MS) return promoCache;
-    const promos = await handlers['wb:promos']({ days: 60 }).catch(() => []);
+    const promoResponse = await handlers['wb:promos']({ days: 60 }).catch(() => null);
+    const promos = Array.isArray(promoResponse) ? promoResponse : [];
+    // Сетевая ошибка не означает, что все акции закончились; обновляем базу только после валидного ответа.
+    if (Array.isArray(promoResponse)) trackPromoLifecycle(promos);
     const uploadedNoms = store.loadPromoNoms();
     /**
      * Состав акции выводится в том числе по факту скидки товара, поэтому список товаров
@@ -707,6 +757,38 @@ function createService(store, emit, electron) {
   // ─────────────────────────── Обработчики ───────────────────────────
 
   const handlers = {
+    'backup:export': async (payload) => {
+      if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
+      return backupManager.exportBackup(payload || {});
+    },
+    'backup:import': async (payload) => {
+      if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
+      const result = backupManager.importBackup(payload || {});
+      if (result && result.applied) { client = null; invalidateAllCaches(); }
+      return result;
+    },
+    'backup:list': async () => {
+      if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
+      return backupManager.listBackups();
+    },
+    'backup:restore': async (payload) => {
+      if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
+      const result = backupManager.restoreBackup(payload || {});
+      if (result && result.applied) { client = null; invalidateAllCaches(); }
+      return result;
+    },
+    'notify:get': async () => {
+      if (!telegram) throw new WBError('Модуль уведомлений Telegram недоступен.', { code: 'NOTIFY_UNAVAILABLE' });
+      return telegram.getState();
+    },
+    'notify:save': async (payload) => {
+      if (!telegram) throw new WBError('Модуль уведомлений Telegram недоступен.', { code: 'NOTIFY_UNAVAILABLE' });
+      return telegram.saveConfiguration(payload || {});
+    },
+    'notify:test': async () => {
+      if (!telegram) throw new WBError('Модуль уведомлений Telegram недоступен.', { code: 'NOTIFY_UNAVAILABLE' });
+      return telegram.test();
+    },
     'pricewatch:get': async () => ({ ok: true, items: store.loadPriceWatch(), autoFetch: getSettings().priceWatchAutoFetch === true, ttlMinutes: getSettings().priceWatchTtlMinutes }),
     'pricewatch:record': async (payload) => priceWatcher.recordManual(payload),
     'pricewatch:fetch': async (payload) => {
@@ -1015,7 +1097,7 @@ function createService(store, emit, electron) {
           marketplace: maskKey(secrets.marketplace),
           master: maskKey(secrets.master)
         },
-        keysSet: Object.keys(secrets).filter((k) => secrets[k]).length,
+        keysSet: WB_SECRET_NAMES.filter((k) => secrets[k]).length,
         secretsError: store.secretsError ? store.secretsError() : '',
         coverage: coverageOf(),
         lastDataRefreshAt: s.lastDataRefreshAt || null,
@@ -1050,7 +1132,7 @@ function createService(store, emit, electron) {
       const secrets = store.loadSecrets();
       const p = payload || {};
       // single/universal/all — один ключ на все разделы (WB выдаёт JWT с выбранными категориями)
-      const names = ['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace', 'master'];
+      const names = WB_SECRET_NAMES;
       // Пустое поле означает «не трогать сохранённый ключ», а НЕ «удалить».
       // Раньше пустая строка удаляла ключ: интерфейс отправлял все пять полей,
       // а после перерисовки они пустые (сохранённый ключ виден только в подсказке) —
@@ -1117,14 +1199,16 @@ function createService(store, emit, electron) {
     },
 
     'keys:clear': async () => {
-      store.saveSecrets({});
+      const secrets = store.loadSecrets();
+      for (const key of WB_SECRET_NAMES) delete secrets[key];
+      store.saveSecrets(secrets);
       client = null;
       return { ok: true };
     },
 
     'keys:check': async () => {
       const secrets = store.loadSecrets();
-      const anyKey = Object.keys(secrets).some((k) => secrets[k]);
+      const anyKey = WB_SECRET_NAMES.some((key) => secrets[key]);
       const secretsError = store.secretsError ? store.secretsError() : '';
       if (isDemo()) {
         const results = await getDemo().ping();
@@ -1273,6 +1357,8 @@ function createService(store, emit, electron) {
         }
         if (newSeller <= 0) warnings.push({ nmID: it.nmID, type: 'zero', message: 'Итоговая цена равна нулю.' });
       }
+      const quarantine = warnings.filter((warning) => warning.type === 'quarantine');
+      if (!isDemo() && quarantine.length) notify('app-event', { type: 'quarantine', count: quarantine.length, warnings: quarantine });
 
       if (isDemo()) {
         const res = await getDemo().applyPrices(items);
@@ -1280,7 +1366,13 @@ function createService(store, emit, electron) {
         return Object.assign({ demo: true, warnings }, res);
       }
 
-      const res = await getClient().applyPrices(items);
+      let res;
+      try {
+        res = await getClient().applyPrices(items);
+      } catch (error) {
+        notify('app-event', { type: 'sendError', failed: items.length, message: error && error.message || String(error), source: payload && payload.source || '' });
+        throw error;
+      }
       cache.goods = null;
       cache.goodsAt = 0;
 
@@ -1296,6 +1388,11 @@ function createService(store, emit, electron) {
         warnings
       });
       store.saveTasks(tasks);
+      const details = Array.isArray(res.details) ? res.details : [];
+      const failed = details.filter((detail) => detail && ((detail.status && detail.status !== 3) || detail.error));
+      const succeeded = details.filter((detail) => detail && detail.status === 3);
+      if (failed.length) notify('app-event', { type: 'sendError', failed: failed.length, message: failed[0].error || failed[0].errorText || 'WB сообщил об ошибках части позиций.', source: payload && payload.source || '' });
+      if (succeeded.length || !failed.length) notify('app-event', { type: 'sendSuccess', count: succeeded.length || items.length, source: payload && payload.source || '' });
 
       return Object.assign({ demo: false, warnings }, res);
     },
@@ -3045,6 +3142,25 @@ function createService(store, emit, electron) {
    * Сохранение результата загрузки остатков: в кэш памяти и в файл.
    * Пустой ответ (0 строк) не перезаписывает уже загруженные остатки.
    */
+  function notifyLowStock(aggregated) {
+    if (isDemo()) { lowStockNotified = new Set(); return; }
+    const thresholdDays = Math.max(1, Number(getSettings().stocksLowDays) || 14);
+    const sales = new Map((Array.isArray(cache.stats) ? cache.stats : []).map((row) => [String(row.nmID), Number(row.salesQty) || 0]));
+    const current = new Set();
+    for (const [nmID, row] of Object.entries(aggregated || {})) {
+      const salesPerDay = (sales.get(String(nmID)) || 0) / 30;
+      if (!(salesPerDay > 0)) continue;
+      const stock = Math.max(0, Number(row && row.total) || 0);
+      const daysLeft = stock / salesPerDay;
+      if (daysLeft >= thresholdDays) continue;
+      current.add(String(nmID));
+      if (!isDemo() && !lowStockNotified.has(String(nmID))) {
+        notify('app-event', { type: 'lowStock', nmID, stock, daysLeft: Math.round(daysLeft * 10) / 10, thresholdDays });
+      }
+    }
+    lowStockNotified = current;
+  }
+
   function applyStocksResult(res, extra) {
     const aggregated = (res && res.aggregated) || {};
     const rows = (res && res.rows) || [];
@@ -3077,6 +3193,7 @@ function createService(store, emit, electron) {
     };
     cache.stocksMeta = meta;
     store.saveStocks(aggregated, meta);
+    notifyLowStock(aggregated);
   }
 
   /** Остатки по складам WB: кэш из памяти (он же — файл stocks.json). */

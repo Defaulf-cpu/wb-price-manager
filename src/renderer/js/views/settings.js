@@ -45,6 +45,21 @@ Views.settings = {
     const initialUpdateState = API.isElectron
       ? await API.invoke('ui:update-state').catch(() => null)
       : null;
+    const backupInfo = await API.invoke('backup:list').catch(() => null);
+    const notifyInfo = await API.invoke('notify:get').catch(() => null);
+    const notifyConfig = (notifyInfo && notifyInfo.config) || s.telegramNotifications || {};
+    const notifyEvents = notifyConfig.events || {};
+    const notifyQuiet = notifyConfig.quietHours || {};
+    const backupRows = (backupInfo && backupInfo.backups) || [];
+    const backupListHtml = backupRows.length ? backupRows.map((backup) => `<div class="row wrap" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+      <div class="grow"><b>${U.esc(backup.fileName)}</b><div class="tiny muted">${U.esc(backup.backupType || 'копия')} · ${backup.createdAt ? U.esc(U.date(backup.createdAt, true)) : 'дата неизвестна'} · ${U.num(Math.ceil((backup.sizeBytes || 0) / 1024))} КБ${backup.corrupt ? ' · <span class="neg">файл повреждён</span>' : ''}${backup.containsKeys ? ' · зашифрованные ключи' : ''}</div></div>
+      <button class="btn btn-sm btn-ghost backup-restore" data-file="${U.esc(backup.fileName)}" type="button" ${backup.corrupt ? 'disabled' : ''}>Восстановить</button>
+    </div>`).join('') : '<p class="hint">Резервных копий пока нет. Автоматические появятся по расписанию.</p>';
+    const notifyEventLabels = {
+      proposalReady: 'Предложение репрайсера готово', sendSuccess: 'Отправка цен выполнена', sendError: 'Отправка завершилась ошибкой',
+      quarantine: 'Цена попала в карантин', rateLimit: 'Лимит WB: раздел ушёл в фон', promoStarted: 'Акция началась', promoEnded: 'Акция закончилась',
+      competitorPrice: 'Изменилась цена конкурента (наблюдатель витрины)', lowStock: 'Остаток товара ниже порога в днях'
+    };
     const hasRealKey = !!(info.keys && (info.keys.single || info.keys.prices || info.keys.statistics || info.keys.content || info.keys.finance));
     const demoHint = s.demoMode
       ? (hasRealKey
@@ -521,6 +536,74 @@ Views.settings = {
         ` : ''}
       </div>
 
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>6. Резервные копии</h2><span class="hint">один файл .wbpm.json</span></div>
+        <div style="padding:14px 16px 16px">
+          <p class="hint" style="margin-top:0">В копию входят настройки, расходы, параметры товаров, конкуренты, черновики, история цен, акции, остатки и данные репрайсера. Ключи WB по умолчанию исключены; при выгрузке с ключами они шифруются введённым паролем.</p>
+          <div class="grid g3" style="gap:10px">
+            <label class="field">Автоматическая копия
+              <select id="backup-schedule">
+                <option value="off" ${s.backupSchedule === 'daily' || s.backupSchedule === 'weekly' ? '' : 'selected'}>Выключена</option>
+                <option value="daily" ${s.backupSchedule === 'daily' ? 'selected' : ''}>Раз в день</option>
+                <option value="weekly" ${s.backupSchedule === 'weekly' ? 'selected' : ''}>Раз в неделю</option>
+              </select>
+            </label>
+            <label class="field">Хранить автоматические копии
+              <input id="backup-retention" type="number" class="num" min="1" max="100" step="1" value="${U.num(backupInfo && backupInfo.retention || s.backupRetention, 10)}" />
+            </label>
+            <div class="row wrap" style="align-items:end;gap:8px">
+              <button class="btn btn-sm" id="backup-schedule-save" type="button">Сохранить расписание</button>
+              <button class="btn btn-sm btn-ghost" id="backup-refresh" type="button">Обновить список</button>
+            </div>
+          </div>
+          <div class="row wrap" style="gap:10px;margin:12px 0">
+            <button class="btn btn-primary" id="backup-export" type="button">Выгрузить всё</button>
+            <button class="btn" id="backup-load" type="button">Загрузить</button>
+            <input id="backup-file" type="file" accept=".wbpm.json,application/json" hidden />
+            <label class="row tiny" style="gap:7px;align-items:center"><input id="backup-include-keys" type="checkbox"> Включить ключи WB</label>
+            <input id="backup-export-password" type="password" autocomplete="new-password" placeholder="Пароль (не менее 8 символов)" style="max-width:260px" disabled />
+          </div>
+          <p id="backup-status" class="hint" role="status" aria-live="polite">${backupInfo && backupInfo.lastError ? U.esc(backupInfo.lastError) : ''}</p>
+          <div id="backup-list-host">${backupListHtml}</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h2>7. Уведомления Telegram</h2><span class="hint">отправка через Telegram Bot API</span></div>
+        <div style="padding:14px 16px 16px">
+          <div class="alert info" style="margin-bottom:10px">Токен хранится отдельно от настроек. Кнопка «Проверить» вызывает Telegram <span class="mono">getMe</span> и отправляет реальное тестовое сообщение.</div>
+          <div class="grid g2" style="gap:10px">
+            <label class="field">Токен бота
+              <input id="tg-token" type="password" autocomplete="new-password" placeholder="${notifyInfo && notifyInfo.tokenSaved ? 'токен сохранён; пустое поле его не меняет' : '123456789:токен от BotFather'}" />
+              <span id="tg-token-state" class="tiny muted">${notifyInfo && notifyInfo.tokenSaved ? '✓ токен сохранён (значение не показывается)' : 'токен ещё не сохранён'}</span>
+            </label>
+            <label class="field">chat_id
+              <input id="tg-chat" type="text" value="${U.esc(notifyConfig.chatId || '')}" placeholder="Например, 123456789 или -100…" />
+            </label>
+          </div>
+          <div class="row wrap" style="gap:10px;margin:10px 0">
+            <label class="row tiny" style="gap:7px;align-items:center"><input id="tg-clear-token" type="checkbox"> Удалить сохранённый токен</label>
+            <button class="btn btn-sm btn-primary" id="tg-save" type="button">Сохранить Telegram</button>
+            <button class="btn btn-sm" id="tg-test" type="button">Проверить и отправить тест</button>
+            <span id="tg-status" class="hint" role="status" aria-live="polite">${U.esc(notifyInfo && notifyInfo.queue && notifyInfo.queue.lastError || '')}</span>
+          </div>
+          <div class="grid g2" style="gap:5px 20px">
+            ${Object.entries(notifyEventLabels).map(([key, label]) => `<label class="checkline"><input type="checkbox" data-notify-event="${key}" ${notifyEvents[key] === true ? 'checked' : ''}> ${U.esc(label)}</label>`).join('')}
+          </div>
+          <div class="divider"></div>
+          <label class="checkline" style="margin-bottom:8px"><input id="tg-quiet" type="checkbox" ${notifyQuiet.enabled === true ? 'checked' : ''}> Тихие часы: копить события и отправлять сводку утром</label>
+          <div class="row wrap" style="gap:10px">
+            <label class="field">С
+              <input id="tg-quiet-start" type="time" value="${U.esc(notifyQuiet.start || '22:00')}" />
+            </label>
+            <label class="field">До
+              <input id="tg-quiet-end" type="time" value="${U.esc(notifyQuiet.end || '08:00')}" />
+            </label>
+          </div>
+          <p class="tiny muted">В очередь попадают только включённые события. Частые события склеиваются; повторные попытки ограничены. Telegram-токен не записывается в журнал приложения.</p>
+        </div>
+      </div>
+
       <div style="margin-top:14px" class="row wrap">
         <button class="btn btn-primary" id="save-all">Сохранить настройки</button>
         <span class="hint">После сохранения расчёты во всех разделах пересчитаются автоматически.</span>
@@ -528,6 +611,223 @@ Views.settings = {
     `;
 
     const $ = (id) => container.querySelector(id);
+
+    function setBackupStatus(message, kind) {
+      const host = $('#backup-status');
+      if (!host) return;
+      host.textContent = message || '';
+      host.className = 'hint' + (kind === 'error' ? ' neg' : (kind === 'ok' ? ' pos' : ''));
+    }
+
+    function renderBackupList(data) {
+      const host = $('#backup-list-host');
+      if (!host) return;
+      const rows = (data && data.backups) || [];
+      host.innerHTML = rows.length ? rows.map((backup) => `<div class="row wrap" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)">
+        <div class="grow"><b>${U.esc(backup.fileName)}</b><div class="tiny muted">${U.esc(backup.backupType || 'копия')} · ${backup.createdAt ? U.esc(U.date(backup.createdAt, true)) : 'дата неизвестна'} · ${U.num(Math.ceil((backup.sizeBytes || 0) / 1024))} КБ${backup.corrupt ? ' · <span class="neg">файл повреждён</span>' : ''}${backup.containsKeys ? ' · зашифрованные ключи' : ''}</div></div>
+        <button class="btn btn-sm btn-ghost backup-restore" data-file="${U.esc(backup.fileName)}" type="button" ${backup.corrupt ? 'disabled' : ''}>Восстановить</button>
+      </div>`).join('') : '<p class="hint">Резервных копий пока нет. Автоматические появятся по расписанию.</p>';
+    }
+
+    async function refreshBackupList() {
+      try {
+        const data = await API.invoke('backup:list');
+        renderBackupList(data);
+        return data;
+      } catch (error) {
+        setBackupStatus('Не удалось прочитать список копий: ' + error.message, 'error');
+        return null;
+      }
+    }
+
+    function downloadBackup(result) {
+      const blob = new Blob([result.content], { type: 'application/json;charset=utf-8' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = result.fileName || 'wbpm-backup.wbpm.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    }
+
+    $('#backup-include-keys').onchange = () => {
+      $('#backup-export-password').disabled = !$('#backup-include-keys').checked;
+      if (!$('#backup-include-keys').checked) $('#backup-export-password').value = '';
+    };
+    $('#backup-export').onclick = async () => {
+      const includeKeys = $('#backup-include-keys').checked;
+      const password = $('#backup-export-password').value;
+      const button = $('#backup-export');
+      button.disabled = true;
+      setBackupStatus('Формируем резервную копию…');
+      try {
+        const result = await API.invoke('backup:export', { includeKeys, password });
+        downloadBackup(result);
+        $('#backup-export-password').value = '';
+        setBackupStatus('Файл ' + result.fileName + ' подготовлен для скачивания (' + U.num(Math.ceil(result.sizeBytes / 1024)) + ' КБ).', 'ok');
+      } catch (error) {
+        setBackupStatus(error.message, 'error');
+      } finally { button.disabled = false; }
+    };
+    $('#backup-schedule-save').onclick = async () => {
+      const button = $('#backup-schedule-save');
+      button.disabled = true;
+      try {
+        const retention = Math.max(1, Math.min(100, Math.round(U.num($('#backup-retention').value, 10))));
+        await API.invoke('settings:save', { backupSchedule: $('#backup-schedule').value, backupRetention: retention });
+        $('#backup-retention').value = String(retention);
+        setBackupStatus('Расписание автоматических копий сохранено.', 'ok');
+        await refreshBackupList();
+      } catch (error) { setBackupStatus('Не удалось сохранить расписание: ' + error.message, 'error'); }
+      finally { button.disabled = false; }
+    };
+    $('#backup-refresh').onclick = refreshBackupList;
+
+    function openImportPreview(content, fileName, preview) {
+      const hasKeys = !!(preview.keys && preview.keys.included);
+      const rows = preview.datasets || [];
+      const tableRows = (value) => (value || []).map((row) => `<tr><td>${U.esc(row.title)}</td><td>${U.esc(row.action)}</td><td>${U.num(row.added)}</td><td>${U.num(row.overwritten)}</td><td>${U.num(row.preservedConflicts)}</td></tr>`).join('');
+      const modal = UI.modal({
+        title: 'Предпросмотр импорта',
+        size: 'lg',
+        content: `<p>Файл <b>${U.esc(fileName)}</b> · формат ${U.esc(preview.formatVersion)} · создан ${preview.createdAt ? U.esc(U.date(preview.createdAt, true)) : 'дата не указана'} · версия приложения ${U.esc(preview.appVersion || 'не указана')}.</p>
+          <div style="overflow:auto;max-height:45vh"><table class="table"><thead><tr><th>Набор данных</th><th>Что произойдёт</th><th>Добавится</th><th>Заменится</th><th>Останется локальным</th></tr></thead><tbody id="backup-preview-rows">${tableRows(rows)}</tbody></table></div>
+          <label class="checkline" style="margin-top:10px"><input id="backup-overwrite" type="checkbox"> При совпадении заменить локальные значения данными из файла. Существующие данные будут сохранены в копию перед импортом.</label>
+          ${hasKeys ? `<div class="alert warn" style="margin-top:10px">В файле есть ключи WB, зашифрованные паролем. По умолчанию они не импортируются.<label class="checkline" style="margin-top:8px"><input id="backup-apply-keys" type="checkbox"> Восстановить ключи WB из файла</label><input id="backup-import-password" type="password" autocomplete="current-password" placeholder="Пароль шифрования ключей" style="margin-top:8px" disabled></div>` : '<p class="hint">Ключей в файле нет; текущие ключи приложения не изменятся.</p>'}
+          <p id="backup-import-error" class="neg" role="alert"></p>`,
+        buttons: [
+          { label: 'Отмена', class: 'btn-ghost' },
+          { label: 'Импортировать', class: 'btn-primary', keepOpen: true, onClick: async (dialogApi) => {
+            const body = dialogApi.body;
+            const overwriteExisting = !!body.querySelector('#backup-overwrite').checked;
+            const applyKeys = hasKeys && !!body.querySelector('#backup-apply-keys').checked;
+            const password = hasKeys ? body.querySelector('#backup-import-password').value : '';
+            const errorHost = body.querySelector('#backup-import-error');
+            const confirmButton = dialogApi.foot.querySelector('.btn-primary');
+            confirmButton.disabled = true;
+            errorHost.textContent = '';
+            try {
+              const result = await API.invoke('backup:import', {
+                action: 'apply', content, mode: 'merge', overwriteExisting,
+                overwriteConfirmed: overwriteExisting, applyKeys, password
+              });
+              dialogApi.close();
+              setBackupStatus('Импорт завершён. Перед ним сохранена копия ' + result.safetyBackup + '.', 'ok');
+              App.toast('Данные резервной копии импортированы', 'ok', 7000);
+              await S.loadAppState();
+              S.invalidate();
+              App.refreshCurrent();
+            } catch (error) {
+              errorHost.textContent = error.message;
+              confirmButton.disabled = false;
+            }
+            return false;
+          } }
+        ]
+      });
+      const overwrite = modal.body.querySelector('#backup-overwrite');
+      let previewRequest = 0;
+      if (overwrite) overwrite.onchange = async () => {
+        const requestId = ++previewRequest;
+        const confirmButton = modal.foot.querySelector('.btn-primary');
+        const errorHost = modal.body.querySelector('#backup-import-error');
+        confirmButton.disabled = true;
+        if (errorHost) errorHost.textContent = '';
+        try {
+          const updated = await API.invoke('backup:import', { action: 'preview', content, mode: 'merge', overwriteExisting: overwrite.checked });
+          if (requestId !== previewRequest) return;
+          const host = modal.body.querySelector('#backup-preview-rows');
+          if (host) host.innerHTML = tableRows(updated.datasets);
+          confirmButton.disabled = false;
+        } catch (error) {
+          if (requestId !== previewRequest) return;
+          if (errorHost) errorHost.textContent = error.message;
+          // Без актуального предпросмотра перезапись подтвердить нельзя.
+        }
+      };
+      const applyKeys = modal.body.querySelector('#backup-apply-keys');
+      if (applyKeys) applyKeys.onchange = () => {
+        modal.body.querySelector('#backup-import-password').disabled = !applyKeys.checked;
+      };
+    }
+
+    $('#backup-load').onclick = () => $('#backup-file').click();
+    $('#backup-file').onchange = async (event) => {
+      const input = event.currentTarget;
+      const file = input.files && input.files[0];
+      if (!file) return;
+      setBackupStatus('Проверяем файл и сравниваем данные…');
+      try {
+        const content = await file.text();
+        const preview = await API.invoke('backup:import', { action: 'preview', content });
+        setBackupStatus('Предпросмотр готов. Ничего не изменено.', 'ok');
+        openImportPreview(content, file.name, preview);
+      } catch (error) {
+        setBackupStatus(error.message, 'error');
+      } finally { input.value = ''; }
+    };
+    $('#backup-list-host').onclick = (event) => {
+      const button = event.target.closest && event.target.closest('.backup-restore');
+      if (!button || button.disabled) return;
+      const fileName = button.dataset.file;
+      UI.confirmDialog('Восстановить резервную копию', '<div class="alert danger">Все наборы данных будут заменены выбранной копией. Перед восстановлением приложение автоматически сохранит текущее состояние. Ключи WB не затрагиваются.</div>', async () => {
+        button.disabled = true;
+        try {
+          const result = await API.invoke('backup:restore', { fileName, confirmed: true });
+          setBackupStatus('Восстановлена копия ' + result.restoredFile + '. Предыдущее состояние сохранено в ' + result.safetyBackup + '.', 'ok');
+          App.toast('Данные восстановлены', 'ok', 7000);
+          await S.loadAppState();
+          S.invalidate();
+          App.refreshCurrent();
+        } catch (error) { setBackupStatus('Не удалось восстановить копию: ' + error.message, 'error'); button.disabled = false; }
+      }, 'Восстановить');
+    };
+
+    function telegramPayload() {
+      const events = {};
+      container.querySelectorAll('[data-notify-event]').forEach((input) => { events[input.dataset.notifyEvent] = input.checked; });
+      return {
+        token: $('#tg-token').value,
+        clearToken: $('#tg-clear-token').checked,
+        chatId: $('#tg-chat').value,
+        events,
+        quietHours: { enabled: $('#tg-quiet').checked, start: $('#tg-quiet-start').value, end: $('#tg-quiet-end').value }
+      };
+    }
+    async function saveTelegramSettings() {
+      const result = await API.invoke('notify:save', telegramPayload());
+      $('#tg-token').value = '';
+      $('#tg-clear-token').checked = false;
+      $('#tg-token-state').textContent = result.tokenSaved ? '✓ токен сохранён (значение не показывается)' : 'токен ещё не сохранён';
+      const host = $('#tg-status');
+      host.textContent = result.tokenSaved ? 'Telegram-настройки сохранены; токен хранится отдельно от settings.json.' : 'Настройки сохранены; токен не задан.';
+      host.className = 'hint pos';
+      return result;
+    }
+    $('#tg-save').onclick = async () => {
+      const button = $('#tg-save');
+      button.disabled = true;
+      try { await saveTelegramSettings(); App.toast('Настройки Telegram сохранены', 'ok'); }
+      catch (error) { $('#tg-status').textContent = error.message; $('#tg-status').className = 'hint neg'; }
+      finally { button.disabled = false; }
+    };
+    $('#tg-test').onclick = async () => {
+      const button = $('#tg-test');
+      button.disabled = true;
+      const host = $('#tg-status');
+      host.textContent = 'Проверяем бота через getMe и отправляем тестовое сообщение…';
+      host.className = 'hint';
+      try {
+        await saveTelegramSettings();
+        const result = await API.invoke('notify:test');
+        host.textContent = result.message;
+        host.className = result.ok ? 'hint pos' : 'hint neg';
+        if (result.ok) App.toast('Тестовое сообщение отправлено в Telegram', 'ok');
+      } catch (error) { host.textContent = error.message; host.className = 'hint neg'; }
+      finally { button.disabled = false; }
+    };
 
     function paintUpdateStatus(update) {
       const host = $('#update-status');

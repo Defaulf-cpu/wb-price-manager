@@ -8,11 +8,16 @@ const path = require('path');
 const os = require('os');
 const { createStore } = require('../electron/store');
 const { createService } = require('../electron/service');
+const { createBackupManager } = require('../electron/backup');
+const { createTelegramNotifier } = require('../electron/notifications');
 const { WebAuth, CSRF_COOKIE } = require('./web-auth');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const RENDERER_ROOT = path.join(PROJECT_ROOT, 'src', 'renderer');
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
+// JSON-кодирование строки файла может примерно удвоить размер 100-МиБ бэкапа.
+// Прочие тела запросов по-прежнему ограничены 25 МиБ.
+const MAX_INVOKE_BODY_BYTES = 220 * 1024 * 1024;
 const SSE_MAX = 50;
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
@@ -126,7 +131,7 @@ function readBody(req, limit) {
       bytes += chunk.length;
       if (bytes > limit) {
         done = true;
-        reject(Object.assign(new Error('Размер тела запроса превышает 25 МБ.'), { statusCode: 413 }));
+        reject(Object.assign(new Error('Размер тела запроса превышает ' + Math.ceil(limit / (1024 * 1024)) + ' МБ.'), { statusCode: 413 }));
         req.resume();
         return;
       }
@@ -199,6 +204,9 @@ function createWebServer(options) {
   const sameSite = String(opts.sameSite || '').toLowerCase() === 'none' ? 'none' : 'lax';
   const auth = new WebAuth(dataDir, { user: opts.user || 'admin', pass: opts.pass || '', secure, sameSite });
   const store = createStore(dataDir, null);
+  const backupManager = createBackupManager({ store, dir: dataDir, appVersion: require('../package.json').version, now: opts.now });
+  backupManager.startScheduler();
+  const telegramNotifier = createTelegramNotifier({ store, fetch: opts.fetch, now: opts.now, batchDelayMs: opts.notifyBatchDelayMs });
   const sseClients = new Set();
   const allowFraming = !!opts.allowFraming;
   const indexHtml = fs.readFileSync(path.join(RENDERER_ROOT, 'index.html'), 'utf8');
@@ -218,7 +226,7 @@ function createWebServer(options) {
     }
   }
 
-  const service = createService(store, broadcast);
+  const service = createService(store, broadcast, null, { backupManager, telegramNotifier });
   try { service.applyScheduler(); } catch (e) { errorLog('[web] Планировщик: ' + (e.stack || e.message || e)); }
 
   const server = (secure ? https : http).createServer(secure ? {
@@ -329,7 +337,7 @@ function createWebServer(options) {
       if (pathname === '/api/invoke' && req.method === 'POST') {
         let body;
         try {
-          const buf = await readBody(req, MAX_BODY_BYTES);
+          const buf = await readBody(req, MAX_INVOKE_BODY_BYTES);
           try { body = JSON.parse(buf.toString('utf8')); }
           catch (_) { return fail(400, 'Некорректный JSON в теле запроса.'); }
         } catch (e) { return fail(e.statusCode || 400, e.message || 'Не удалось прочитать запрос.'); }
@@ -438,6 +446,8 @@ function createWebServer(options) {
     }
     sseClients.clear();
     if (service.sched && service.sched.timer) { clearInterval(service.sched.timer); service.sched.timer = null; }
+    backupManager.stopScheduler();
+    telegramNotifier.stop();
     return new Promise((resolve) => {
       if (!server.listening) return resolve();
       server.close(() => resolve());
@@ -449,7 +459,7 @@ function createWebServer(options) {
     });
   }
 
-  return { server, store, service, auth, sseClients, mode, host, port, dataDir, allowFraming, sameSite, listen, close, getClientIp: getIp };
+  return { server, store, service, auth, backupManager, telegramNotifier, sseClients, mode, host, port, dataDir, allowFraming, sameSite, listen, close, getClientIp: getIp };
 }
 
 function localAddresses() {
@@ -521,4 +531,4 @@ if (require.main === module) {
   main().catch((err) => { console.error('[web] Не удалось запустить сервер: ' + (err && err.stack || err)); process.exitCode = 1; });
 }
 
-module.exports = { createWebServer, parseArgs, isPrivateIp, getClientIp, makeCsp, MAX_BODY_BYTES, SSE_MAX };
+module.exports = { createWebServer, parseArgs, isPrivateIp, getClientIp, makeCsp, MAX_BODY_BYTES, MAX_INVOKE_BODY_BYTES, SSE_MAX };

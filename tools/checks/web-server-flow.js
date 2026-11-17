@@ -60,6 +60,13 @@ async function postLogin(port, state, user, password) {
   });
 }
 
+function invokeApi(port, cookies, csrf, channel, args) {
+  return request(port, 'POST', '/api/invoke', {
+    headers: { Cookie: cookieHeader(cookies), 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ channel, args: args || [] })
+  });
+}
+
 function streamEvents(port, cookies) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/api/events', headers: { Cookie: cookieHeader(cookies) } }, (res) => {
@@ -83,9 +90,16 @@ function streamEvents(port, cookies) {
 async function main() {
   const dataDir = path.join(__dirname, '..', '..', '.data-test-web-server-flow');
   fs.rmSync(dataDir, { recursive: true, force: true });
+  const telegramCalls = [];
   const app = createWebServer({
     mode: 'lan', port: 0, dataDir, user: 'tester', pass: 'correct horse battery staple',
     getClientIp: (req) => req.headers['x-test-client-ip'] || getClientIp(req),
+    fetch: async (url, init) => {
+      telegramCalls.push({ url: String(url), init: init || {} });
+      return { ok: true, status: 200, json: async () => String(url).endsWith('/getMe')
+        ? { ok: true, result: { id: 123, username: 'web_test_bot' } }
+        : { ok: true, result: { message_id: telegramCalls.length } } };
+    },
     log: () => {}, errorLog: (line) => console.error(line)
   });
   let port;
@@ -130,6 +144,22 @@ async function main() {
     try { stateData = JSON.parse(stateResponse.body).data || {}; } catch (_) {}
     check('app:state с сессией возвращает 200 и demo:true', stateResponse.status === 200 && stateData.demo === true,
       'status=' + stateResponse.status + ', demo=' + stateData.demo);
+
+    const backupResponse = await invokeApi(port, sessionCookies, csrf, 'backup:list');
+    const backupEnvelope = JSON.parse(backupResponse.body);
+    check('backup:list доступен через авторизованный веб IPC', backupResponse.status === 200 && backupEnvelope.ok === true && Array.isArray(backupEnvelope.data.backups));
+    const exportResponse = await invokeApi(port, sessionCookies, csrf, 'backup:export');
+    const exportEnvelope = JSON.parse(exportResponse.body);
+    check('backup:export возвращает .wbpm.json в веб-версии', exportResponse.status === 200 && exportEnvelope.ok === true && exportEnvelope.data.fileName.endsWith('.wbpm.json') && JSON.parse(exportEnvelope.data.content).format === 'wb-price-manager-backup');
+
+    const webToken = '987654321:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn654321';
+    const saveNotify = await invokeApi(port, sessionCookies, csrf, 'notify:save', [{ token: webToken, chatId: '123456789', events: { sendSuccess: true } }]);
+    const notifySaved = JSON.parse(saveNotify.body);
+    const notifyRead = JSON.parse((await invokeApi(port, sessionCookies, csrf, 'notify:get')).body);
+    check('notify:save и notify:get работают в веб-версии, не раскрывая токен', saveNotify.status === 200 && notifySaved.ok && notifySaved.data.tokenSaved && notifyRead.ok && notifyRead.data.tokenSaved && !JSON.stringify(notifyRead).includes(webToken));
+    const webTest = JSON.parse((await invokeApi(port, sessionCookies, csrf, 'notify:test')).body);
+    check('notify:test вызывает getMe и sendMessage через веб fetch', webTest.ok && webTest.data.ok && telegramCalls.length === 2 && telegramCalls[0].url.endsWith('/getMe') && telegramCalls[1].url.endsWith('/sendMessage'));
+    check('веб-хранилище также отделяет Telegram-токен от settings.json', !fs.readFileSync(app.store.paths.settingsPath, 'utf8').includes(webToken) && app.store.loadSecrets().telegramBotToken === webToken);
 
     const noCsrf = await request(port, 'POST', '/api/invoke', {
       headers: { Cookie: cookieHeader(sessionCookies), 'Content-Type': 'application/json' },
