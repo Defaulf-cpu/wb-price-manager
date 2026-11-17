@@ -2473,7 +2473,7 @@ WB, если они есть; иначе — из ручного ввода/де
 | IPC-канал | Вход | Результат |
 | --- | --- | --- |
 | `backup:export` | `{ includeKeys?: boolean, password?: string }` | `{ fileName, content, sizeBytes, manifest }`; `content` — JSON для сохранения как `.wbpm.json` |
-| `backup:import` | `{ action: 'preview', content, mode?: 'merge'\|'replace', overwriteExisting?: boolean }` | Предпросмотр: строки наборов с `added`, `overwritten`, `preservedConflicts` и итогами; записи не меняются |
+| `backup:import` | `{ action?: 'preview', content, mode?: 'merge'\|'replace', overwriteExisting?: boolean }` | Предпросмотр: строки с `added`, `overwritten`, `preservedConflicts`, `removed`, итогами, `sourceFormat` и `warnings[]`; записи не меняются |
 | `backup:import` | `{ action: 'apply', content, mode?: 'merge'\|'replace', overwriteExisting?: boolean, overwriteConfirmed?: boolean, applyKeys?: boolean, password?: string }` | Применение с результатом предпросмотра и именем `safetyBackup` — копии до импорта |
 | `backup:list` | — | `{ backups[], schedule, retention, lastError, maxBytes }`; повреждённые файлы видны с `corrupt: true` |
 | `backup:restore` | `{ fileName, confirmed: true }` | Восстановление выбранной внутренней копии, `restoredFile`, `safetyBackup`; секреты не меняются |
@@ -2485,6 +2485,46 @@ WB, если они есть; иначе — из ручного ввода/де
 Запись выполняется через журнал транзакции: при ошибке файлы откатываются, а незавершённый
 журнал восстанавливается при следующем запуске. Восстановление из списка требует отдельного
 подтверждения и заменяет наборы данных целиком.
+
+#### Самостоятельное задание J: объединение с резервными копиями K
+
+Код отдельного агента J восстановлен из исходного коммита `4b93257` PR #9 и объединён
+вручную. Параллельный модуль копий уже был в K, но это не означало приёмку отдельного J.
+Сохраняется **один** менеджер `createBackupManager`, один набор `backup:*` и текущий формат
+`wb-price-manager-backup`. Нельзя заменять его второй копией обработчиков из старого J:
+она не сохраняла транзакционный откат и захватывала все секреты вместо только ключей WB.
+
+Из J добавлены нативные диалоги Windows и выбор полной замены при импорте:
+
+| Только Electron | Вход | `data` успешного ответа |
+| --- | --- | --- |
+| `ui:save-backup` | `{ defaultPath?, content }` | `{ filePath }` либо `{ canceled: true }` |
+| `ui:open-backup` | — | `{ fileName, filePath, content }` либо `{ canceled: true }` |
+
+Оба канала входят в `registeredChannels()` и `preload`. `API.saveBackup()` и `API.openBackup()`
+возвращают `null` при отмене; ошибки не заменяются незаметным браузерным скачиванием. JSON
+сохраняется без CSV-BOM, атомарно (временный файл + rename); размер проверяется до чтения
+файла в Electron. В браузере сохранён обычный выбор/скачивание файла. Каналы `ui:*` не
+открывают произвольные файловые пути через веб-API.
+
+В предпросмотре есть режимы **слияние** (по умолчанию) и **полная замена**. При замене
+показывается число удаляемых данных, отдельный флажок подтверждения и новый предпросмотр;
+пока подтверждения нет, кнопка применения заблокирована. Если пароль к явно импортируемым
+ключам неверен, **весь импорт прекращается до записи**, а не применяется частично.
+
+Ранние файлы самостоятельного J (`format: "wbpm-backup"`, `formatVersion: 1`, `datasets`,
+манифест-массив и `keys`) читаются конвертером `convertLegacyDocument`. Известные наборы
+переводятся в единый формат, `backupAutoEnabled/Freq/Keep` — в `backupSchedule/Retention`.
+В предпросмотре `sourceFormat: "wbpm-backup"` и `warnings[]` честно сообщают, что исходный
+ранний формат не содержал контрольных сумм. Шифрованные ключи требуют пароля, Telegram-токен
+не переносится даже из такого файла. Неизвестные наборы/версии и подмена путей отклоняются.
+Тестовая фикстура `tools/checks/fixtures/backup-j-v1.json` создана исходным экспортёром J
+только с вымышленными секретами.
+
+Проверки: `npm run test:backup` = `backup-flow.js` (19, в том числе откат после ошибки записи)
++ `backup-integration-flow.js` (146: сценарии J на едином контракте, все 17 наборов,
+оба формата, шифрование, диалоги и транспорт). Ещё 12 UI-проверок J входят в `tools/uitest.js`
+(635 проверок всего). Старый прогон K не удалён и не подменён.
 
 Автокопирование настраивается через `settings:save` полями
 `backupSchedule: 'off'|'daily'|'weekly'` и `backupRetention` (от 1 до 100). Планировщик
@@ -2529,4 +2569,4 @@ WB, если они есть; иначе — из ручного ввода/де
 В веб-режиме те же каналы доступны через авторизованный `/api/invoke`; лимит тела вызова
 увеличен до 220 МиБ, чтобы принять файл до 100 МиБ после повторного JSON-кодирования
 строки `content`; остальные HTTP-тела ограничены прежними 25 МиБ. Проверки: `npm run test:backup` → `tools/checks/backup-flow.js` и
-`npm run test:notify` → `tools/checks/notify-flow.js`; оба прогона включены в `npm test`.
+`npm run test:notify` → `tools/checks/notify-flow.js`; все прогоны, включая дополнительный `backup-integration-flow.js`, включены в `npm test`.

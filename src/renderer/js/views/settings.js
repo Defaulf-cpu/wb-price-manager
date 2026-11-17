@@ -664,9 +664,10 @@ Views.settings = {
       setBackupStatus('Формируем резервную копию…');
       try {
         const result = await API.invoke('backup:export', { includeKeys, password });
-        downloadBackup(result);
+        const savedPath = API.isElectron ? await API.saveBackup(result.fileName, result.content) : (downloadBackup(result), result.fileName);
+        if (!savedPath) { setBackupStatus('Сохранение отменено. Данные не изменены.'); return; }
         $('#backup-export-password').value = '';
-        setBackupStatus('Файл ' + result.fileName + ' подготовлен для скачивания (' + U.num(Math.ceil(result.sizeBytes / 1024)) + ' КБ).', 'ok');
+        setBackupStatus(API.isElectron ? 'Файл сохранён: ' + savedPath : 'Файл ' + result.fileName + ' подготовлен для скачивания (' + U.num(Math.ceil(result.sizeBytes / 1024)) + ' КБ).', 'ok');
       } catch (error) {
         setBackupStatus(error.message, 'error');
       } finally { button.disabled = false; }
@@ -688,20 +689,31 @@ Views.settings = {
     function openImportPreview(content, fileName, preview) {
       const hasKeys = !!(preview.keys && preview.keys.included);
       const rows = preview.datasets || [];
-      const tableRows = (value) => (value || []).map((row) => `<tr><td>${U.esc(row.title)}</td><td>${U.esc(row.action)}</td><td>${U.num(row.added)}</td><td>${U.num(row.overwritten)}</td><td>${U.num(row.preservedConflicts)}</td></tr>`).join('');
+      const tableRows = (value) => (value || []).map((row) => `<tr><td>${U.esc(row.title)}</td><td>${U.esc(row.action)}</td><td>${U.num(row.added)}</td><td>${U.num(row.overwritten)}</td><td>${U.num(row.preservedConflicts)}</td><td>${U.num(row.removed)}</td></tr>`).join('');
       const modal = UI.modal({
         title: 'Предпросмотр импорта',
         size: 'lg',
         content: `<p>Файл <b>${U.esc(fileName)}</b> · формат ${U.esc(preview.formatVersion)} · создан ${preview.createdAt ? U.esc(U.date(preview.createdAt, true)) : 'дата не указана'} · версия приложения ${U.esc(preview.appVersion || 'не указана')}.</p>
-          <div style="overflow:auto;max-height:45vh"><table class="table"><thead><tr><th>Набор данных</th><th>Что произойдёт</th><th>Добавится</th><th>Заменится</th><th>Останется локальным</th></tr></thead><tbody id="backup-preview-rows">${tableRows(rows)}</tbody></table></div>
+          ${(preview.warnings || []).map((message) => '<div class="alert warn">' + U.esc(message) + '</div>').join('')}
+          <label class="field" style="margin:10px 0">Режим импорта
+            <select id="backup-mode"><option value="merge">Слияние — сохранить локальные данные</option><option value="replace">Полная замена — восстановить состояние файла</option></select>
+          </label>
+          <div style="overflow:auto;max-height:45vh"><table class="table"><thead><tr><th>Набор данных</th><th>Что произойдёт</th><th>Добавится</th><th>Заменится</th><th>Останется локальным</th><th>Удалится</th></tr></thead><tbody id="backup-preview-rows">${tableRows(rows)}</tbody></table></div>
           <label class="checkline" style="margin-top:10px"><input id="backup-overwrite" type="checkbox"> При совпадении заменить локальные значения данными из файла. Существующие данные будут сохранены в копию перед импортом.</label>
+          <div id="backup-replace-confirm-wrap" class="alert danger" hidden style="margin-top:10px">
+            Полная замена удалит наборы, которых нет в файле. Перед ней будет создана копия текущего состояния.
+            <label class="checkline"><input id="backup-confirm-replace" type="checkbox"> Подтверждаю полную замену после просмотра состава</label>
+          </div>
           ${hasKeys ? `<div class="alert warn" style="margin-top:10px">В файле есть ключи WB, зашифрованные паролем. По умолчанию они не импортируются.<label class="checkline" style="margin-top:8px"><input id="backup-apply-keys" type="checkbox"> Восстановить ключи WB из файла</label><input id="backup-import-password" type="password" autocomplete="current-password" placeholder="Пароль шифрования ключей" style="margin-top:8px" disabled></div>` : '<p class="hint">Ключей в файле нет; текущие ключи приложения не изменятся.</p>'}
           <p id="backup-import-error" class="neg" role="alert"></p>`,
         buttons: [
           { label: 'Отмена', class: 'btn-ghost' },
           { label: 'Импортировать', class: 'btn-primary', keepOpen: true, onClick: async (dialogApi) => {
             const body = dialogApi.body;
-            const overwriteExisting = !!body.querySelector('#backup-overwrite').checked;
+            const mode = body.querySelector('#backup-mode').value;
+            const confirmed = !!body.querySelector('#backup-confirm-replace').checked;
+            if (mode === 'replace' && !confirmed) return false;
+            const overwriteExisting = mode === 'replace' || !!body.querySelector('#backup-overwrite').checked;
             const applyKeys = hasKeys && !!body.querySelector('#backup-apply-keys').checked;
             const password = hasKeys ? body.querySelector('#backup-import-password').value : '';
             const errorHost = body.querySelector('#backup-import-error');
@@ -710,8 +722,8 @@ Views.settings = {
             errorHost.textContent = '';
             try {
               const result = await API.invoke('backup:import', {
-                action: 'apply', content, mode: 'merge', overwriteExisting,
-                overwriteConfirmed: overwriteExisting, applyKeys, password
+                action: 'apply', content, mode, overwriteExisting,
+                overwriteConfirmed: mode === 'replace' ? confirmed : overwriteExisting, applyKeys, password
               });
               dialogApi.close();
               setBackupStatus('Импорт завершён. Перед ним сохранена копия ' + result.safetyBackup + '.', 'ok');
@@ -728,38 +740,60 @@ Views.settings = {
         ]
       });
       const overwrite = modal.body.querySelector('#backup-overwrite');
+      const modeSelect = modal.body.querySelector('#backup-mode');
+      const confirmReplace = modal.body.querySelector('#backup-confirm-replace');
+      const replaceWarning = modal.body.querySelector('#backup-replace-confirm-wrap');
       let previewRequest = 0;
-      if (overwrite) overwrite.onchange = async () => {
+      let previewReady = true;
+      const updateConfirm = () => {
+        modal.foot.querySelector('.btn-primary').disabled = !previewReady || (modeSelect.value === 'replace' && !confirmReplace.checked);
+      };
+      const refreshPreview = async () => {
         const requestId = ++previewRequest;
-        const confirmButton = modal.foot.querySelector('.btn-primary');
+        const mode = modeSelect.value;
         const errorHost = modal.body.querySelector('#backup-import-error');
-        confirmButton.disabled = true;
+        overwrite.disabled = mode === 'replace';
+        replaceWarning.hidden = mode !== 'replace';
+        previewReady = false; updateConfirm();
         if (errorHost) errorHost.textContent = '';
         try {
-          const updated = await API.invoke('backup:import', { action: 'preview', content, mode: 'merge', overwriteExisting: overwrite.checked });
+          const updated = await API.invoke('backup:import', { action: 'preview', content, mode, overwriteExisting: overwrite.checked });
           if (requestId !== previewRequest) return;
           const host = modal.body.querySelector('#backup-preview-rows');
           if (host) host.innerHTML = tableRows(updated.datasets);
-          confirmButton.disabled = false;
+          previewReady = true; updateConfirm();
         } catch (error) {
           if (requestId !== previewRequest) return;
           if (errorHost) errorHost.textContent = error.message;
           // Без актуального предпросмотра перезапись подтвердить нельзя.
         }
       };
+      overwrite.onchange = refreshPreview;
+      modeSelect.onchange = () => { confirmReplace.checked = false; return refreshPreview(); };
+      confirmReplace.onchange = updateConfirm;
       const applyKeys = modal.body.querySelector('#backup-apply-keys');
       if (applyKeys) applyKeys.onchange = () => {
         modal.body.querySelector('#backup-import-password').disabled = !applyKeys.checked;
       };
     }
 
-    $('#backup-load').onclick = () => $('#backup-file').click();
+    $('#backup-load').onclick = async () => {
+      if (!API.isElectron) { $('#backup-file').click(); return; }
+      try {
+        const file = await API.openBackup();
+        if (!file) { setBackupStatus('Выбор файла отменён. Данные не изменены.'); return; }
+        const preview = await API.invoke('backup:import', { action: 'preview', content: file.content });
+        setBackupStatus('Предпросмотр готов. Ничего не изменено.', 'ok');
+        openImportPreview(file.content, file.fileName, preview);
+      } catch (error) { setBackupStatus(error.message, 'error'); }
+    };
     $('#backup-file').onchange = async (event) => {
       const input = event.currentTarget;
       const file = input.files && input.files[0];
       if (!file) return;
       setBackupStatus('Проверяем файл и сравниваем данные…');
       try {
+        if (file.size > 100 * 1024 * 1024) throw new Error('Файл резервной копии больше 100 МБ.');
         const content = await file.text();
         const preview = await API.invoke('backup:import', { action: 'preview', content });
         setBackupStatus('Предпросмотр готов. Ничего не изменено.', 'ok');

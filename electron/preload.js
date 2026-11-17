@@ -87,6 +87,8 @@ const CHANNELS = [
   'ui:export-csv',
   'ui:import-csv',
   'ui:import-file',
+  'ui:save-backup',
+  'ui:open-backup',
   'ui:open-external',
   'ui:app-info',
   'ui:theme',

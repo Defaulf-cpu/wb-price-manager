@@ -12,6 +12,7 @@ const {
 } = require('./config');
 
 const FORMAT = 'wb-price-manager-backup';
+const LEGACY_FORMAT = 'wbpm-backup';
 const FORMAT_VERSION = 1;
 const MAX_BACKUP_BYTES = 100 * 1024 * 1024;
 const RETENTION_MIN = 1;
@@ -358,6 +359,53 @@ function createBackupManager(options) {
     };
   }
 
+  /** Совместимость с файлами самостоятельного задания J (PR #9). */
+  function convertLegacyDocument(input) {
+    const old = cloneSafe(input);
+    if (Number(old.formatVersion) !== FORMAT_VERSION) throw new BackupError('Версия раннего формата резервной копии несовместима с приложением.', 'INCOMPATIBLE_FORMAT');
+    if (!isPlainObject(old.datasets) || !Array.isArray(old.manifest)) throw new BackupError('В ранней копии отсутствуют наборы данных или оглавление.', 'BAD_FILE');
+    const known = new Map(DATASETS.map((item) => [item.key.toLowerCase(), item]));
+    const entries = new Map();
+    for (const entry of old.manifest) {
+      const item = isPlainObject(entry) && known.get(entry.name);
+      if (!item || entry.file !== item.file || entries.has(entry.name)) throw new BackupError('Некорректное оглавление ранней резервной копии.', 'BAD_FILE');
+      entries.set(entry.name, entry);
+    }
+    const data = {}, datasets = [];
+    for (const [name, raw] of Object.entries(old.datasets)) {
+      const item = known.get(name);
+      if (!item || !entries.has(name)) throw new BackupError('Ранняя копия содержит неизвестный набор данных «' + name + '».', 'INCOMPATIBLE_FORMAT');
+      if (raw === null) continue; // исходный J явно перечислял отсутствующие файлы
+      validateDatasetValue(item, raw);
+      const value = cloneSafe(raw);
+      if (item.key === 'settings' && value.backupSchedule === undefined && value.backupAutoEnabled !== undefined) {
+        value.backupSchedule = value.backupAutoEnabled === true ? (value.backupAutoFreq === 'weekly' ? 'weekly' : 'daily') : 'off';
+        if (value.backupRetention === undefined && value.backupAutoKeep !== undefined) value.backupRetention = clampRetention(value.backupAutoKeep);
+      }
+      const serialized = JSON.stringify(value, null, 2);
+      data[item.key] = value;
+      datasets.push({ key: item.key, file: item.file, title: item.title, records: recordCount(value),
+        sizeBytes: Buffer.byteLength(serialized, 'utf8'), sha256: crypto.createHash('sha256').update(serialized).digest('hex') });
+    }
+    const document = { format: FORMAT, formatVersion: FORMAT_VERSION, sourceFormat: LEGACY_FORMAT,
+      createdAt: old.createdAt, appVersion: old.appVersion || 'не указана', backupType: 'manual',
+      manifest: { datasets }, data };
+    if (old.keys !== undefined && old.keys !== null) {
+      const keys = old.keys;
+      if (!isPlainObject(keys) || keys.encrypted !== true || keys.method !== 'scrypt+aes-256-gcm' ||
+        !/^[a-f0-9]{32}$/i.test(keys.salt || '') || !/^[a-f0-9]{24}$/i.test(keys.iv || '') ||
+        !/^[a-f0-9]{32}$/i.test(keys.tag || '') || typeof keys.data !== 'string') {
+        throw new BackupError('Зашифрованные ключи ранней копии повреждены или используют неизвестный формат.', 'BAD_FILE');
+      }
+      document.encryptedSecrets = {
+        kdf: { name: 'scrypt', salt: Buffer.from(keys.salt, 'hex').toString('base64'), N: 16384, r: 8, p: 1 },
+        cipher: { name: 'aes-256-gcm', iv: Buffer.from(keys.iv, 'hex').toString('base64'), tag: Buffer.from(keys.tag, 'hex').toString('base64') },
+        ciphertext: keys.data
+      };
+    }
+    return document;
+  }
+
   function parseDocument(input) {
     let text;
     if (typeof input === 'string') text = input;
@@ -368,6 +416,7 @@ function createBackupManager(options) {
     let document;
     try { document = JSON.parse(text.replace(/^\uFEFF/, '')); }
     catch (_) { throw new BackupError('Файл повреждён: это не корректный JSON.', 'BAD_FILE'); }
+    if (isPlainObject(document) && document.format === LEGACY_FORMAT) document = convertLegacyDocument(document);
     if (!isPlainObject(document) || document.format !== FORMAT) throw new BackupError('Это не файл резервной копии WB Price Manager формата .wbpm.json.', 'BAD_FILE');
     if (Number(document.formatVersion) !== FORMAT_VERSION) {
       throw new BackupError('Версия формата резервной копии ' + String(document.formatVersion || 'не указана') + ' несовместима с этой версией приложения (поддерживается формат ' + FORMAT_VERSION + ').', 'INCOMPATIBLE_FORMAT');
@@ -437,6 +486,9 @@ function createBackupManager(options) {
     }
     return {
       formatVersion: FORMAT_VERSION,
+      sourceFormat: document.sourceFormat || FORMAT,
+      warnings: document.sourceFormat === LEGACY_FORMAT
+        ? ['Импортируется ранний формат задания J без исходных контрольных сумм. Проверьте состав и предпросмотр перед применением.'] : [],
       createdAt: document.createdAt || null,
       appVersion: document.appVersion || 'не указана',
       backupType: document.backupType || 'manual',

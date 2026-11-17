@@ -8,6 +8,7 @@ const { createPriceWatcher } = require('./price-watcher');
 const EC = require('./economics');
 const { readTable } = require('./xlsx-lite');
 const { buildXlsx } = require('./xlsx-write');
+const { createBackupManager } = require('./backup');
 
 const CACHE_TTL_MS = 120000;
 const WB_SECRET_NAMES = Object.freeze(['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace', 'master']);
@@ -46,7 +47,9 @@ function daysAgoIso(days) {
 function createService(store, emit, electron, integrations) {
   const sendEvent = typeof emit === 'function' ? emit : () => {};
   const hooks = integrations || {};
-  const backupManager = hooks.backupManager || null;
+  const backupManager = hooks.backupManager || (store.dir ? createBackupManager({
+    store, appVersion: (electron && electron.appVersion) || require('../package.json').version
+  }) : null);
   const telegram = hooks.telegramNotifier || null;
   const notify = (channel, payload) => {
     try { sendEvent(channel, payload); } catch (_) { /* интерфейсный слушатель не должен прерывать бизнес-операцию */ }

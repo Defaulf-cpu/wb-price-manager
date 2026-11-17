@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { createStore } = require('./store');
 const { createService } = require('./service');
 const { createUpdateManager } = require('./updater');
-const { createBackupManager } = require('./backup');
+const { createBackupManager, MAX_BACKUP_BYTES } = require('./backup');
 const { createTelegramNotifier } = require('./notifications');
 const { APP_NAME } = require('./config');
 
@@ -40,7 +40,8 @@ function makeSecretBox() {
 function registeredChannels() {
   const ui = [
     'ui:export-csv', 'ui:import-csv', 'ui:open-external', 'ui:app-info', 'ui:theme',
-    'ui:update-state', 'ui:update-check', 'ui:update-enable', 'ui:update-restart'
+    'ui:update-state', 'ui:update-check', 'ui:update-enable', 'ui:update-restart',
+    'ui:save-backup', 'ui:open-backup'
   ];
   const svc = service && service.handlers ? Object.keys(service.handlers) : [];
   return Array.from(new Set(svc.concat(ui)));
@@ -178,6 +179,52 @@ function registerIpc() {
       size: buf.length,
       base64: buf.toString('base64')
     };
+  });
+
+  /** Файловые диалоги задания J: JSON без BOM, отмена не запускает скачивание. */
+  ipcMain.handle('ui:save-backup', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const content = typeof p.content === 'string' ? p.content : '';
+      if (!content || Buffer.byteLength(content, 'utf8') > MAX_BACKUP_BYTES) {
+        throw new Error('Резервная копия пуста или превышает допустимый размер 100 МБ.');
+      }
+      JSON.parse(content.replace(/^\uFEFF/, ''));
+      const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        title: 'Сохранить резервную копию',
+        defaultPath: p.defaultPath || 'wb-price-manager-backup.wbpm.json',
+        filters: [{ name: 'Резервная копия WBPM', extensions: ['wbpm.json'] }, { name: 'Все файлы', extensions: ['*'] }]
+      });
+      if (canceled || !filePath) return { ok: true, data: { canceled: true } };
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmp = filePath + '.tmp-' + crypto.randomBytes(6).toString('hex');
+      try {
+        fs.writeFileSync(tmp, content.replace(/^\uFEFF/, ''), { encoding: 'utf8', mode: 0o600 });
+        fs.renameSync(tmp, filePath);
+      } catch (error) {
+        try { fs.rmSync(tmp, { force: true }); } catch (_) {}
+        throw error;
+      }
+      try { shell.showItemInFolder(filePath); } catch (_) { /* файл уже сохранён */ }
+      return { ok: true, data: { filePath } };
+    } catch (error) {
+      return { ok: false, error: { message: 'Не удалось сохранить резервную копию: ' + error.message, code: 'BACKUP_FILE_SAVE' } };
+    }
+  });
+
+  ipcMain.handle('ui:open-backup', async () => {
+    try {
+      const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: 'Выберите файл резервной копии', properties: ['openFile'],
+        filters: [{ name: 'Резервная копия WBPM', extensions: ['wbpm.json', 'json'] }, { name: 'Все файлы', extensions: ['*'] }]
+      });
+      if (canceled || !filePaths || !filePaths.length) return { ok: true, data: { canceled: true } };
+      const filePath = filePaths[0];
+      if (fs.statSync(filePath).size > MAX_BACKUP_BYTES) throw new Error('Файл превышает 100 МБ.');
+      return { ok: true, data: { fileName: path.basename(filePath), filePath, content: fs.readFileSync(filePath, 'utf8') } };
+    } catch (error) {
+      return { ok: false, error: { message: 'Не удалось открыть резервную копию: ' + error.message, code: 'BACKUP_FILE_OPEN' } };
+    }
   });
 
   ipcMain.handle('ui:open-external', async (_e, url) => { shell.openExternal(String(url)); return { ok: true }; });

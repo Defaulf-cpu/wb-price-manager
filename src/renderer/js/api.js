@@ -237,5 +237,60 @@ window.API = (function () {
     return { version: 'web-preview', platform: navigator.platform, appDir: 'tools/.data', electron: '—', encryption: '—' };
   }
 
-  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron };
+  /**
+   * Сохранить резервную копию через диалог «Сохранить». В браузере — скачивание файла.
+   * Возвращает путь файла (Electron) или имя (браузер), либо null, если отменено.
+   */
+  async function saveBackup(defaultPath, content) {
+    if (isElectron) {
+      const result = await invoke('ui:save-backup', { defaultPath, content });
+      if (result && result.canceled) return null;
+      if (!result || !result.filePath) throw new Error('Приложение не подтвердило сохранение резервной копии.');
+      return result.filePath;
+    }
+    const name = defaultPath || 'wb-price-manager-backup.wbpm.json';
+    // U.download предназначен для CSV и добавляет BOM — JSON сохраняем без него.
+    const blob = new Blob([String(content || '')], { type: 'application/json;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    return name;
+  }
+
+  /** Выбор резервной копии: нативный диалог Electron или FileReader браузера. */
+  async function openBackup() {
+    if (isElectron) {
+      const result = await invoke('ui:open-backup');
+      if (result && result.canceled) return null;
+      if (!result || typeof result.content !== 'string') throw new Error('Не удалось прочитать выбранный файл.');
+      return result;
+    }
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = '.wbpm.json,application/json'; input.hidden = true;
+      let settled = false;
+      const finish = (value, error) => {
+        if (settled) return;
+        settled = true; input.remove();
+        if (error) reject(error); else resolve(value);
+      };
+      input.oncancel = () => finish(null);
+      input.onchange = () => {
+        const file = input.files && input.files[0];
+        if (!file) return finish(null);
+        if (file.size > 100 * 1024 * 1024) return finish(null, new Error('Файл резервной копии больше 100 МБ.'));
+        const reader = new FileReader();
+        reader.onload = () => finish({ fileName: file.name, content: String(reader.result || '') });
+        reader.onerror = () => finish(null, new Error('Не удалось прочитать файл резервной копии.'));
+        reader.onabort = () => finish(null);
+        reader.readAsText(file, 'utf-8');
+      };
+      document.body.appendChild(input);
+      input.click();
+    });
+  }
+
+  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron, saveBackup, openBackup };
 })();

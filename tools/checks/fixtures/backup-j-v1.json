@@ -1,0 +1,179 @@
+{
+  "format": "wbpm-backup",
+  "formatVersion": 1,
+  "createdAt": "2026-11-17T06:06:53.163Z",
+  "appVersion": "1.0.0",
+  "manifest": [
+    {
+      "name": "settings",
+      "file": "settings.json",
+      "present": true,
+      "entries": 1,
+      "bytes": 105
+    },
+    {
+      "name": "costs",
+      "file": "costs.json",
+      "present": true,
+      "entries": 1,
+      "bytes": 134
+    },
+    {
+      "name": "pricewatch",
+      "file": "pricewatch.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "stocks",
+      "file": "stocks.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "tasks",
+      "file": "tasks.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "factcosts",
+      "file": "factcosts.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "promoexits",
+      "file": "promoexits.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "pricedrafts",
+      "file": "pricedrafts.json",
+      "present": true,
+      "entries": 1,
+      "bytes": 218
+    },
+    {
+      "name": "proposals",
+      "file": "repricer-proposals.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "recalchistory",
+      "file": "repricer-history.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "promojournal",
+      "file": "promojournal.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "repricer",
+      "file": "repricer.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "competitors",
+      "file": "competitors.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "itemconfigs",
+      "file": "itemconfigs.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "pricehistory",
+      "file": "price-history.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "repricerruns",
+      "file": "repricer-runs.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    },
+    {
+      "name": "promonoms",
+      "file": "promonoms.json",
+      "present": false,
+      "entries": 0,
+      "bytes": 0
+    }
+  ],
+  "datasets": {
+    "settings": {
+      "shopName": "Магазин из задания J",
+      "backupAutoEnabled": true,
+      "backupAutoFreq": "weekly",
+      "backupAutoKeep": 3
+    },
+    "costs": {
+      "items": {
+        "1001": {
+          "costPriceRub": 500,
+          "currency": "RUB"
+        }
+      },
+      "updatedAt": "2026-11-17T06:06:53.102Z"
+    },
+    "pricewatch": null,
+    "stocks": null,
+    "tasks": null,
+    "factcosts": null,
+    "promoexits": null,
+    "pricedrafts": {
+      "items": {
+        "1001": {
+          "basePrice": 1000,
+          "discount": 10,
+          "sellerPrice": 900,
+          "note": "",
+          "savedAt": "2026-11-17T06:06:53.102Z"
+        }
+      },
+      "updatedAt": "2026-11-17T06:06:53.102Z"
+    },
+    "proposals": null,
+    "recalchistory": null,
+    "promojournal": null,
+    "repricer": null,
+    "competitors": null,
+    "itemconfigs": null,
+    "pricehistory": null,
+    "repricerruns": null,
+    "promonoms": null
+  },
+  "keys": {
+    "encrypted": true,
+    "method": "scrypt+aes-256-gcm",
+    "salt": "9811f5bf70824fe84d467e1d492b36e0",
+    "iv": "1a9d3b650cf1627c00f386be",
+    "tag": "5eb635e2483881f781ef5202426b1be5",
+    "data": "EiU2UJcmQVAGjr3aJP7JOAOZHrIA6tSsA6uUxkTxv8OcWmRH9GEG0E/HEJgsC5h4CZdjK1WQz7z75kwrXpRaXQ8Ukt/9VWUM7pS4NJ/O0VbQzGWHiCsvAZA0oIxt5zmcdrub",
+    "count": 2
+  }
+}

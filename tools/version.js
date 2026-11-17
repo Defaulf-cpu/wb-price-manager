@@ -187,6 +187,26 @@ const MARKERS = [
   ["package.json", "notify-flow.js", "прогон уведомлений в npm test"],
   ["docs/API.md", "26. Резервные копии", "контракты резервных копий и уведомлений"],
 
+  // ── самостоятельное J (восстановленный PR #9) и N (безопасные туннели) ──
+  ["tools/web-server.js", "const mode = opts.mode || 'tunnel'", "tunnel — режим веб-доступа по умолчанию"],
+  ["tools/web-server.js", "mode === 'tunnel' ? '127.0.0.1'", "в режиме tunnel нельзя открыть внешний bind"],
+  ["tools/web-server.js", "Режим internet требует HTTPS", "internet без TLS заблокирован"],
+  ["tools/web-server.js", "function startTunnel", "автозапуск установленного провайдера туннеля"],
+  ["docs/WEB.md", "Рекомендуемый сценарий: HTTPS-туннель", "инструкция безопасного доступа через туннель"],
+  ["Веб-версия (доступ из сети).bat", "set MODE=tunnel", "Windows launcher по умолчанию выбирает туннель"],
+  ["tools/checks/web-server-flow.js", "URL туннеля распознаётся", "проверка раздельных порций URL туннеля"],
+  ["electron/main.js", "ui:save-backup", "системный диалог сохранения копии"],
+  ["electron/preload.js", "ui:open-backup", "системный диалог выбора копии в белом списке"],
+  ["src/renderer/js/api.js", "async function saveBackup", "общий хелпер сохранения JSON-копии"],
+  ["src/renderer/js/views/settings.js", "backup-confirm-replace", "отдельное подтверждение полной замены"],
+  ["electron/backup.js", "convertLegacyDocument", "совместимость с ранним форматом самостоятельного J"],
+  ["tools/checks/fixtures/backup-j-v1.json", "\"format\": \"wbpm-backup\"", "фикстура раннего экспорта J с вымышленными ключами"],
+  ["tools/checks/backup-integration-flow.js", "main регистрирует диалог сохранения", "проверки настоящих файловых IPC-обработчиков"],
+  ["package.json", "backup-integration-flow.js", "расширенная приёмка J в npm test"],
+  ["tools/uitest.js", "замена показывает отдельное подтверждение", "проверки UI слияния и замены данных"],
+  ["docs/API.md", "Самостоятельное задание J: объединение", "контракт ручного объединения самостоятельного J"],
+  ["docs/TASKS-for-agents.md", "A–K и N закрыты", "исправленные статусы J и N для следующих агентов"],
+
 ];
 
 /** Полный список файлов, которые должны быть в репозитории. */
@@ -221,6 +241,7 @@ const REQUIRED_FILES = [
   'build/icon.png', 'build/icon.svg',
   'electron/backup.js', 'electron/notifications.js',
   'tools/checks/backup-flow.js', 'tools/checks/notify-flow.js',
+  'tools/checks/backup-integration-flow.js', 'tools/checks/fixtures/backup-j-v1.json',
   'Запуск (Windows).bat', 'Запуск в браузере (демо).bat',
   'Собрать EXE (Windows).bat', 'Опубликовать на GitHub (Windows).bat',
   'Веб-версия (доступ из сети).bat'

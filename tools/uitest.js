@@ -339,6 +339,66 @@ async function run() {
     check('в строке категории есть поля тарифов логистики', false, 'таблица категорий пуста');
   }
 
+  // ── J: единый раздел копий, предпросмотр, замена и нативная отмена ──
+  check('J: в настройках один раздел копий и не потерян Telegram',
+    doc.querySelectorAll('#backup-export').length === 1 && !!doc.querySelector('#tg-test'));
+  const jExport = await window.API.invoke('backup:export', {});
+  const jBefore = JSON.stringify(store.loadCosts());
+  let jInput = doc.querySelector('#backup-file');
+  Object.defineProperty(jInput, 'files', { configurable: true, value: [{ name: jExport.fileName,
+    size: jExport.sizeBytes, text: async () => jExport.content }] });
+  await jInput.onchange({ currentTarget: jInput });
+  let jModal = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
+  check('J: загрузка файла открывает предпросмотр, а не применяет данные',
+    !!jModal && /Предпросмотр импорта/.test(jModal.textContent) && JSON.stringify(store.loadCosts()) === jBefore);
+  let jMode = jModal && jModal.querySelector('#backup-mode');
+  check('J: импорт по умолчанию сохраняет локальные данные слиянием', !!jMode && jMode.value === 'merge');
+  if (jMode) { jMode.value = 'replace'; await jMode.onchange(); }
+  let jConfirm = jModal && jModal.querySelector('#backup-confirm-replace');
+  check('J: замена показывает отдельное подтверждение и блокирует кнопку до согласия',
+    !!jConfirm && !jModal.querySelector('#backup-replace-confirm-wrap').hidden &&
+    jModal.querySelector('.modal-foot .btn-primary').disabled);
+  check('J: предпросмотр замены показывает удаляемые данные',
+    !!jModal && /Удалится/.test(jModal.textContent) && !!jModal.querySelector('#backup-preview-rows tr'));
+  if (jConfirm) { jConfirm.checked = true; jConfirm.onchange(); }
+  check('J: после явного подтверждения замены кнопку можно нажать',
+    !!jModal && !jModal.querySelector('.modal-foot .btn-primary').disabled);
+  if (jMode) { jMode.value = 'merge'; await jMode.onchange(); }
+  check('J: возврат к слиянию убирает подтверждение замены',
+    !!jModal && jModal.querySelector('#backup-replace-confirm-wrap').hidden);
+  if (jModal) jModal.querySelector('.modal-close').click();
+
+  const jLegacyText = readFile(path.join(ROOT, 'tools', 'checks', 'fixtures', 'backup-j-v1.json'));
+  Object.defineProperty(jInput, 'files', { configurable: true, value: [{ name: 'early-j.wbpm.json',
+    size: jLegacyText.length, text: async () => jLegacyText }] });
+  await jInput.onchange({ currentTarget: jInput });
+  jModal = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
+  check('J: ранний формат показывает предупреждение об отсутствии контрольных сумм',
+    !!jModal && /ранний формат задания J без исходных контрольных сумм/.test(jModal.textContent));
+  let jKeys = jModal && jModal.querySelector('#backup-apply-keys');
+  check('J: импорт ключей из раннего файла по умолчанию выключен',
+    !!jKeys && !jKeys.checked && jModal.querySelector('#backup-import-password').disabled);
+  if (jKeys) { jKeys.checked = true; jKeys.onchange(); }
+  check('J: пароль доступен только при явном выборе импорта ключей',
+    !!jModal && !jModal.querySelector('#backup-import-password').disabled);
+  if (jModal) jModal.querySelector('.modal-close').click();
+
+  const jOriginalBridge = { isElectron: window.API.isElectron, saveBackup: window.API.saveBackup, openBackup: window.API.openBackup };
+  try {
+    window.API.isElectron = true;
+    window.API.saveBackup = async () => null;
+    window.API.openBackup = async () => null;
+    await doc.querySelector('#backup-export').onclick();
+    check('J: отмена системного сохранения не показывается как успех',
+      /Сохранение отменено/.test(doc.querySelector('#backup-status').textContent));
+    await doc.querySelector('#backup-load').onclick();
+    check('J: отмена системного открытия не применяет данные',
+      /Выбор файла отменён/.test(doc.querySelector('#backup-status').textContent) && JSON.stringify(store.loadCosts()) === jBefore);
+  } finally {
+    Object.assign(window.API, jOriginalBridge);
+  }
+  jInput = null; jModal = null; jMode = null; jConfirm = null; jKeys = null;
+
   // карточка товара (клик по строке таблицы)
   window.S.state.filters.flag = 'all';
   window.App.go('prices');
