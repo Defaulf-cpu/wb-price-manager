@@ -104,8 +104,12 @@ window.U = (function () {
     let t = null;
     return function () {
       const args = arguments;
+      const epoch = window.API && API.generation ? API.generation() : 0;
       clearTimeout(t);
-      t = setTimeout(() => fn.apply(null, args), ms || 250);
+      t = setTimeout(() => {
+        // Отложенный ввод в старой таблице не меняет состояние другого кабинета.
+        if (!window.API || !API.generation || epoch === API.generation()) fn.apply(null, args);
+      }, ms || 250);
     };
   }
 

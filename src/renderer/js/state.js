@@ -5,7 +5,7 @@
  */
 window.S = (function () {
 
-  const state = {
+  function initialState() { return {
     appState: null,
     settings: null,
     items: [],           // товары из WB / демо
@@ -35,7 +35,15 @@ window.S = (function () {
     promoTab: 'candidates',
     statsMeta: null,       // когда и как загружена статистика (страницы, заказы, лимиты WB)
     deferred: []           // разделы, которые дозагружаются в фоне из-за лимита WB
-  };
+  }; }
+  const state = initialState();
+
+  function resetProfile() {
+    const view = state.view;
+    for (const key of Object.keys(state)) delete state[key];
+    Object.assign(state, initialState(), { view });
+    invalidate();
+  }
 
   let EC = null;
 
@@ -367,7 +375,7 @@ window.S = (function () {
   }
 
   return {
-    state, setEconomics, loadAppState, loadGoods, loadPromos, saveSettings, saveCosts,
+    state, resetProfile, setEconomics, loadAppState, loadGoods, loadPromos, saveSettings, saveCosts,
     reloadOverrides, loadDrafts, loadFacts, refreshFacts, loadDeferred, loadStatsState,
     reloadAfterDeferred, analyze, rows, getRows, withDraft, invalidate, categories, brands,
     filtered, selectedRows, totals

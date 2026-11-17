@@ -147,6 +147,7 @@ function createTelegramNotifier(options) {
   let queue = [];
   let timer = null;
   let sending = false;
+  let stopped = false;
   let lastSentAt = 0;
   let lastError = '';
   let dropped = 0;
@@ -273,6 +274,7 @@ function createTelegramNotifier(options) {
   }
 
   function schedule(ms) {
+    if (stopped) return;
     if (timer) cancel(timer);
     timer = delay(() => {
       timer = null;
@@ -298,7 +300,7 @@ function createTelegramNotifier(options) {
   }
 
   async function drain() {
-    if (sending || !queue.length) return;
+    if (stopped || sending || !queue.length) return;
     const cfg = settings();
     const botToken = token();
     if (!botToken || !cfg.chatId) {
@@ -326,7 +328,7 @@ function createTelegramNotifier(options) {
     } catch (error) {
       lastError = sanitizeError(error, botToken);
       const attempts = Math.max(0, ...batch.map((entry) => entry.attempts || 0));
-      if (attempts + 1 < maxAttempts) {
+      if (!stopped && attempts + 1 < maxAttempts) {
         for (const entry of batch) entry.attempts = attempts + 1;
         queue = batch.concat(queue);
         const backoff = baseRetryDelayMs * (2 ** attempts);
@@ -337,11 +339,12 @@ function createTelegramNotifier(options) {
       }
     } finally {
       sending = false;
-      if (queue.length && !timer) schedule(Math.max(batchDelayMs, minChatIntervalMs - (now().getTime() - lastSentAt)));
+      if (!stopped && queue.length && !timer) schedule(Math.max(batchDelayMs, minChatIntervalMs - (now().getTime() - lastSentAt)));
     }
   }
 
   function enqueue(type, payload) {
+    if (stopped) return false;
     try {
       const key = EVENT_SETTINGS[type];
       if (!key) return false;
@@ -379,8 +382,10 @@ function createTelegramNotifier(options) {
   }
 
   function stop() {
+    stopped = true;
     if (timer) cancel(timer);
     timer = null;
+    queue = [];
   }
 
   return {
@@ -391,6 +396,7 @@ function createTelegramNotifier(options) {
     handleServiceEvent,
     flushNow,
     stop,
+    isBusy: () => sending,
     constants: { EVENT_SETTINGS, EVENT_LABELS, MAX_MESSAGE_LENGTH, MAX_ATTEMPTS: maxAttempts }
   };
 }

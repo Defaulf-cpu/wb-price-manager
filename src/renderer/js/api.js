@@ -16,7 +16,7 @@ window.API = (function () {
     catch (e) { return match.slice('wb_web_csrf='.length); }
   }
 
-  async function invoke(channel, ...args) {
+  async function transport(channel, ...args) {
     if (isElectron) {
       const res = await window.wbApp.invoke(channel, ...args);
       if (!res || res.ok === false) {
@@ -42,6 +42,43 @@ window.API = (function () {
     return res.data;
   }
 
+  // Контекст кабинета живёт в транспорте, а не в отдельных таблицах. Поздний
+  // ответ и событие старого профиля не могут перезаписать новое состояние UI.
+  let generation = 0;
+  let activeProfileId = '';
+  let pending = 0;
+  let changingProfile = false;
+  function changedError() { return Object.assign(new Error('Кабинет изменился. Повторите действие в текущем профиле.'), { code: 'PROFILE_CHANGED' }); }
+  async function profileTask(fn) {
+    if (changingProfile) throw Object.assign(new Error('Дождитесь переключения кабинета.'), { code: 'PROFILE_SWITCHING' });
+    const epoch = generation;
+    pending++;
+    try {
+      const data = await fn();
+      if (epoch !== generation) throw changedError();
+      return data;
+    } finally { pending--; }
+  }
+  async function invoke(channel, ...args) {
+    const run = async () => {
+      const scoped = activeProfileId && !channel.startsWith('profiles:') && !channel.startsWith('ui:');
+      return scoped ? transport('profiles:invoke', { profileId: activeProfileId, channel, args }) : transport(channel, ...args);
+    };
+    const data = changingProfile && channel === 'profiles:switch'
+      ? await transport(channel, ...args) : await profileTask(run);
+    if (channel === 'app:state' && data && data.activeProfileId) activeProfileId = data.activeProfileId;
+    return data;
+  }
+  function beginProfileChange() {
+    if (pending || changingProfile) throw Object.assign(new Error('Дождитесь окончания текущей операции перед переключением кабинета.'), { code: 'PROFILE_BUSY' });
+    generation++; changingProfile = true;
+  }
+  function endProfileChange(id) { if (id) activeProfileId = id; changingProfile = false; }
+  function invalidateProfile() { generation++; }
+  function acceptsEvent(payload) {
+    return !changingProfile && (!payload || !payload.profileId || !activeProfileId || payload.profileId === activeProfileId);
+  }
+
   // ───────────────────────── События ─────────────────────────
   /**
    * В Electron события приходят через preload (`svc:<channel>`), а в браузере — по SSE
@@ -54,6 +91,7 @@ window.API = (function () {
   let esRetry = 0;
 
   function handleEvent(channel, payload) {
+    if (!acceptsEvent(payload)) return;
     const list = subs[channel];
     if (!list || !list.length) return;
     list.slice().forEach((cb) => {
@@ -120,7 +158,7 @@ window.API = (function () {
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return function () {};
-    if (isElectron && window.wbApp.on) return window.wbApp.on('svc:' + channel, cb);
+    if (isElectron && window.wbApp.on) return window.wbApp.on('svc:' + channel, (payload) => { if (acceptsEvent(payload)) cb(payload); });
     (subs[channel] = subs[channel] || []).push(cb);
     openStream();
     listenChannel(channel);
@@ -145,7 +183,7 @@ window.API = (function () {
     return filename;
   }
 
-  async function importCsv() {
+  async function importCsvRaw() {
     if (isElectron) {
       const res = await window.wbApp.invoke('ui:import-csv');
       if (res && res.ok && res.data && res.data.content) return res.data.content;
@@ -153,6 +191,7 @@ window.API = (function () {
     }
     return new Promise((resolve) => {
       const inp = document.createElement('input');
+      inp.oncancel = () => resolve(null);
       inp.type = 'file';
       inp.accept = '.csv,.txt';
       inp.onchange = () => {
@@ -170,7 +209,7 @@ window.API = (function () {
    * Выбор файла с двоичным содержимым (XLSX) — возвращает { fileName, base64, size }.
    * В Electron файл читает основной процесс, в браузере — FileReader.
    */
-  async function importFile(opts) {
+  async function importFileRaw(opts) {
     const o = opts || {};
     if (isElectron) {
       const res = await window.wbApp.invoke('ui:import-file', {
@@ -181,6 +220,7 @@ window.API = (function () {
     }
     return new Promise((resolve) => {
       const inp = document.createElement('input');
+      inp.oncancel = () => resolve(null);
       inp.type = 'file';
       inp.accept = (o.extensions || ['xlsx', 'csv']).map((e) => '.' + e).join(',');
       inp.onchange = () => {
@@ -231,8 +271,7 @@ window.API = (function () {
 
   async function appInfo() {
     if (isElectron) {
-      const res = await window.wbApp.invoke('ui:app-info');
-      return res && res.ok ? res.data : null;
+      return invoke('ui:app-info');
     }
     return { version: 'web-preview', platform: navigator.platform, appDir: 'tools/.data', electron: '—', encryption: '—' };
   }
@@ -260,7 +299,7 @@ window.API = (function () {
   }
 
   /** Выбор резервной копии: нативный диалог Electron или FileReader браузера. */
-  async function openBackup() {
+  async function openBackupRaw() {
     if (isElectron) {
       const result = await invoke('ui:open-backup');
       if (result && result.canceled) return null;
@@ -292,5 +331,12 @@ window.API = (function () {
     });
   }
 
-  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron, saveBackup, openBackup };
+  const importCsv = () => profileTask(() => importCsvRaw());
+  const importFile = (opts) => profileTask(() => importFileRaw(opts));
+  const openBackup = () => profileTask(() => openBackupRaw());
+  const readFileText = (file) => profileTask(() => file.text());
+
+  return { invoke, on, exportCsv, importCsv, importFile, openExternal, appInfo, logout, webSession, isElectron, saveBackup, openBackup,
+    readFileText, beginProfileChange, endProfileChange, invalidateProfile,
+    generation: () => generation, pending: () => pending, activeProfileId: () => activeProfileId };
 })();

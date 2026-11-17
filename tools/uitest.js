@@ -162,7 +162,7 @@ async function run() {
   check('акции загружены', window.S.state.promos.length > 0, window.S.state.promos.length + ' шт');
 
   const navCount = doc.querySelectorAll('.nav-item').length;
-  check('навигация построена', navCount === 8, navCount + ' пунктов');
+  check('навигация построена', navCount === 9, navCount + ' пунктов');
   check('модуль репрайсера загружен в интерфейс', !!window.RP && typeof window.RP.computeItem === 'function');
 
   // обход всех разделов
@@ -1011,7 +1011,11 @@ async function run() {
     check('IPC: все каналы интерфейса разрешены в preload.js', missing.length === 0,
       missing.length ? 'не хватает: ' + missing.join(', ') : 'каналов используется ' + used.size + ', разрешено ' + allowed.length);
     // и наоборот: каждый разрешённый канал должен существовать в сервисе
-    const unknown = allowed.filter((c) => typeof service.handlers[c] !== 'function' && !/^ui:/.test(c));
+    const { createProfileHub } = require('../electron/profiles');
+    const channelsDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'wb-ui-channels-'));
+    const channelsHub = createProfileHub({ dataDir: channelsDir, createService });
+    const unknown = allowed.filter((c) => typeof channelsHub.handlers[c] !== 'function' && !/^ui:/.test(c));
+    channelsHub.stopAllSchedulers(); fsx.rmSync(channelsDir, { recursive: true, force: true });
     check('IPC: в белом списке нет несуществующих каналов', unknown.length === 0, unknown.join(', ') || 'всё на месте');
     check('IPC: канал полного обновления разрешён', allowed.indexOf('data:refresh-all') >= 0);
   })();
@@ -1216,7 +1220,7 @@ async function run() {
   check('события: dev-сервер рассылает их в SSE-поток',
     /text\/event-stream/.test(serveSrc) && /svc:/.test(serveSrc) && /broadcast\(channel, payload\)/.test(serveSrc));
   check('события: сервер создан с настоящей функцией рассылки, а не заглушкой',
-    /createService\(store, \(channel, payload\) => broadcast/.test(serveSrc));
+    /createProfileHub\(\{[\s\S]*?broadcast, switchable: false/.test(serveSrc));
   const appSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'js', 'app.js'), 'utf8');
   check('события: окно обновления данных показывает живой прогресс',
     /API\.on\('info'/.test(appSrc) && /offInfo/.test(appSrc));

@@ -4,19 +4,16 @@ const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog, Menu, nativeThe
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { createStore } = require('./store');
 const { createService } = require('./service');
 const { createUpdateManager } = require('./updater');
-const { createBackupManager, MAX_BACKUP_BYTES } = require('./backup');
+const { MAX_BACKUP_BYTES } = require('./backup');
 const { createTelegramNotifier } = require('./notifications');
+const { createProfileHub } = require('./profiles');
 const { APP_NAME } = require('./config');
 
 let win = null;
-let store = null;
 let service = null;
 let updateManager = null;
-let backupManager = null;
-let telegramNotifier = null;
 
 const DEV = process.argv.includes('--dev');
 
@@ -122,10 +119,10 @@ function send(channel, payload) {
 }
 
 function registerIpc() {
-  for (const [channel, fn] of Object.entries(service.handlers)) {
+  for (const channel of Object.keys(service.handlers)) {
     ipcMain.handle(channel, async (_evt, ...args) => {
       try {
-        const data = await fn(...args);
+        const data = await service.handlers[channel](...args);
         return { ok: true, data };
       } catch (e) {
         return { ok: false, error: { message: e.message || String(e), code: e.code || '', status: e.status || 0, category: e.category || '' } };
@@ -237,7 +234,7 @@ function registerIpc() {
       chrome: process.versions.chrome,
       node: process.versions.node,
       platform: process.platform,
-      appDir: store.dir,
+      appDir: service.getActiveStore().dir,
       encryption: safeStorage.isEncryptionAvailable() ? 'Доступно (safeStorage)' : 'Недоступно — ключи хранятся в base64'
     }
   }));
@@ -259,7 +256,7 @@ function registerIpc() {
 
   ipcMain.handle('ui:update-enable', async (_e, value) => {
     const enabled = !!value;
-    const settings = store.saveSettings({ autoUpdateEnabled: enabled });
+    const settings = service.getActiveStore().saveSettings({ autoUpdateEnabled: enabled });
     const update = updateManager ? await updateManager.setEnabled(enabled) : null;
     return { ok: true, data: { settings, update } };
   });
@@ -302,8 +299,7 @@ function registerEconProtocol() {
 }
 
 app.on('before-quit', () => {
-  if (backupManager) backupManager.stopScheduler();
-  if (telegramNotifier) telegramNotifier.stop();
+  if (service && typeof service.stopAllSchedulers === 'function') service.stopAllSchedulers();
 });
 
 const gotLock = app.requestSingleInstanceLock();
@@ -320,18 +316,23 @@ if (!gotLock) {
   app.whenReady().then(() => {
     registerEconProtocol();
     const dir = app.getPath('userData');
-    store = createStore(dir, makeSecretBox());
-    backupManager = createBackupManager({ store, dir, appVersion: app.getVersion() });
-    backupManager.startScheduler();
-    telegramNotifier = createTelegramNotifier({ store });
-    service = createService(store, (channel, payload) => send('svc:' + channel, payload), { openHidden: openPriceWatchHidden }, {
-      backupManager,
-      telegramNotifier
+    // Много кабинетов: каждый профиль — свой каталог данных, свои ключи, свои
+    // лимиты WB и свой сервис. Хаб маршрутизирует обработчики к активному профилю.
+    service = createProfileHub({
+      dataDir: dir,
+      secretBox: makeSecretBox(),
+      appVersion: app.getVersion(),
+      broadcast: (channel, payload) => send('svc:' + channel, payload),
+      electron: { openHidden: openPriceWatchHidden },
+      createService: createService,
+      createTelegramNotifier: createTelegramNotifier
     });
+    // запускаем планировщики у всех профилей (резервные копии и автопересчёт цен)
+    service.startAllSchedulers();
     updateManager = createUpdateManager({
       app,
       platform: process.platform,
-      enabled: store.loadSettings().autoUpdateEnabled !== false,
+      enabled: service.getActiveStore().loadSettings().autoUpdateEnabled !== false,
       emit: (state) => send('svc:update-status', state)
     });
 
@@ -352,6 +353,12 @@ if (!gotLock) {
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  }).catch((error) => {
+    // При повреждённом регистре/незавершённой миграции нельзя молча открыть
+    // новый пустой кабинет. Сохраняем файлы и показываем причину владельцу.
+    console.error('[profiles] запуск остановлен:', error);
+    dialog.showErrorBox(APP_NAME, 'Не удалось открыть данные кабинетов.\n\n' + (error.message || String(error)) + '\n\nИсходные файлы сохранены. Устраните указанную причину и запустите приложение снова.');
+    app.quit();
   });
 
   app.on('window-all-closed', () => {

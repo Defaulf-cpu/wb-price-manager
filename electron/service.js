@@ -51,7 +51,11 @@ function createService(store, emit, electron, integrations) {
     store, appVersion: (electron && electron.appVersion) || require('../package.json').version
   }) : null);
   const telegram = hooks.telegramNotifier || null;
+  let disposed = false;
+  let activeHandlers = 0;
+  let backgroundJobs = 0;
   const notify = (channel, payload) => {
+    if (disposed) return;
     try { sendEvent(channel, payload); } catch (_) { /* интерфейсный слушатель не должен прерывать бизнес-операцию */ }
     try { if (telegram && typeof telegram.handleServiceEvent === 'function') telegram.handleServiceEvent(channel, payload); } catch (_) {}
   };
@@ -72,7 +76,9 @@ function createService(store, emit, electron, integrations) {
   let lowStockNotified = new Set();
 
   function getSettings() {
-    return store.loadSettings();
+    const settings = store.loadSettings();
+    if (!settings.shopName && typeof hooks.profileName === 'function') return { ...settings, shopName: hooks.profileName() };
+    return settings;
   }
 
   function isDemo() {
@@ -767,7 +773,7 @@ function createService(store, emit, electron, integrations) {
     'backup:import': async (payload) => {
       if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
       const result = backupManager.importBackup(payload || {});
-      if (result && result.applied) { client = null; invalidateAllCaches(); }
+      if (result && result.applied) resetAfterRestore();
       return result;
     },
     'backup:list': async () => {
@@ -777,7 +783,7 @@ function createService(store, emit, electron, integrations) {
     'backup:restore': async (payload) => {
       if (!backupManager) throw new WBError('Модуль резервного копирования недоступен.', { code: 'BACKUP_UNAVAILABLE' });
       const result = backupManager.restoreBackup(payload || {});
-      if (result && result.applied) { client = null; invalidateAllCaches(); }
+      if (result && result.applied) resetAfterRestore();
       return result;
     },
     'notify:get': async () => {
@@ -2436,7 +2442,7 @@ function createService(store, emit, electron, integrations) {
     'reports:pl': async (opts) => {
       const s = getSettings();
       const o = opts || {};
-      const wantPeriod = !!(o.dateFrom || o.dateTo || o.days);
+      const wantPeriod = o.cachedOnly !== true && !!(o.dateFrom || o.dateTo || o.days);
 
       let d = store.loadFactCosts();
       let loaded = null;
@@ -2482,12 +2488,15 @@ function createService(store, emit, electron, integrations) {
         };
       }
 
-      // товары нужны для названий и категорий
-      let goods = [];
-      try {
-        const g = await handlers['wb:goods']({});
-        goods = g.items || [];
-      } catch (e) { goods = []; }
+      // Сводка нескольких кабинетов не расходует лимиты WB. Если товары ещё не
+      // загружены, расчёт по финансовым суммам и локальным расходам всё равно доступен.
+      let goods = (cache.goods && cache.goods.items) || [];
+      if (o.cachedOnly !== true) {
+        try {
+          const g = await handlers['wb:goods']({});
+          goods = g.items || [];
+        } catch (e) { goods = []; }
+      }
       const byNm = new Map(goods.map((x) => [String(x.nmID), x]));
       const overrides = overridesFor(goods.length ? goods : nmIDs.map((k) => ({ nmID: Number(k) })));
       if (isDemo() && goods.length) { try { mergeDemoOverrides(goods, overrides); } catch (e) { /* не критично */ } }
@@ -2892,7 +2901,7 @@ function createService(store, emit, electron, integrations) {
 
   function armDeferred(name) {
     const rec = deferred[name];
-    if (!rec || rec.state !== 'scheduled') return;
+    if (disposed || !rec || rec.state !== 'scheduled') return;
     if (rec.timer) { clearTimeout(rec.timer); rec.timer = null; }
     const delay = Math.max(300, rec.retryAt - Date.now());
     rec.timer = setTimeout(() => { rec.timer = null; runDeferred(name); }, delay);
@@ -2929,7 +2938,7 @@ function createService(store, emit, electron, integrations) {
 
   async function runDeferred(name) {
     const rec = deferred[name];
-    if (!rec || rec.state === 'running') return rec;
+    if (disposed || !rec || rec.state === 'running') return rec;
     const task = DEFERRED_TASKS[name];
     if (!task) return rec;
     rec.state = 'running';
@@ -2946,7 +2955,7 @@ function createService(store, emit, electron, integrations) {
       const code = (e && e.code) || '';
       const retryAt = Number(e && e.retryAt) || 0;
       const limited = code === 'RATE_LIMIT' || code === 'RATE_WAIT';
-      if (limited && retryAt && rec.runs < 4) {
+      if (!disposed && limited && retryAt && rec.runs < 4) {
         rec.state = 'scheduled';
         rec.retryAt = retryAt;
         rec.error = (e && e.message) || '';
@@ -4212,59 +4221,104 @@ function createService(store, emit, electron, integrations) {
     return new Date(now.getTime() + 60 * 60000); // hourly
   }
 
+  /** Остановить все будущие фоновые работы, включая отложенные разделы WB. */
+  function stopScheduler() {
+    if (sched.timer) clearInterval(sched.timer);
+    sched.timer = null;
+    sched.nextRunAt = null;
+    for (const rec of Object.values(deferred)) {
+      if (rec.timer) clearTimeout(rec.timer);
+      rec.timer = null;
+      if (rec.state === 'scheduled') rec.state = 'canceled';
+    }
+  }
+
+  function isBusy() {
+    return activeHandlers > 0 || backgroundJobs > 0 || sched.running ||
+      Object.values(deferred).some((rec) => rec.state === 'running');
+  }
+
+  function dispose() { disposed = true; stopScheduler(); }
+
+  function resetAfterRestore() {
+    stopScheduler();
+    for (const key of Object.keys(deferred)) delete deferred[key];
+    client = null; clientSignature = ''; demoApi = null;
+    promoLifecycleReady = false; promoLifecycle = new Map(); lowStockNotified = new Set();
+    invalidateAllCaches();
+    applyScheduler();
+  }
+
   function applyScheduler() {
+    if (disposed) return { enabled: false };
     const cfg = repricerCfg();
     if (sched.timer) { clearInterval(sched.timer); sched.timer = null; }
     if (!cfg.enabled) { sched.nextRunAt = null; return { enabled: false }; }
 
     sched.nextRunAt = nextRunDate(cfg);
     sched.timer = setInterval(async () => {
-      const c = repricerCfg();
-      if (!c.enabled) return;
-      const now = Date.now();
+      if (disposed || backgroundJobs) return;
+      backgroundJobs++;
+      try {
+        const c = repricerCfg();
+        if (!c.enabled) return;
+        const now = Date.now();
 
-      /**
-       * Фаза 2 — отправка. Предложение, сохранённое фазой 1, уходит в WB только когда
-       * пришло его время (по умолчанию через 40 минут после расчёта) и включена автоотправка.
-       * Перед отправкой цены перечитываются: если в кабинете что-то изменилось, предложение
-       * помечается устаревшим и НЕ отправляется — старые данные не затираются.
-       */
-      const prop = store.loadProposals();
-      if (c.schedule.autoSend && prop.phase === 'proposed' && prop.sendAt && new Date(prop.sendAt).getTime() <= now && !sched.running) {
-        try {
-          await sendProposal('repricer-auto');
-        } catch (e) {
-          notify('warn', { where: 'repricer', message: 'Автоотправка не выполнена: ' + (e.message || e) });
-        }
-      }
-
-      // Фаза 1 — расчёт по расписанию
-      if (sched.nextRunAt && Date.now() >= sched.nextRunAt.getTime()) {
-        try {
-          const res = await calcRepricer({ mode: 'auto', autoSend: !!c.schedule.autoSend });
-          const wantJoin = !!c.promo.autoJoin;
-          const wantExit = !!c.promo.autoExitAutoPromos || !!c.promo.autoExitManualPromos;
-          if (wantJoin || wantExit) {
-            const rows = (res.results || []).filter((r) => r.promoChosen &&
-              (r.promoChosen.type === 'exit' ? wantExit : wantJoin));
-            if (rows.length) await applyPromoActions(rows, {});
-          } else if (c.promo.restorePriceAfterExit !== false) {
-            await restorePromoExits();
+        /**
+         * Фаза 2 — отправка. Предложение, сохранённое фазой 1, уходит в WB только когда
+         * пришло его время (по умолчанию через 40 минут после расчёта) и включена автоотправка.
+         * Перед отправкой цены перечитываются: если в кабинете что-то изменилось, предложение
+         * помечается устаревшим и НЕ отправляется — старые данные не затираются.
+         */
+        const prop = store.loadProposals();
+        if (c.schedule.autoSend && prop.phase === 'proposed' && prop.sendAt && new Date(prop.sendAt).getTime() <= now && !sched.running) {
+          try {
+            await sendProposal('repricer-auto');
+          } catch (e) {
+            notify('warn', { where: 'repricer', message: 'Автоотправка не выполнена: ' + (e.message || e) });
           }
-        } catch (e) {
-          notify('warn', { where: 'repricer', message: e.message });
         }
-        sched.nextRunAt = nextRunDate(c);
-        notify('repricer', { type: 'scheduled', nextRunAt: sched.nextRunAt.toISOString() });
-      }
+
+        // Фаза 1 — расчёт по расписанию
+        if (sched.nextRunAt && Date.now() >= sched.nextRunAt.getTime()) {
+          try {
+            const res = await calcRepricer({ mode: 'auto', autoSend: !!c.schedule.autoSend });
+            const wantJoin = !!c.promo.autoJoin;
+            const wantExit = !!c.promo.autoExitAutoPromos || !!c.promo.autoExitManualPromos;
+            if (wantJoin || wantExit) {
+              const rows = (res.results || []).filter((r) => r.promoChosen &&
+                (r.promoChosen.type === 'exit' ? wantExit : wantJoin));
+              if (rows.length) await applyPromoActions(rows, {});
+            } else if (c.promo.restorePriceAfterExit !== false) {
+              await restorePromoExits();
+            }
+          } catch (e) {
+            notify('warn', { where: 'repricer', message: e.message });
+          }
+          sched.nextRunAt = nextRunDate(c);
+          notify('repricer', { type: 'scheduled', nextRunAt: sched.nextRunAt.toISOString() });
+        }
+      } finally { backgroundJobs--; }
     }, 20000);
     if (sched.timer.unref) sched.timer.unref();
     return { enabled: true, nextRunAt: sched.nextRunAt.toISOString() };
   }
 
+  // Счётчик включает и вложенные асинхронные вызовы обработчиков: удаление или
+  // импорт не могут обогнать запрос WB, который ещё запишет результат в этот профиль.
+  for (const [channel, fn] of Object.entries(handlers)) {
+    handlers[channel] = async (...args) => {
+      if (disposed) throw new WBError('Сервис кабинета остановлен.', { code: 'PROFILE_CLOSED' });
+      activeHandlers++;
+      try { return await fn(...args); }
+      finally { activeHandlers--; }
+    };
+  }
+
   return {
     handlers, isDemo, getSettings, getClient, getDemo, cache,
-    calcRepricer, sendPrices, applyScheduler, sched, repricerCfg, priceWatcher
+    calcRepricer, sendPrices, applyScheduler, stopScheduler, dispose, isBusy,
+    sched, repricerCfg, priceWatcher
   };
 }
 

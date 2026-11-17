@@ -11,12 +11,49 @@ window.App = (function () {
     { id: 'economics', ico: '∑', label: 'Экономика' },
     { id: 'costs', ico: '⚙', label: 'Себестоимость' },
     { id: 'reports', ico: '🖶', label: 'Отчёты' },
+    { id: 'pl-summary', ico: '∑', label: 'Сводка P&L' },
     { id: 'settings', ico: '⚿', label: 'Настройки' }
   ];
 
   function toast(msg, kind, ms) { UI.toast(msg, kind, ms); }
 
   let updatePromptVersion = '';
+  let switchingProfile = false;
+  let formDirty = false;
+  const viewDefaults = new Map();
+  function cloneDefault(value) {
+    if (value instanceof Map) return new Map(value);
+    if (value instanceof Set) return new Set(value);
+    if (Array.isArray(value)) return value.map(cloneDefault);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, cloneDefault(v)]));
+    return value;
+  }
+  function rememberViewDefaults() {
+    if (viewDefaults.size) return;
+    for (const view of Object.values(Views)) {
+      const descriptors = Object.getOwnPropertyDescriptors(view);
+      for (const d of Object.values(descriptors)) if ('value' in d && typeof d.value !== 'function') d.value = cloneDefault(d.value);
+      viewDefaults.set(view, descriptors);
+    }
+  }
+  function resetViewsForProfile() {
+    for (const [view, defaults] of viewDefaults) {
+      const subscribed = view._subscribed;
+      if (view.updateStatusOff) view.updateStatusOff();
+      if (view._clickTimer) clearTimeout(view._clickTimer);
+      for (const key of Object.keys(view)) if (!Object.prototype.hasOwnProperty.call(defaults, key)) delete view[key];
+      for (const [key, descriptor] of Object.entries(defaults)) {
+        if ('value' in descriptor && typeof descriptor.value !== 'function') view[key] = cloneDefault(descriptor.value);
+      }
+      // Подписка создаётся однажды; её callback использует сброшенный объект вьюхи.
+      if (subscribed) view._subscribed = true;
+    }
+  }
+  function hasUnsavedProfileEdits() {
+    return formDirty || !!(S.state.priceEdits && S.state.priceEdits.size) ||
+      !!(Views.repricer && Views.repricer.pendingEdits && Views.repricer.pendingEdits.size);
+  }
+
   function handleUpdateStatus(update) {
     if (!API.isElectron || !update || !update.status) return;
     const version = update.updateVersion || 'новая версия';
@@ -129,9 +166,11 @@ window.App = (function () {
   }
 
   function go(id) {
+    if (switchingProfile) return;
+    const view = Views[id];
+    if (!view) { toast('Раздел не найден: ' + id, 'err'); return; }
     S.state.view = id;
     document.querySelectorAll('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.id === id));
-    const view = Views[id];
     document.getElementById('page-title').textContent = view.title;
     document.getElementById('page-subtitle').textContent = view.subtitle || '';
     renderTopActions(id);
@@ -286,9 +325,96 @@ window.App = (function () {
     go(S.state.view);
   }
 
+  /**
+   * Переключатель профилей (кабинетов WB) в шапке.
+   * Показывается только когда профилей больше одного и переключение разрешено —
+   * при одном профиле интерфейс не требует лишних действий.
+   */
+  function renderProfileSwitcher(host) {
+    const st = S.state.appState;
+    const profiles = (st && st.profiles) || [];
+    if (!profiles.length) return;
+    if (profiles.length < 2 || st.switchable === false) {
+      host.appendChild(U.el('<span class="badge" title="Выбранный кабинет WB">' + U.esc(st.activeProfileName || profiles[0].name) + '</span>'));
+      return;
+    }
+    const sel = U.el('<select class="btn btn-sm profile-switcher" title="Кабинет WB" aria-label="Кабинет WB"></select>');
+    for (const p of profiles) {
+      const opt = U.el('<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + '</option>');
+      opt.selected = p.id === st.activeProfileId;
+      sel.appendChild(opt);
+    }
+    sel.onchange = () => { const id = sel.value; sel.value = st.activeProfileId; return switchProfile(id); };
+    host.appendChild(sel);
+  }
+
+  function refreshProfiles(data) {
+    if (!data || !S.state.appState) return;
+    Object.assign(S.state.appState, { profiles: data.profiles || [], switchable: data.switchable, activeProfileId: data.activeId });
+    const p = (data.profiles || []).find((x) => x.id === data.activeId);
+    if (p) S.state.appState.activeProfileName = p.name;
+    renderTopActions(S.state.view);
+  }
+
+  /** После импорта читаем всё заново: не оставляем старые таблицы/черновики в UI. */
+  async function reloadProfileData(reset) {
+    if (reset) { API.invalidateProfile(); resetViewsForProfile(); S.resetProfile(); formDirty = false; }
+    await S.loadAppState();
+    await S.loadGoods(false); // возвращение к кабинету не выбрасывает его кэш
+    try { await S.refreshFacts(); } catch (e) { /* факт необязателен */ }
+    try { await S.loadPromos(); } catch (e) { /* акции необязательны */ }
+    S.invalidate();
+  }
+
+  async function switchProfile(id, confirmed) {
+    const oldId = S.state.appState && S.state.appState.activeProfileId;
+    if (!id || id === oldId || switchingProfile) return false;
+    if (API.pending() || S.state.loading) { toast('Дождитесь окончания текущей операции перед переключением кабинета.', 'warn', 6000); return false; }
+    if (document.querySelector('#modal-root .modal')) { toast('Сначала завершите или закройте открытое окно, затем переключите кабинет.', 'warn', 6000); return false; }
+    if (!confirmed && hasUnsavedProfileEdits()) {
+      UI.modal({ title: 'Есть несохранённые изменения', size: 'sm',
+        content: '<div class="alert warn">Изменённые поля и несохранённые цены относятся только к текущему кабинету. Сначала нажмите «Сохранить» или подтвердите переход без сохранения. В другой кабинет эти правки не переносятся.</div>',
+        buttons: [ { label: 'Остаться', class: 'btn-ghost' },
+          { label: 'Перейти без сохранения', class: 'btn-danger', keepOpen: true, onClick: (d) => { d.close(); return switchProfile(id, true); } } ] });
+      return false;
+    }
+    API.beginProfileChange();
+    if (Views.prices && Views.prices._clickTimer) { clearTimeout(Views.prices._clickTimer); Views.prices._clickTimer = null; }
+    switchingProfile = true;
+    const host = document.getElementById('view');
+    host.inert = true;
+    document.getElementById('nav').inert = true;
+    document.getElementById('btn-sync').disabled = true;
+    document.querySelectorAll('#topbar-actions select, #topbar-actions button').forEach((el) => { el.disabled = true; });
+    let changed = false;
+    try {
+      await API.invoke('profiles:switch', { profileId: id });
+      changed = true;
+      API.endProfileChange(id);
+      resetViewsForProfile(); S.resetProfile(); formDirty = false;
+      host.innerHTML = UI.loading('Загружаем выбранный кабинет…');
+      await reloadProfileData(false);
+      toast('Выбран кабинет: ' + (S.state.appState.activeProfileName || id), 'ok');
+      return true;
+    } catch (err) {
+      if (changed) host.innerHTML = '<div class="alert danger">Кабинет переключён, но данные не удалось прочитать: ' + U.esc(err.message) + '. Повторите обновление.</div>';
+      toast(err.message, 'err', 6000);
+      return false;
+    } finally {
+      API.endProfileChange(changed ? id : oldId);
+      switchingProfile = false;
+      host.inert = false; document.getElementById('nav').inert = false;
+      document.getElementById('btn-sync').disabled = false;
+      // Даже если WB не ответил, данные старого кабинета уже очищены.
+      if (S.state.settings) refreshCurrent();
+      else renderTopActions(S.state.view);
+    }
+  }
+
   function renderTopActions(id) {
     const host = document.getElementById('topbar-actions');
     host.innerHTML = '';
+    renderProfileSwitcher(host);
     const mk = (label, cls, fn) => {
       const b = U.el(`<button class="btn btn-sm ${cls || ''}">${label}</button>`);
       b.onclick = fn;
@@ -386,6 +512,10 @@ window.App = (function () {
   }
 
   async function init() {
+    rememberViewDefaults();
+    const dirtyInput = (event) => { if (event.target && event.target.closest && event.target.closest('#view, #modal-root')) formDirty = true; };
+    document.addEventListener('input', dirtyInput);
+    document.addEventListener('change', dirtyInput);
     S.setEconomics(window.EC);
     buildNav();
     if (API.isElectron) {
@@ -463,7 +593,7 @@ window.App = (function () {
     }
   }
 
-  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey };
+  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey, switchProfile, refreshProfiles, reloadProfileData, hasUnsavedProfileEdits };
 })();
 
 document.addEventListener('DOMContentLoaded', () => App.init());

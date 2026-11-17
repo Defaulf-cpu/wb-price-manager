@@ -16,7 +16,7 @@
     "dist": "electron-builder --win",
     "dist:portable": "electron-builder --win portable",
     "dist:dir": "electron-builder --win --dir",
-    "test": "node tools/checks/updater-flow.js && node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/engine-unit.js && node tools/checks/price-watch-flow.js && node tools/checks/stocks-flow.js && node tools/checks/backup-flow.js && node tools/checks/backup-integration-flow.js && node tools/checks/notify-flow.js && node tools/checks/web-server-flow.js && node --expose-gc --max-old-space-size=1600 tools/uitest.js",
+    "test": "node tools/checks/updater-flow.js && node tools/checks/rate-limit-flow.js && node tools/checks/repricer-flow.js && node tools/checks/engine-unit.js && node tools/checks/price-watch-flow.js && node tools/checks/stocks-flow.js && node tools/checks/backup-flow.js && node tools/checks/backup-integration-flow.js && node tools/checks/profiles-flow.js && node tools/checks/notify-flow.js && node tools/checks/web-server-flow.js && node --expose-gc --max-old-space-size=1600 tools/uitest.js",
     "test:backup": "node tools/checks/backup-flow.js && node tools/checks/backup-integration-flow.js",
     "test:notify": "node tools/checks/notify-flow.js",
     "test:engine": "node tools/checks/engine-unit.js",
@@ -25,7 +25,8 @@
     "test:repricer": "node tools/checks/repricer-flow.js",
     "test:ui": "node --expose-gc --max-old-space-size=1600 tools/uitest.js",
     "test:pricewatch": "node tools/checks/price-watch-flow.js",
-    "test:web": "node tools/checks/web-server-flow.js"
+    "test:web": "node tools/checks/web-server-flow.js",
+    "test:profiles": "node tools/checks/profiles-flow.js"
   },
   "devDependencies": {
     "electron": "^33.4.0",

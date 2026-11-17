@@ -7,10 +7,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-const { createStore } = require('../electron/store');
 const { createService } = require('../electron/service');
-const { createBackupManager } = require('../electron/backup');
 const { createTelegramNotifier } = require('../electron/notifications');
+const { createProfileHub } = require('../electron/profiles');
 const { WebAuth, CSRF_COOKIE } = require('./web-auth');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -77,6 +76,7 @@ function parseArgs(argv, env) {
     mode: e.WB_WEB_MODE || 'tunnel',
     port: e.PORT === undefined ? 8080 : Number(e.PORT),
     dataDir: e.WB_WEB_DATA || path.join(PROJECT_ROOT, '.data'),
+    profile: e.WB_WEB_PROFILE || '',
     user: e.WB_WEB_USER || '',
     pass: e.WB_WEB_PASS || '',
     cert: e.WB_WEB_CERT || '',
@@ -96,6 +96,7 @@ function parseArgs(argv, env) {
     if (key === '--mode') { out.mode = value; if (eq < 0) i++; }
     else if (key === '--port') { out.port = Number(value); if (eq < 0) i++; }
     else if (key === '--data') { out.dataDir = value; if (eq < 0) i++; }
+    else if (key === '--profile') { out.profile = value; if (eq < 0) i++; }
     else if (key === '--user') { out.user = value; if (eq < 0) i++; }
     else if (key === '--pass') { out.pass = value; if (eq < 0) i++; }
     else if (key === '--cert') { out.cert = value; if (eq < 0) i++; }
@@ -273,10 +274,25 @@ function createWebServer(options) {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const sameSite = String(opts.sameSite || '').toLowerCase() === 'none' ? 'none' : 'lax';
   const auth = new WebAuth(dataDir, { user: opts.user || 'admin', pass: opts.pass || '', secure: secure || mode === 'tunnel', sameSite });
-  const store = createStore(dataDir, null);
-  const backupManager = createBackupManager({ store, dir: dataDir, appVersion: require('../package.json').version, now: opts.now });
-  backupManager.startScheduler();
-  const telegramNotifier = createTelegramNotifier({ store, fetch: opts.fetch, now: opts.now, batchDelayMs: opts.notifyBatchDelayMs });
+  // Много кабинетов: веб-сервер запускается с профилем, выбранным при старте
+  // (`--profile`), и не даёт переключать профили через браузер.
+  const service = createProfileHub({
+    dataDir,
+    secretBox: null,
+    appVersion: require('../package.json').version,
+    now: opts.now,
+    fetch: opts.fetch,
+    notifyBatchDelayMs: opts.notifyBatchDelayMs,
+    profileId: opts.profile || '',
+    switchable: false,
+    broadcast,
+    createService,
+    createTelegramNotifier
+  });
+  const store = service.getActiveStore();
+  const activeProfile = service.getActive();
+  const backupManager = activeProfile ? activeProfile.backupManager : null;
+  const telegramNotifier = activeProfile ? activeProfile.telegramNotifier : null;
   const sseClients = new Set();
   const allowFraming = !!opts.allowFraming;
   const indexHtml = fs.readFileSync(path.join(RENDERER_ROOT, 'index.html'), 'utf8');
@@ -433,8 +449,7 @@ function createWebServer(options) {
     }
   }
 
-  const service = createService(store, broadcast, null, { backupManager, telegramNotifier });
-  try { service.applyScheduler(); } catch (e) { errorLog('[web] Планировщик: ' + (e.stack || e.message || e)); }
+  try { service.startAllSchedulers(); } catch (e) { errorLog('[web] Планировщик: ' + (e.stack || e.message || e)); }
 
   const server = (secure ? https : http).createServer(tlsOptions, (req, res) => {
     const startAt = process.hrtime.bigint();
@@ -650,9 +665,7 @@ function createWebServer(options) {
       try { client.end(); } catch (_) {}
     }
     sseClients.clear();
-    if (service.sched && service.sched.timer) { clearInterval(service.sched.timer); service.sched.timer = null; }
-    backupManager.stopScheduler();
-    telegramNotifier.stop();
+    service.stopAllSchedulers();
 
     const tunnel = activeTunnel;
     activeTunnel = null;

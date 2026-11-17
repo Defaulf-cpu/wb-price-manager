@@ -11,7 +11,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { createStore } = require('../electron/store');
+const { createProfileHub } = require('../electron/profiles');
+const { createTelegramNotifier } = require('../electron/notifications');
 const { createService } = require('../electron/service');
 
 const ROOT = path.join(__dirname, '..', 'src', 'renderer');
@@ -19,23 +20,6 @@ const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '0.0.0.0';
 
 const DATA_DIR = path.join(__dirname, '..', '.data');
-const store = createStore(DATA_DIR, null);
-
-// Ключи из окружения — удобно проверить реальное API без сборки Electron
-const envKeys = {};
-if (process.env.WB_API_KEY) { envKeys.prices = process.env.WB_API_KEY; envKeys.master = process.env.WB_API_KEY; }
-if (process.env.WB_PRICES_KEY) envKeys.prices = process.env.WB_PRICES_KEY;
-if (process.env.WB_STAT_KEY) envKeys.statistics = process.env.WB_STAT_KEY;
-if (process.env.WB_CONTENT_KEY) envKeys.content = process.env.WB_CONTENT_KEY;
-if (Object.keys(envKeys).length) {
-  const existing = store.loadSecrets();
-  store.saveSecrets(Object.assign({}, existing, envKeys));
-}
-
-const forceDemo = process.argv.includes('--demo');
-if (forceDemo) store.saveSettings({ demoMode: true });
-else if (Object.keys(envKeys).length) store.saveSettings({ demoMode: false });
-
 // ───────────────────────── События (SSE) ─────────────────────────
 /**
  * В Electron события идут через ipcRenderer (`svc:<channel>`), а в браузере их раньше
@@ -62,15 +46,30 @@ function broadcast(channel, payload) {
   }
 }
 
-const service = createService(store, (channel, payload) => broadcast(channel, payload));
+// Даже dev-сервер использует тот же каталог выбранного профиля, а не создаёт
+// заново старые корневые файлы после миграции Electron/защищённой веб-версии.
+const service = createProfileHub({ dataDir: DATA_DIR, createService, createTelegramNotifier,
+  appVersion: require('../package.json').version, broadcast, switchable: false,
+  profileId: process.env.WB_WEB_PROFILE || '' });
+const store = service.getActiveStore();
 
-// автопересчёт цен по расписанию работает и в браузерном режиме
-try {
-  const st = service.applyScheduler();
-  if (st.enabled) console.log('  Репрайсер: планировщик включён, следующий пересчёт ' + st.nextRunAt);
-} catch (e) {
-  console.log('  Репрайсер: ' + e.message);
+// Ключи из окружения — удобно проверить реальное API без сборки Electron
+const envKeys = {};
+if (process.env.WB_API_KEY) { envKeys.single = process.env.WB_API_KEY; }
+if (process.env.WB_PRICES_KEY) envKeys.prices = process.env.WB_PRICES_KEY;
+if (process.env.WB_STAT_KEY) envKeys.statistics = process.env.WB_STAT_KEY;
+if (process.env.WB_CONTENT_KEY) envKeys.content = process.env.WB_CONTENT_KEY;
+if (Object.keys(envKeys).length) {
+  const existing = store.loadSecrets();
+  store.saveSecrets(Object.assign({}, existing, envKeys));
 }
+
+const forceDemo = process.argv.includes('--demo');
+if (forceDemo) store.saveSettings({ demoMode: true });
+else if (Object.keys(envKeys).length) store.saveSettings({ demoMode: false });
+
+try { service.startAllSchedulers(); }
+catch (error) { console.log('  Планировщик: ' + error.message); }
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -182,7 +181,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  const mode = service.isDemo() ? 'ДЕМО-данные (API-ключ не задан)' : 'реальные данные WB API';
+  const mode = service.getActive().service.isDemo() ? 'ДЕМО-данные (API-ключ не задан)' : 'реальные данные WB API';
   console.log('');
   console.log('  WB Price Manager — интерфейс запущен');
   console.log('  Режим: ' + mode);
@@ -192,3 +191,11 @@ server.listen(PORT, HOST, () => {
   console.log('  Для боевого режима:  WB_API_KEY=ваш_ключ node tools/serve.js');
   console.log('');
 });
+
+function closeDevServer() {
+  service.stopAllSchedulers();
+  for (const response of sseClients) response.end();
+  server.close();
+}
+process.once('SIGINT', closeDevServer);
+process.once('SIGTERM', closeDevServer);
