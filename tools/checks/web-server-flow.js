@@ -3,7 +3,9 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { createWebServer, getClientIp } = require('../web-server');
+const { EventEmitter } = require('events');
+const { spawnSync } = require('child_process');
+const { createWebServer, getClientIp, parseArgs, printStartup } = require('../web-server');
 
 let pass = 0;
 let fail = 0;
@@ -67,6 +69,16 @@ function invokeApi(port, cookies, csrf, channel, args) {
   });
 }
 
+function fakeTunnelChild() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+  child.killed = false;
+  child.kill = () => { child.killed = true; child.exitCode = 0; child.emit('close', 0, 'SIGTERM'); };
+  return child;
+}
+
 function streamEvents(port, cookies) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/api/events', headers: { Cookie: cookieHeader(cookies) } }, (res) => {
@@ -90,6 +102,128 @@ function streamEvents(port, cookies) {
 async function main() {
   const dataDir = path.join(__dirname, '..', '..', '.data-test-web-server-flow');
   fs.rmSync(dataDir, { recursive: true, force: true });
+
+  const defaultArgs = parseArgs([], {});
+  check('режим по умолчанию — tunnel, автозапуск туннеля включён', defaultArgs.mode === 'tunnel' && defaultArgs.tunnelAutostart === true);
+  const newFlags = parseArgs(['--mode', 'tunnel', '--insecure-i-know', '--no-tunnel-autostart', '--tunnel-provider', 'tailscale'], {});
+  check('parseArgs принимает режим tunnel, insecure-i-know, отключение автозапуска и провайдера',
+    newFlags.mode === 'tunnel' && newFlags.insecureIKnow && !newFlags.tunnelAutostart && newFlags.tunnelProvider === 'tailscale');
+  const providerAlias = parseArgs(['--tunnel-provider=cloudflared', '--tunnel-autostart=false'], {});
+  check('parseArgs нормализует cloudflared и принимает булевы флаги через равно',
+    providerAlias.tunnelProvider === 'cloudflare' && providerAlias.tunnelAutostart === false);
+
+  const defaultTunnelDir = path.join(__dirname, '..', '..', '.data-test-web-tunnel-default');
+  fs.rmSync(defaultTunnelDir, { recursive: true, force: true });
+  const defaultTunnel = createWebServer({ port: 0, dataDir: defaultTunnelDir, host: '0.0.0.0', tunnelAutostart: false, user: 'tester', pass: 'correct horse battery staple', log: () => {}, errorLog: () => {} });
+  try {
+    const tunnelAddress = await defaultTunnel.listen();
+    check('createWebServer по умолчанию слушает только 127.0.0.1 даже при host=0.0.0.0',
+      defaultTunnel.mode === 'tunnel' && defaultTunnel.host === '127.0.0.1' && tunnelAddress.address === '127.0.0.1',
+      JSON.stringify({ mode: defaultTunnel.mode, host: tunnelAddress.address }));
+    const startupLines = [];
+    printStartup(defaultTunnel, tunnelAddress, { log: (line) => startupLines.push(line), warn: (line) => startupLines.push(line) });
+    const startupText = startupLines.join('\n');
+    check('стартовый экран печатает команды и ожидаемые HTTPS-адреса обоих туннелей',
+      startupText.includes('cloudflared tunnel --url http://127.0.0.1:') && startupText.includes('tailscale serve --bg http://127.0.0.1:') && startupText.includes('.trycloudflare.com') && startupText.includes('.<tailnet>.ts.net'));
+  } finally {
+    await defaultTunnel.close();
+    fs.rmSync(defaultTunnelDir, { recursive: true, force: true });
+  }
+
+  const internetDeniedDir = path.join(__dirname, '..', '..', '.data-test-web-internet-denied');
+  fs.rmSync(internetDeniedDir, { recursive: true, force: true });
+  const denied = spawnSync(process.execPath, [path.join(__dirname, '..', 'web-server.js'), '--mode', 'internet', '--port', '0', '--data', internetDeniedDir], {
+    cwd: path.join(__dirname, '..', '..'), encoding: 'utf8',
+    env: Object.assign({}, process.env, { WB_WEB_CERT: '', WB_WEB_KEY: '' })
+  });
+  check('internet без сертификата и --insecure-i-know не стартует и печатает причину',
+    denied.status !== 0 && /Режим internet требует HTTPS/.test(denied.stderr || '') && !fs.existsSync(internetDeniedDir),
+    'exit=' + denied.status);
+
+  const insecureDir = path.join(__dirname, '..', '..', '.data-test-web-insecure');
+  fs.rmSync(insecureDir, { recursive: true, force: true });
+  const insecureApp = createWebServer({ mode: 'internet', insecureIKnow: true, host: '127.0.0.1', port: 0, dataDir: insecureDir, user: 'tester', pass: 'correct horse battery staple', log: () => {}, errorLog: () => {} });
+  try {
+    const insecurePort = (await insecureApp.listen()).port;
+    const insecureLoginPage = await request(insecurePort, 'GET', '/login');
+    check('--insecure-i-know запускает HTTP и предупреждение видно на странице входа',
+      insecureApp.insecureHttp && insecureLoginPage.status === 200 && insecureLoginPage.body.includes('ВНИМАНИЕ: интернет-доступ работает по HTTP без TLS'));
+    const insecureLogin = await loginCookie(insecurePort);
+    const insecureGood = await postLogin(insecurePort, insecureLogin, 'tester', 'correct horse battery staple');
+    const insecureCookies = Object.assign({}, insecureLogin.cookies, cookiesFrom(insecureGood));
+    const insecureMainPage = await request(insecurePort, 'GET', '/', { headers: { Cookie: cookieHeader(insecureCookies) } });
+    check('--insecure-i-know показывает предупреждение и на авторизованной HTML-странице',
+      insecureMainPage.status === 200 && insecureMainPage.body.includes('ВНИМАНИЕ: интернет-доступ работает по HTTP без TLS'));
+  } finally {
+    await insecureApp.close();
+    fs.rmSync(insecureDir, { recursive: true, force: true });
+  }
+
+  const noTunnelDir = path.join(__dirname, '..', '..', '.data-test-web-no-tunnel-binary');
+  fs.rmSync(noTunnelDir, { recursive: true, force: true });
+  const noTunnelLines = [];
+  const noTunnel = createWebServer({ mode: 'tunnel', port: 0, dataDir: noTunnelDir, tunnelAutostart: true, tunnelProvider: 'auto', env: { PATH: '' }, findExecutable: () => null, log: (line) => noTunnelLines.push(line), errorLog: () => {} });
+  try {
+    const noTunnelAddress = await noTunnel.listen();
+    const noTunnelResult = noTunnel.startTunnel(noTunnelAddress.port);
+    check('без cloudflared и tailscale туннель честно сообщает установку и сервер продолжает работать',
+      noTunnelResult.reason === 'not-installed' && noTunnel.server.listening && noTunnelLines.some((line) => line.includes('не найден(ы) в PATH')) && noTunnelLines.some((line) => line.includes('tailscale.com/download')));
+  } finally {
+    await noTunnel.close();
+    fs.rmSync(noTunnelDir, { recursive: true, force: true });
+  }
+
+  const autoTunnelDir = path.join(__dirname, '..', '..', '.data-test-web-tunnel-autostart');
+  fs.rmSync(autoTunnelDir, { recursive: true, force: true });
+  const fakeChild = fakeTunnelChild();
+  const tunnelCalls = [];
+  const tunnelLines = [];
+  const autoTunnel = createWebServer({
+    mode: 'tunnel', port: 0, dataDir: autoTunnelDir, tunnelAutostart: true, tunnelProvider: 'cloudflare', env: { PATH: '' },
+    findExecutable: (name) => name === 'cloudflared' ? '/fake/bin/cloudflared' : null,
+    spawn: (executable, args) => { tunnelCalls.push({ executable, args }); return fakeChild; },
+    log: (line) => tunnelLines.push(line), errorLog: (line) => tunnelLines.push(line)
+  });
+  try {
+    const autoResult = autoTunnel.startTunnel(18765);
+    fakeChild.stdout.emit('data', Buffer.from('Quick Tunnel: https://sample-name.trycloudflare.com\n'));
+    check('найденный cloudflared автоматически запускается с loopback-адресом',
+      autoResult.started && autoResult.provider === 'cloudflare' && tunnelCalls.length === 1 && tunnelCalls[0].args.join(' ') === 'tunnel --url http://127.0.0.1:18765');
+    check('URL Cloudflare Tunnel печатается после появления в выводе процесса', tunnelLines.some((line) => line.includes('https://sample-name.trycloudflare.com')));
+    fakeChild.stdout.emit('data', Buffer.from('\nQuick Tunnel: https://split-address.trycloud'));
+    fakeChild.stdout.emit('data', Buffer.from('flare.com\n'));
+    check('URL туннеля распознаётся, если процесс вывел адрес несколькими порциями',
+      tunnelLines.some((line) => line === '[tunnel] Внешний HTTPS-адрес: https://split-address.trycloudflare.com'));
+  } finally {
+    await autoTunnel.close();
+    check('закрытие веб-сервера завершает процесс Cloudflare Tunnel', fakeChild.killed);
+    fs.rmSync(autoTunnelDir, { recursive: true, force: true });
+  }
+
+  const tailscaleDir = path.join(__dirname, '..', '..', '.data-test-web-tailscale-autostart');
+  fs.rmSync(tailscaleDir, { recursive: true, force: true });
+  const tailscaleChild = fakeTunnelChild();
+  const tailscaleCalls = [];
+  const tailscaleLines = [];
+  const autoTailscale = createWebServer({
+    mode: 'tunnel', port: 0, dataDir: tailscaleDir, tunnelAutostart: true, tunnelProvider: 'tailscale', env: { PATH: '' },
+    findExecutable: (name) => name === 'tailscale' ? '/fake/bin/tailscale' : null,
+    spawn: (executable, args) => { tailscaleCalls.push({ executable, args }); return tailscaleChild; },
+    spawnSync: () => ({ status: 0, stdout: JSON.stringify({ Self: { DNSName: 'wb-machine.tailnet.ts.net.' } }) }),
+    log: (line) => tailscaleLines.push(line), errorLog: (line) => tailscaleLines.push(line)
+  });
+  try {
+    const tailscaleResult = autoTailscale.startTunnel(18766);
+    check('найденный tailscale автоматически настраивает Serve на loopback',
+      tailscaleResult.started && tailscaleResult.provider === 'tailscale' && tailscaleCalls.length === 1 && tailscaleCalls[0].args.join(' ') === 'serve http://127.0.0.1:18766');
+    check('адрес Tailscale Serve выводится из состояния устройства',
+      tailscaleLines.some((line) => line.includes('https://wb-machine.tailnet.ts.net')));
+  } finally {
+    await autoTailscale.close();
+    check('закрытие веб-сервера завершает foreground-процесс Tailscale Serve', tailscaleChild.killed);
+    fs.rmSync(tailscaleDir, { recursive: true, force: true });
+  }
+
   const telegramCalls = [];
   const app = createWebServer({
     mode: 'lan', port: 0, dataDir, user: 'tester', pass: 'correct horse battery staple',
