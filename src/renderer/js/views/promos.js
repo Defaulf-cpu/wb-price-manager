@@ -617,7 +617,11 @@ Views.promos = {
        ${st.demo ? '<b>Демо-режим:</b> изменения останутся в приложении.</b>' : ''}</p>`,
       async () => {
         try {
-          const res = await API.invoke('wb:promo-join', { promotionID: p.id, nomenclatures });
+          const res = await API.invoke('wb:promo-join', {
+            promotionID: p.id, promoName: p.name || '',
+            promoStartAt: p.startDateTime || '', promoEndAt: p.endDateTime || '',
+            nomenclatures
+          });
           App.toast(`В акцию отправлено товаров: ${nomenclatures.length}`, 'ok');
           st.promoSelection.clear();
           st.promos = [];

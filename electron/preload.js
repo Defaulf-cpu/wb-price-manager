@@ -75,6 +75,7 @@ const CHANNELS = [
   'repricer:journal',
   'repricer:scheduler',
   'repricer:promo-plan',
+  'repricer:promo-analytics',
   'repricer:promo-apply',
   'repricer:promo-exit',
   'repricer:promo-restore',

@@ -6,6 +6,7 @@ const { createDemoApi } = require('./demo');
 const RP = require('./repricer-engine');
 const { createPriceWatcher } = require('./price-watcher');
 const EC = require('./economics');
+const PromoAnalytics = require('./promo-analytics');
 const { readTable } = require('./xlsx-lite');
 const { buildXlsx } = require('./xlsx-write');
 
@@ -252,7 +253,18 @@ function createService(store, emit, electron, integrations) {
   function aggregateFactCosts(rows, windowDays) {
     const agg = {};
     const byDay = {};
+    const byItemDay = {};
     const n2 = (v) => { const x = Number(String(v === undefined || v === null ? '' : v).replace(/\s/g, '').replace(',', '.')); return Number.isFinite(x) ? x : 0; };
+    const itemDay = (date, nmID) => {
+      if (!date) return null;
+      const day = byItemDay[date] || (byItemDay[date] = {});
+      return day[String(nmID)] || (day[String(nmID)] = {
+        nmID, date, salesQty: 0, returnsQty: 0, revenueTotal: 0, commissionTotal: 0,
+        logisticsTotal: 0, storageTotal: 0, acceptanceTotal: 0, acquiringTotal: 0,
+        penaltyTotal: 0, deductionTotal: 0, forPayTotal: 0,
+        sppWeightedTotal: 0, sppCount: 0
+      });
+    };
 
     for (const r of rows || []) {
       const nm = Number(r.nmId || r.nmID || 0);
@@ -270,10 +282,16 @@ function createService(store, emit, electron, integrations) {
       }
       const qty = n2(r.quantity) || 1;
       const logistics = n2(r.logistics);
+      const itemDayRow = itemDay(d, nm);
 
       if (r.isReturn) {
+        const returnLogistics = n2(r.returnLogistics) || logistics;
         a.returnsQty += qty;
-        a.returnLogisticsTotal += n2(r.returnLogistics) || logistics;
+        a.returnLogisticsTotal += returnLogistics;
+        if (itemDayRow) {
+          itemDayRow.returnsQty += qty;
+          itemDayRow.logisticsTotal += returnLogistics;
+        }
         if (d) {
           const day = byDay[d] || (byDay[d] = {
             date: d, salesQty: 0, returnsQty: 0, revenueTotal: 0, commissionTotal: 0,
@@ -287,6 +305,7 @@ function createService(store, emit, electron, integrations) {
       if (r.isLogistics) {           // отдельные строки «Логистика» без привязки к продаже
         a.logisticsTotal += logistics;
         a.logisticsQty += qty;
+        if (itemDayRow) itemDayRow.logisticsTotal += logistics;
         continue;
       }
       a.salesQty += qty;
@@ -301,6 +320,25 @@ function createService(store, emit, electron, integrations) {
       a.forPayTotal += n2(r.forPay);
       const commission = n2(r.commission) || (revenue * n2(r.commissionPercent) / 100);
       a.commissionTotal += commission;
+      if (itemDayRow) {
+        itemDayRow.salesQty += qty;
+        itemDayRow.revenueTotal += revenue;
+        itemDayRow.commissionTotal += commission;
+        itemDayRow.logisticsTotal += logistics;
+        itemDayRow.storageTotal += n2(r.storage);
+        itemDayRow.acceptanceTotal += n2(r.acceptance);
+        itemDayRow.acquiringTotal += n2(r.acquiring);
+        itemDayRow.penaltyTotal += n2(r.penalty);
+        itemDayRow.deductionTotal += n2(r.deduction);
+        itemDayRow.forPayTotal += n2(r.forPay);
+        const sppKnown = r.sppKnown === undefined
+          ? (r.spp !== undefined && r.spp !== null && r.spp !== '')
+          : !!r.sppKnown;
+        if (sppKnown) {
+          itemDayRow.sppWeightedTotal += n2(r.spp) * qty;
+          itemDayRow.sppCount += qty;
+        }
+      }
       // разбивка по дням — для динамики в отчёте P&L
       if (d) {
         const day = byDay[d] || (byDay[d] = {
@@ -352,9 +390,9 @@ function createService(store, emit, electron, integrations) {
         updatedAt: new Date().toISOString()
       };
     }
-    // Разбивку по дням возвращаем отдельно: если положить её внутрь карты товаров,
-    // её посчитают за товар (Object.keys используют для counts и для P&L).
-    return { items: out, byDay };
+    // Разбивку по дням и товарам храним отдельно: она нужна аналитике акций,
+    // но не должна попадать в карту товаров, которую считают другие отчёты.
+    return { items: out, byDay, byItemDay };
   }
 
   /**
@@ -1566,15 +1604,41 @@ function createService(store, emit, electron, integrations) {
     },
 
     'wb:promo-join': async (payload) => {
-      const promotionID = Number(payload && payload.promotionID);
-      const nomenclatures = (payload && payload.nomenclatures) || [];
+      const p = payload || {};
+      const promotionID = Number(p.promotionID);
+      const nomenclatures = p.nomenclatures || [];
       if (!nomenclatures.length) throw new WBError('Выберите товары для входа в акцию.', { code: 'EMPTY' });
-      if (isDemo()) {
-        const res = await getDemo().joinPromotion(promotionID, nomenclatures);
-        cache.goods = null;
-        return res;
+      const res = isDemo()
+        ? await getDemo().joinPromotion(promotionID, nomenclatures)
+        : await getClient().joinPromotion(promotionID, nomenclatures);
+      if (p._journal !== false) {
+        const goodsByNm = new Map((((cache.goods && cache.goods.items) || [])).map((g) => [String(g.nmID), g]));
+        const resultByNm = new Map(((res && res.results) || []).map((r) => [String(r.nmID), r]));
+        store.appendPromoJournal(nomenclatures.map((entry) => {
+          const item = entry && typeof entry === 'object' ? entry : { nmID: entry };
+          const nmID = Number(item.nmID);
+          const result = resultByNm.get(String(nmID));
+          const good = goodsByNm.get(String(nmID)) || {};
+          const price = Number(item.price) || 0;
+          const discount = Number(item.discount) || 0;
+          return {
+            nmID,
+            vendorCode: good.vendorCode || '',
+            title: good.title || '',
+            action: 'join',
+            promoId: promotionID,
+            promoName: p.promoName || String(promotionID),
+            promoStartAt: p.promoStartAt || '',
+            promoEndAt: p.promoEndAt || '',
+            priceBefore: Number(good.price) * (1 - Number(good.discount || 0) / 100),
+            priceAfter: price > 0 ? price * (1 - discount / 100) : 0,
+            reason: 'Ручной вход в акцию',
+            source: 'promo-calendar',
+            ok: result ? result.ok !== false : true,
+            error: result && result.error ? result.error : ''
+          };
+        }));
       }
-      const res = await getClient().joinPromotion(promotionID, nomenclatures);
       cache.goods = null;
       return res;
     },
@@ -2170,6 +2234,8 @@ function createService(store, emit, electron, integrations) {
           at: e.at, nmID: Number(e.nmID),
           vendorCode: e.vendorCode || vendorOf(e.nmID), title: e.title || titleOf(e.nmID),
           promoId: e.promoId, promoNames: e.promoName ? String(e.promoName).split(',').map((x) => x.trim()).filter(Boolean) : [],
+          promoStartAt: e.promoStartAt || '', promoEndAt: e.promoEndAt || '',
+          forecast: e.forecast || null,
           sellerPrice: U2(e.priceAfter), prevSellerPrice: U2(e.priceBefore),
           basePrice: 0, discount: 0,
           status: e.ok ? 'done' : 'failed',
@@ -2283,6 +2349,37 @@ function createService(store, emit, electron, integrations) {
       };
     },
 
+    /** Аналитика только по локальным кэшам — этот обработчик не делает запросов к WB. */
+    'repricer:promo-analytics': async (opts) => {
+      const p = opts || {};
+      const settings = getSettings();
+      const days = PromoAnalytics.clampWindowDays(p.days, settings.promoAnalyticsDays || PromoAnalytics.DEFAULT_WINDOW_DAYS);
+      const factData = store.loadFactCosts() || { items: {}, meta: {} };
+      const factMeta = factData.meta || {};
+      const journal = store.loadPromoJournal() || [];
+      const nmIDs = new Set(journal.map((e) => String(e && e.nmID || '')).filter((x) => /^[1-9]\d*$/.test(x)));
+      const goods = ((cache.goods && cache.goods.items) || []).slice();
+      const known = new Set(goods.map((g) => String(g.nmID)));
+      nmIDs.forEach((nm) => { if (!known.has(nm)) goods.push({ nmID: Number(nm) }); });
+      const overrides = overridesFor(goods);
+      if (isDemo()) mergeDemoOverrides(goods, overrides);
+      const result = PromoAnalytics.promoAnalytics({
+        days,
+        now: p.now,
+        journal,
+        byItemDay: factMeta.byItemDay || {},
+        coveredDates: factMeta.coveredDates || [],
+        reportMeta: factMeta,
+        legacyFactData: Object.keys(factData.items || {}).length > 0 || Object.keys(factMeta.byDay || {}).length > 0,
+        incompleteFinanceData: factMeta.reportTruncated === true,
+        goods,
+        overrides,
+        settings,
+        stockHistory: store.loadStockHistory()
+      });
+      return Object.assign({ demo: isDemo() }, result);
+    },
+
     'repricer:promo-apply': async (payload) => applyPromoActions((payload && payload.results) || null, payload || {}),
 
     /**
@@ -2344,8 +2441,21 @@ function createService(store, emit, electron, integrations) {
       // в очередь возврата — только то, что WB принял
       const accepted = (res.details || []).filter((d) => !d.error && d.status !== 4).map((d) => String(d.nmID));
       const patch = {};
-      (accepted.length ? accepted : results.map((r) => String(r.nmID))).forEach((k) => { if (exits[k]) patch[k] = exits[k]; });
+      const acceptedNms = accepted.length ? accepted : results.map((r) => String(r.nmID));
+      acceptedNms.forEach((k) => { if (exits[k]) patch[k] = exits[k]; });
       if (Object.keys(patch).length) store.savePromoExits(patch);
+      store.appendPromoJournal(results.filter((r) => Object.prototype.hasOwnProperty.call(patch, String(r.nmID))).map((r) => ({
+        at: now,
+        nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
+        action: 'exit',
+        promoId: (r.promoChosen && r.promoChosen.promoIds || [])[0] || null,
+        promoName: ((r.promoChosen && r.promoChosen.promoNames) || []).join(', '),
+        priceBefore: U2(r.current && r.current.sellerPrice),
+        priceAfter: U2(r.proposed && r.proposed.sellerPrice),
+        reason: (r.promoChosen && r.promoChosen.reason) || 'Ручной выход из акции',
+        source: 'promo-calendar-exit',
+        ok: true
+      })));
 
       cache.goods = null;
       promoCache.at = 0;
@@ -2406,7 +2516,14 @@ function createService(store, emit, electron, integrations) {
 
     'facts:get': async () => {
       const d = store.loadFactCosts();
-      return Object.assign({ count: Object.keys(d.items || {}).length }, d);
+      const meta = Object.assign({}, d.meta || {});
+      // Долгая ежедневная история используется главным процессом и не должна
+      // сериализоваться целиком в renderer при каждом обновлении состояния.
+      delete meta.byItemDay;
+      delete meta.coveredDates;
+      delete meta.coverageRanges;
+      meta.analyticsDailyDates = Array.isArray((d.meta || {}).coveredDates) ? d.meta.coveredDates.length : 0;
+      return { count: Object.keys(d.items || {}).length, items: d.items || {}, meta };
     },
 
     'facts:clear': async () => {
@@ -3112,6 +3229,8 @@ function createService(store, emit, electron, integrations) {
       });
       return;
     }
+    const priorStockMap = cache.stocks || (store.loadStocks() || {}).items || {};
+    const priorStockNms = Object.keys(priorStockMap);
     cache.stocks = aggregated;
     cache.stocksAt = Date.now();
     const meta = {
@@ -3122,11 +3241,21 @@ function createService(store, emit, electron, integrations) {
       rows: rows.length,
       pages: Number(res && res.pages) || 1,
       items: Object.keys(aggregated).length,
+      complete: res && res.complete !== undefined ? !!res.complete
+        : (Number(res && res.total) > 0 ? rows.length >= Number(res.total) : false),
       at,
       updatedAt: at
     };
     cache.stocksMeta = meta;
     store.saveStocks(aggregated, meta);
+    if (rows.length && meta.complete) {
+      const candidates = new Set(priorStockNms.map(String));
+      Object.keys(aggregated).forEach((nm) => candidates.add(String(nm)));
+      ((cache.goods && cache.goods.items) || []).forEach((g) => { if (Number(g.nmID) > 0) candidates.add(String(g.nmID)); });
+      (store.loadPromoJournal() || []).forEach((e) => { if (Number(e.nmID) > 0) candidates.add(String(e.nmID)); });
+      const zeroNms = Array.from(candidates).filter((nm) => !(Number(aggregated[nm] && aggregated[nm].total) > 0));
+      store.appendStockSnapshot({ at, source: meta.source, complete: true, zeroNms });
+    }
     notifyLowStock(aggregated);
   }
 
@@ -3887,6 +4016,7 @@ function createService(store, emit, electron, integrations) {
     const agg = aggregateFactCosts(rows, effDays);
     const items = agg.items;
     const byDay = agg.byDay || {};
+    const byItemDay = agg.byItemDay || {};
     const meta = {
       days: effDays,
       requestedDays: days,
@@ -3903,6 +4033,7 @@ function createService(store, emit, electron, integrations) {
       source: res.source || 'finance-api',
       pages: res.pages || 1,
       items: Object.keys(items).length,
+      reportTruncated: !!(res && res.truncated),
       loadedAt: new Date().toISOString(),
       byDay
     };
@@ -3917,11 +4048,54 @@ function createService(store, emit, electron, integrations) {
       return { ok: true, factItems: items, factMeta: meta, saveSkipped: true };
     }
 
+    // Сохраняем дневные факты по товару отдельно от последнего агрегата расходов.
+    // Повторная загрузка диапазона заменяет эти даты (а не суммирует их повторно),
+    // чтобы пересборка/коррекция отчёта WB не удваивала продажи.
+    const oldFactMeta = (previous && previous.meta) || {};
+    const freshRanges = reportsUsed && reportsUsed.length
+      ? reportsUsed.map((r) => ({ dateFrom: iso10(r.dateFrom), dateTo: iso10(r.dateTo), period: r.period || usedPeriod }))
+      : [{ dateFrom: iso10(range.dateFrom), dateTo: iso10(range.dateTo), period: usedPeriod }];
+    const cutoffDate = new Date(Date.now() - 730 * 86400000).toISOString().slice(0, 10);
+    const replacementDates = new Set();
+    const coverageToday = new Date().toISOString().slice(0, 10);
+    // Достигнут лимит страниц Finance: полученные строки пригодны для текущего
+    // ответа, но нельзя считать отсутствующие даты подтверждённым нулём или заменять
+    // ими историю последнего полного отчёта.
+    if (!meta.reportTruncated) {
+      freshRanges.forEach((r) => {
+        if (!r.dateFrom || !r.dateTo || r.dateTo < r.dateFrom) return;
+        const from = r.dateFrom < cutoffDate ? cutoffDate : r.dateFrom;
+        const to = r.dateTo > coverageToday ? coverageToday : r.dateTo;
+        let guard = 0;
+        for (let d = from; d <= to && guard++ < 731; d = new Date(Date.parse(d + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10)) {
+          replacementDates.add(d);
+        }
+      });
+    }
+    const byItemDayHistory = Object.assign({}, oldFactMeta.byItemDay || {});
+    replacementDates.forEach((d) => { delete byItemDayHistory[d]; });
+    Object.keys(byItemDay).forEach((d) => {
+      if (d >= cutoffDate && replacementDates.has(d)) byItemDayHistory[d] = byItemDay[d];
+    });
+    const coveredDateSet = new Set((Array.isArray(oldFactMeta.coveredDates) ? oldFactMeta.coveredDates : [])
+      .map(iso10).filter((d) => d && d >= cutoffDate));
+    replacementDates.forEach((d) => coveredDateSet.add(d));
+    meta.byItemDay = byItemDayHistory;
+    meta.coveredDates = Array.from(coveredDateSet).sort();
+    meta.coverageRanges = (Array.isArray(oldFactMeta.coverageRanges) ? oldFactMeta.coverageRanges : [])
+      .concat(freshRanges.map((r) => Object.assign({}, r, { loadedAt: meta.loadedAt, complete: !meta.reportTruncated })))
+      .filter((r) => iso10(r.dateTo) >= cutoffDate).slice(-500);
+
     store.saveFactCosts(items, meta);
     store.saveSettings({ factsLoadedAt: meta.loadedAt, factWindowDays: days, factCostsPeriod: usedPeriod });
     cache.goods = null; cache.goodsAt = 0;   // экономика пересчитается с фактическими расходами
-    notify('facts', Object.assign({ type: 'loaded' }, meta));
-    return Object.assign({ ok: true }, meta);
+    const publicMeta = Object.assign({}, meta);
+    delete publicMeta.byItemDay;
+    delete publicMeta.coveredDates;
+    delete publicMeta.coverageRanges;
+    publicMeta.analyticsDailyDates = meta.coveredDates.length;
+    notify('facts', Object.assign({ type: 'loaded' }, publicMeta));
+    return Object.assign({ ok: true }, publicMeta);
   }
 
   /**
@@ -4003,22 +4177,23 @@ function createService(store, emit, electron, integrations) {
          * НЕЗАКРЫТЫЕ позиции, поэтому без отдельного журнала вкладка «Журнал изменения
          * участия в акциях» пустела сразу после возврата цены.
          */
-        store.appendPromoJournal(exits.map((r) => {
+        store.appendPromoJournal([].concat(...exits.map((r) => {
           const ch = chosenOf(r) || {};
           const sent = exitsToSend.indexOf(r) >= 0;
-          return {
+          const promoIds = (ch.promoIds && ch.promoIds.length) ? ch.promoIds : [null];
+          return promoIds.map((promoId, i) => ({
             nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
             action: 'exit',
-            promoId: (ch.promoIds || [])[0] || null,
-            promoName: (ch.promoNames || []).join(', '),
+            promoId,
+            promoName: (ch.promoNames || [])[i] || (ch.promoNames || [])[0] || (promoId ? String(promoId) : ''),
             priceBefore: U2(r.current && r.current.sellerPrice),
             priceAfter: U2(r.proposed && r.proposed.sellerPrice),
             reason: ch.reason || '',
             source: sent ? 'repricer-promo-exit' : 'repricer-promo-exit-nochange',
             ok: !out.exitFailed.length,
             error: (out.exitFailed[0] || {}).message || ''
-          };
-        }));
+          }));
+        })));
       }
     }
 
@@ -4048,9 +4223,11 @@ function createService(store, emit, electron, integrations) {
 
       // 2) добавляем товары в акцию
       for (const [pid, list] of Object.entries(byPromo)) {
+        const promoMeta = ((pi && pi.promos) || []).find((x) => String(x.id) === String(pid)) || null;
         try {
           await handlers['wb:promo-join']({
             promotionID: Number(pid),
+            _journal: false, // журнал записывается здесь вместе с прогнозом движка
             nomenclatures: list.map((r) => ({
               nmID: r.nmID,
               price: Math.round(r.proposed.basePrice),
@@ -4063,9 +4240,15 @@ function createService(store, emit, electron, integrations) {
             return {
               nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
               action: 'join', promoId: Number(pid),
-              promoName: ((pi && pi.promos) || []).find((x) => String(x.id) === String(pid))
-                ? (((pi && pi.promos) || []).find((x) => String(x.id) === String(pid)) || {}).name || String(pid)
-                : String(pid),
+              promoName: (promoMeta && promoMeta.name) || String(pid),
+              promoStartAt: (promoMeta && promoMeta.startDateTime) || '',
+              promoEndAt: (promoMeta && promoMeta.endDateTime) || '',
+              forecast: {
+                profitMonthNow: r.delta && r.delta.profitMonthNow,
+                profitMonthWithPromo: r.delta && r.delta.profitMonthWithPromo,
+                salesUpliftPct: r.delta && r.delta.salesUpliftPct,
+                breakEvenUpliftPct: r.delta && r.delta.breakEvenUpliftPct
+              },
               priceBefore: U2(r.current && r.current.sellerPrice),
               priceAfter: U2(r.proposed && r.proposed.sellerPrice),
               reason: ch.reason || '',

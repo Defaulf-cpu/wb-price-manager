@@ -10,6 +10,7 @@ const SETTINGS_FILE = 'settings.json';
 const PRICEWATCH_FILE = 'pricewatch.json';
 const COSTS_FILE = 'costs.json';
 const STOCKS_FILE = 'stocks.json';
+const STOCK_HISTORY_FILE = 'stock-history.json';
 const TASKS_FILE = 'tasks.json';
 const SECRETS_FILE = 'secrets.enc';
 const FACTCOSTS_FILE = 'factcosts.json';
@@ -132,6 +133,7 @@ module.exports = {
   PRICEWATCH_FILE,
   COSTS_FILE,
   STOCKS_FILE,
+  STOCK_HISTORY_FILE,
   TASKS_FILE,
   SECRETS_FILE,
   FACTCOSTS_FILE,

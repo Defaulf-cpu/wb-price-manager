@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, REPRICER_FILE, COMPETITORS_FILE,
   ITEMCONFIGS_FILE, PRICES_HISTORY_FILE, REPRICER_RUNS_FILE, FACTCOSTS_FILE,
-  PROMOEXITS_FILE, PROMONOMS_FILE, PRICEWATCH_FILE, STOCKS_FILE,
+  PROMOEXITS_FILE, PROMONOMS_FILE, PRICEWATCH_FILE, STOCKS_FILE, STOCK_HISTORY_FILE,
   PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
   SECRETS_FILE
 } = require('./config');
@@ -30,6 +30,7 @@ const DATASETS = Object.freeze([
   { key: 'promoNoms', file: PROMONOMS_FILE, title: 'Списки товаров акций', shape: 'object' },
   { key: 'priceWatch', file: PRICEWATCH_FILE, title: 'Наблюдения цен витрины', shape: 'object' },
   { key: 'stocks', file: STOCKS_FILE, title: 'Остатки по складам', shape: 'object' },
+  { key: 'stockHistory', file: STOCK_HISTORY_FILE, title: 'История нулевых остатков', shape: 'object' },
   { key: 'priceDrafts', file: PRICEDRAFTS_FILE, title: 'Черновики цен', shape: 'object' },
   { key: 'proposals', file: PROPOSALS_FILE, title: 'Предложение репрайсера', shape: 'object' },
   { key: 'recalcHistory', file: RECALC_HISTORY_FILE, title: 'История пересчёта по товарам', shape: 'object' },

@@ -720,6 +720,7 @@ function createDemoApi(opts) {
         aggregated: require('./wb-client').WBClient.aggregateStocks(stockRows),
         pages: 1,
         total: stockRows.length,
+        complete: true,
         source: 'demo-wb-warehouses'
       };
     },

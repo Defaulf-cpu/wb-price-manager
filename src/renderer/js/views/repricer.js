@@ -29,6 +29,7 @@ Views.repricer = {
         <div class="tab" data-t="costs">Себестоимость</div>
         <div class="tab" data-t="competitors">Конкуренты</div>
         <div class="tab" data-t="promos">Акции</div>
+        <div class="tab" data-t="promo-analytics">Аналитика акций</div>
         <div class="tab" data-t="journal-prices">Журнал изменения цен</div>
         <div class="tab" data-t="journal-promos">Журнал участия в акциях</div>
         <div class="tab" data-t="schedule">Расписание</div>
@@ -97,6 +98,7 @@ Views.repricer = {
       else if (this.tab === 'costs') this.tabCosts(host);
       else if (this.tab === 'competitors') this.tabCompetitors(host);
       else if (this.tab === 'promos') this.tabPromos(host);
+      else if (this.tab === 'promo-analytics') await this.tabPromoAnalytics(host);
       else if (this.tab === 'journal-prices') this.tabJournal(host, 'prices');
       else if (this.tab === 'journal-promos') this.tabJournal(host, 'promos');
       else if (this.tab === 'schedule') await this.tabSchedule(host);
@@ -2573,6 +2575,248 @@ Views.repricer = {
     cal.id = 'pa-calendar';
     host.appendChild(cal);
     Views.promos.mount(cal);
+  },
+
+  /** Аналитика эффекта акций из локального журнала и уже сохранённых отчётов WB. */
+  async tabPromoAnalytics(host) {
+    const savedDays = U.num((S.state.settings || {}).promoAnalyticsDays, 7) || 7;
+    this.promoAnalyticsDays = Math.max(1, Math.min(90, Math.floor(this.promoAnalyticsDays || savedDays)));
+    host.innerHTML = `
+      <div class="card" style="margin-bottom:12px">
+        <div class="spread wrap">
+          <div>
+            <b>Фактический эффект участия в акциях</b>
+            <div class="hint" style="margin-top:4px">Сравниваем N дней до успешного входа и первые N дней участия. По умолчанию N = 7; окно можно настроить от 1 до 90 дней.</div>
+          </div>
+          <div class="row wrap">
+            <label class="row"><span class="hint">Окно N, дней</span><input id="paa-days" type="number" min="1" max="90" step="1" value="${this.promoAnalyticsDays}" style="width:86px" /></label>
+            <button class="btn btn-primary" id="paa-refresh">Пересчитать</button>
+            <button class="btn btn-sm btn-ghost" id="paa-csv">Экспорт CSV</button>
+            <button class="btn btn-sm btn-ghost" id="paa-xlsx">Экспорт XLSX</button>
+          </div>
+        </div>
+        <div class="alert info" style="margin-top:10px">
+          Используются только локальный журнал участия, сохранённые финансовые отчёты и снимки остатков. Эта вкладка не запрашивает «Финансы» или «Статистику» и не расходует их лимит. Без финансового отчёта показываем «—», а не нули.
+        </div>
+      </div>
+      <div id="paa-content">${UI.loading('Считаем аналитику по сохранённым данным…')}</div>
+    `;
+    const $ = (selector) => host.querySelector(selector);
+    $('#paa-refresh').onclick = () => this.loadPromoAnalytics(host, this.promoAnalyticsDays);
+    $('#paa-days').onchange = async (e) => {
+      const raw = Number(e.target.value);
+      const days = Number.isFinite(raw) ? Math.max(1, Math.min(90, Math.floor(raw))) : 7;
+      this.promoAnalyticsDays = days;
+      e.target.value = String(days);
+      try {
+        S.state.settings = await API.invoke('settings:save', { promoAnalyticsDays: days });
+      } catch (err) {
+        App.toast('Не удалось сохранить окно аналитики: ' + err.message, 'warn', 6000);
+      }
+      await this.loadPromoAnalytics(host, days);
+    };
+    $('#paa-csv').onclick = () => this.exportPromoAnalytics('csv');
+    $('#paa-xlsx').onclick = (e) => this.exportPromoAnalytics('xlsx', e.target);
+    await this.loadPromoAnalytics(host, this.promoAnalyticsDays);
+  },
+
+  async loadPromoAnalytics(host, days) {
+    const content = host.querySelector('#paa-content');
+    if (!content) return;
+    content.innerHTML = UI.loading('Считаем по журналу и кэшированным отчётам…');
+    try {
+      this.promoAnalyticsData = await API.invoke('repricer:promo-analytics', { days });
+      const data = this.promoAnalyticsData || {};
+      const groupKeys = (data.promos || []).map((p) => p.key);
+      if (!groupKeys.includes(this.promoAnalyticsSelected)) this.promoAnalyticsSelected = groupKeys[0] || null;
+      this.drawPromoAnalytics(host);
+    } catch (err) {
+      content.innerHTML = `<div class="card"><div class="alert danger">${U.esc(err.message || String(err))}</div></div>`;
+    }
+  },
+
+  drawPromoAnalytics(host) {
+    const data = this.promoAnalyticsData || {};
+    const content = host.querySelector('#paa-content');
+    if (!content) return;
+    const summary = data.summary || {};
+    const money = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : U.money(Number(v), 2);
+    const quantity = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : U.fmt(Number(v), 1);
+    const percent = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : U.pct(Number(v), 1);
+    const signedPercent = (v) => v === null || v === undefined || !Number.isFinite(Number(v)) ? '—' : U.signed(Number(v), 1) + '%';
+    const metricsCell = (period, field, format) => {
+      const m = period && period.metrics;
+      if (!m) return '—';
+      const prefix = period.status === 'partial' ? '≈ ' : '';
+      return prefix + format(m[field]);
+    };
+    const effectInfo = (item) => {
+      if (item.stockout) return ['Обрезано нулевым остатком' + (item.stockoutDate ? ' · ' + item.stockoutDate : ''), 'warn'];
+      if (item.effect === 'positive') return ['Положительный эффект', 'ok'];
+      if (item.effect === 'negative') return ['Эффект отрицательный', 'danger'];
+      if (item.effect === 'neutral') return ['Без изменения', ''];
+      if (item.costKnown === false) return ['Себестоимость не задана · прибыль не оценена', 'warn'];
+      if (item.stockStatus === 'unknown') return ['Ожидает данных · остаток не проверен', 'warn'];
+      return ['Данных пока недостаточно', ''];
+    };
+    const expensesTitle = (period) => {
+      const e = period && period.metrics && period.metrics.expenses;
+      if (!e) return 'Нет фактических данных';
+      const labels = {
+        commission: 'Комиссия WB', logistics: 'Логистика', storage: 'Хранение',
+        acceptance: 'Приёмка', acquiring: 'Эквайринг', penalties: 'Штрафы',
+        deductions: 'Удержания', cogs: 'Себестоимость', packaging: 'Упаковка',
+        advertising: 'Реклама', tax: 'Налог'
+      };
+      return Object.keys(labels).map((k) => labels[k] + ': ' + money(e[k])).join('\n');
+    };
+    const statusText = (period) => {
+      if (!period) return '';
+      if (period.status === 'complete') return period.from + ' → ' + period.to + ' · ' + period.coveredDays + '/' + period.days + ' дн.';
+      if (period.status === 'partial') return period.from + ' → ' + period.to + ' · покрыто ' + period.coveredDays + '/' + period.days + ' дн.';
+      if (period.status === 'no-report') return period.from + ' → ' + period.to + ' · отчёта нет';
+      return 'окно ещё не началось';
+    };
+
+    let notice = '';
+    if (data.dataStatus === 'no-report' || data.dataStatus === 'daily-data-unavailable' || data.dataStatus === 'incomplete-report') {
+      notice = `<div class="alert warn" style="margin-bottom:12px"><b>${U.esc(data.message || 'Финансовых данных для аналитики пока нет.')}</b></div>`;
+    } else if (data.message) {
+      notice = `<div class="alert info" style="margin-bottom:12px">${U.esc(data.message)}</div>`;
+    }
+
+    const summaryHtml = `
+      <div class="row wrap" style="gap:8px;margin-bottom:12px">
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Товаров/эпизодов</span><br><b>${U.fmt(summary.itemCount || 0)}</b></div>
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Оценено</span><br><b>${U.fmt(summary.effectEvaluatedCount || 0)}</b></div>
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Положительный эффект</span><br><b class="pos">${U.fmt(summary.positiveCount || 0)}</b></div>
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Отрицательный</span><br><b class="neg">${U.fmt(summary.negativeCount || 0)}</b></div>
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Исключено: stockout</span><br><b class="warnc">${U.fmt(summary.stockoutCount || 0)}</b></div>
+        <div class="card" style="padding:10px 14px"><span class="tiny muted">Ожидают данных / себестоимости</span><br><b>${U.fmt(summary.pendingCount || 0)}</b></div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-head"><h2>Итоги по акциям</h2><span class="hint">В агрегаты входят товары с полными окнами, заданной себестоимостью и без подтверждённого нулевого остатка.</span></div>
+        ${(data.promos || []).length ? `<div class="tablewrap"><table class="grid-table"><thead><tr>
+          <th>Акция / товаров</th><th>Выводы</th><th class="num">Продажи до → в акции</th><th class="num">Выручка до → в акции</th><th class="num">Прибыль до → в акции</th><th class="num">Δ прибыли факт/мес</th>
+        </tr></thead><tbody>${data.promos.map((p) => {
+          const selected = p.key === this.promoAnalyticsSelected;
+          const title = `${p.positiveCount || 0} положит. · ${p.negativeCount || 0} отрицат. · ${p.stockoutCount || 0} stockout · ${p.pendingCount || 0} ожидают`;
+          return `<tr class="${selected ? 'selected' : ''}">
+            <td><button class="btn btn-sm ${selected ? 'btn-primary' : 'btn-ghost'}" data-paa-promo="${U.esc(p.key)}">${U.esc(p.promoName || ('Акция ' + (p.promoId || '')))}</button><div class="tiny muted">${p.itemCount || 0} эпизодов · оценено ${p.eligibleCount || 0}</div></td>
+            <td title="${U.esc(title)}">${UI.badge('+' + (p.positiveCount || 0), 'ok')} ${UI.badge('−' + (p.negativeCount || 0), 'danger')} ${UI.badge('stockout ' + (p.stockoutCount || 0), 'warn')}</td>
+            <td class="num">${quantity(p.salesBefore)} → ${quantity(p.salesDuring)}</td>
+            <td class="num">${money(p.revenueBefore)} → ${money(p.revenueDuring)}</td>
+            <td class="num">${money(p.profitBefore)} → ${money(p.profitDuring)}</td>
+            <td class="num ${Number(p.actualProfitGainMonthly) > 0 ? 'pos' : (Number(p.actualProfitGainMonthly) < 0 ? 'neg' : '')}">${!p.effectEvaluatedCount ? '—' : U.signed(Number(p.actualProfitGainMonthly), 2) + ' ₽'}</td>
+          </tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="muted" style="padding:16px">В журнале пока нет успешных входов в акции.</div>'}
+      </div>
+    `;
+
+    const selectedPromo = (data.promos || []).find((p) => p.key === this.promoAnalyticsSelected) || null;
+    const detailItems = selectedPromo ? selectedPromo.items : [];
+    const itemRows = detailItems.map((item) => {
+      const [effectLabel, effectKind] = effectInfo(item);
+      const comparison = item.comparison || {};
+      const before = item.before || {};
+      const during = item.during || {};
+      const beforeMetrics = before.metrics || null;
+      const duringMetrics = during.metrics || null;
+      const expenseSummary = (period) => {
+        const m = period && period.metrics;
+        return m ? `<span title="${U.esc(expensesTitle(period))}">${money(m.expenses && m.expenses.total)}</span>` : '—';
+      };
+      const growth = `прогноз ${percent(item.forecast && item.forecast.salesUpliftPct)}<br>факт ${percent(comparison.actualSalesUpliftPct)}<br><b>расх. ${signedPercent(comparison.salesDeviationPct)}</b>`;
+      const profitForecast = `прогноз ${money(comparison.forecastProfitMonthDuring)}<br>факт ${money(comparison.actualProfitMonthDuring)}<br><b>расх. ${signedPercent(comparison.profitForecastDeviationPct)}</b>`;
+      const breakEven = item.forecast && item.forecast.breakEvenUpliftPct !== null
+        ? `<div class="tiny muted">порог безубыточности ${percent(item.forecast.breakEvenUpliftPct)}${comparison.breakEvenMet === null ? '' : (comparison.breakEvenMet ? ' · достигнут' : ' · не достигнут')}</div>` : '';
+      const fullExpenses = `<details><summary class="tiny">Состав</summary><div class="tiny" style="white-space:pre-line">До участия: ${U.esc(expensesTitle(before))}<br><br>В акции: ${U.esc(expensesTitle(during))}</div></details>`;
+      const stockLabel = item.stockStatus === 'unknown' ? 'Исторических снимков нет' : (item.stockout ? 'Нулевой остаток замечен ' + item.stockoutDate : 'Нулевой остаток не замечен (' + item.stockObservedDays + ' дн. со снимком)');
+      return `<tr>
+        <td><b>${U.esc(item.vendorCode || String(item.nmID))}</b><div class="tiny muted">${U.esc(item.title || '')} · nmID ${item.nmID}</div><div class="tiny muted">${U.esc(item.promoName || '')} · вход ${U.esc(item.joinedDay || '')}</div></td>
+        <td>${UI.badge(effectLabel, effectKind)}<div class="tiny muted">До: ${U.esc(statusText(before))}<br>В акции: ${U.esc(statusText(during))}<br>${U.esc(stockLabel)}</div></td>
+        <td class="num">${metricsCell(before, 'salesQty', quantity)}<div class="tiny muted">возвраты ${metricsCell(before, 'returnsQty', quantity)}<br>выручка ${metricsCell(before, 'revenue', money)}<br>прибыль ${metricsCell(before, 'profit', money)}<br>СПП ${beforeMetrics ? percent(beforeMetrics.sppPct) : '—'}</div></td>
+        <td class="num">${metricsCell(during, 'salesQty', quantity)}<div class="tiny muted">возвраты ${metricsCell(during, 'returnsQty', quantity)}<br>выручка ${metricsCell(during, 'revenue', money)}<br>прибыль ${metricsCell(during, 'profit', money)}<br>СПП ${duringMetrics ? percent(duringMetrics.sppPct) : '—'}</div></td>
+        <td class="num">${expenseSummary(before)} → ${expenseSummary(during)}<div class="tiny muted">общие расходы до / в акции</div>${fullExpenses}</td>
+        <td class="num ${Number(comparison.actualProfitGainMonthly) > 0 ? 'pos' : (Number(comparison.actualProfitGainMonthly) < 0 ? 'neg' : '')}">${comparison.actualProfitGainMonthly === null ? '—' : money(comparison.actualProfitGainMonthly)}<div class="tiny muted">факт Δ прибыли, ₽/мес</div></td>
+        <td class="tiny">${growth}${breakEven}</td>
+        <td class="tiny">${profitForecast}<div class="tiny muted">расхождение = (факт − прогноз) / |прогноз| × 100%</div></td>
+      </tr>`;
+    }).join('');
+
+    const detailHtml = selectedPromo
+      ? `<div class="card"><div class="card-head"><h2>Товары: ${U.esc(selectedPromo.promoName || '')}</h2><span class="hint">Значения окон — суммы факта WB. В неполных окнах стоит «≈»; они не входят в итоги.</span></div>
+          <div class="tablewrap"><table class="grid-table"><thead><tr>
+            <th>Товар / акция</th><th>Статус и покрытие окон</th><th class="num">N дней до входа</th><th class="num">N дней участия</th><th class="num">Расходы</th><th class="num">Изменение прибыли</th><th>Рост продаж: прогноз / факт / расх.</th><th>Прибыль акции/мес: прогноз / факт / расх.</th>
+          </tr></thead><tbody>${itemRows || '<tr><td colspan="8" class="muted">Нет товаров для детализации.</td></tr>'}</tbody></table></div>
+        </div>`
+      : '<div class="card muted">Выберите акцию в таблице выше, чтобы раскрыть товары.</div>';
+    content.innerHTML = notice + summaryHtml + detailHtml;
+    content.querySelectorAll('[data-paa-promo]').forEach((button) => {
+      button.onclick = () => {
+        this.promoAnalyticsSelected = button.dataset.paaPromo;
+        this.drawPromoAnalytics(host);
+      };
+    });
+  },
+
+  promoAnalyticsExportRows(data) {
+    const rows = [];
+    (data && data.items || []).forEach((item) => {
+      const before = item.before && item.before.metrics || {};
+      const during = item.during && item.during.metrics || {};
+      const eb = before.expenses || {};
+      const ed = during.expenses || {};
+      const c = item.comparison || {};
+      const f = item.forecast || {};
+      rows.push({
+        'Акция': item.promoName || '', 'ID акции': item.promoId || '', 'nmID': item.nmID,
+        'Артикул': item.vendorCode || '', 'Название': item.title || '', 'Вход': item.joinedAt || '',
+        'Окно до': (item.before && item.before.from || '') + ' → ' + (item.before && item.before.to || ''),
+        'Продажи до': before.salesQty, 'Выручка до, ₽': before.revenue, 'Прибыль до, ₽': before.profit, 'СПП до, %': before.sppPct,
+        'Расходы WB до, ₽': eb.wbTotal, 'Себестоимость/прочие до, ₽': eb.total === undefined ? null : eb.total - (eb.wbTotal || 0),
+        'Окно акции': (item.during && item.during.from || '') + ' → ' + (item.during && item.during.to || ''),
+        'Продажи в акции': during.salesQty, 'Выручка в акции, ₽': during.revenue, 'Прибыль в акции, ₽': during.profit, 'СПП в акции, %': during.sppPct,
+        'Расходы WB в акции, ₽': ed.wbTotal, 'Себестоимость/прочие в акции, ₽': ed.total === undefined ? null : ed.total - (ed.wbTotal || 0),
+        'Факт Δ прибыли, ₽/мес': c.actualProfitGainMonthly,
+        'Прогноз прироста продаж, %': f.salesUpliftPct, 'Факт прироста продаж, %': c.actualSalesUpliftPct,
+        'Расхождение продаж, %': c.salesDeviationPct, 'Порог безубыточности, %': f.breakEvenUpliftPct,
+        'Прогноз прибыли в акции, ₽/мес': f.profitMonthWithPromo, 'Факт прибыли в акции, ₽/мес': c.actualProfitMonthDuring,
+        'Расхождение прибыли, %': c.profitForecastDeviationPct,
+        'Прогноз прибыли без акции, ₽/мес': f.profitMonthNow, 'Расхождение прироста прибыли, %': c.profitGainDeviationPct,
+        'Эффект': item.stockout ? 'обрезан нулевым остатком' : item.effect,
+        'Нулевой остаток': item.stockout ? 'да' : 'нет/не наблюдался',
+        'Дата stockout': item.stockoutDate || '', 'Окно завершено': c.periodComplete ? 'да' : 'нет',
+        'Полные окна с отчётом': item.windowsComplete ? 'да' : 'нет',
+        'Себестоимость задана': item.costKnown ? 'да' : 'нет'
+      });
+    });
+    return rows;
+  },
+
+  async exportPromoAnalytics(format, button) {
+    const data = this.promoAnalyticsData;
+    const objects = this.promoAnalyticsExportRows(data);
+    if (!objects.length) return App.toast('В журнале нет строк аналитики для экспорта', 'warn');
+    const headers = Object.keys(objects[0]);
+    const rows = objects.map((x) => headers.map((h) => x[h] === undefined ? '' : x[h]));
+    const fileBase = 'promo-analytics-' + new Date().toISOString().slice(0, 10);
+    if (format === 'csv') {
+      await API.exportCsv(fileBase + '.csv', U.toCsv(objects, headers));
+      App.toast('Аналитика акций выгружена в CSV', 'ok');
+      return;
+    }
+    const btn = button;
+    if (btn) { btn.disabled = true; btn.dataset.was = btn.textContent; btn.textContent = 'Собираем…'; }
+    try {
+      const res = await API.invoke('xlsx:build', { rows, headers, sheetName: 'Аналитика акций', fileName: fileBase + '.xlsx' });
+      U.downloadBase64(res.fileName, res.base64);
+      App.toast('Аналитика акций выгружена в Excel: ' + U.fmt(rows.length) + ' товаров', 'ok', 6000);
+    } catch (err) {
+      App.toast(err.message, 'err', 9000);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = btn.dataset.was || 'Экспорт XLSX'; }
+    }
   },
 
   drawPromoSummary() {

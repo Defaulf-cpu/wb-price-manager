@@ -394,12 +394,13 @@ async function run() {
   window.App.go('repricer');
   await wait(800);
   const rpTabs = doc.querySelectorAll('#rp-tabs .tab').length;
-  check('репрайсер: вкладки построены', rpTabs === 9, rpTabs + ' вкладок');
+  check('репрайсер: вкладки построены', rpTabs === 10, rpTabs + ' вкладок');
   check('репрайсер: есть журнал изменения цен',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал изменения цен/.test(t.textContent)));
   check('репрайсер: есть журнал участия в акциях',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал участия в акциях/.test(t.textContent)));
   check('репрайсер: есть вкладка «Акции»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Акции/.test(t.textContent)));
+  check('репрайсер: есть вкладка «Аналитика акций»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Аналитика акций/.test(t.textContent)));
   check('репрайсер: состояние загружено', !!window.Views.repricer.rstate && !!window.Views.repricer.rstate.config);
   check('репрайсер: лимит шага по умолчанию 19%', window.Views.repricer.rstate.config.limits.maxChangePerUpdatePct === 19);
   check('репрайсер: стратегий в движке 9', (window.RP.STRATEGIES || []).length === 9, (window.RP.STRATEGIES || []).length + ' шт');
@@ -478,6 +479,15 @@ async function run() {
       }
     }
   }
+
+  // Аналитика акций должна отрисоваться только на локальных данных.
+  window.Views.repricer.tab = 'promo-analytics';
+  await window.Views.repricer.draw();
+  await wait(250);
+  check('репрайсер: окно N для аналитики акций настраивается', !!doc.querySelector('#paa-days'));
+  check('репрайсер: доступны CSV и XLSX для аналитики акций', !!doc.querySelector('#paa-csv') && !!doc.querySelector('#paa-xlsx'));
+  check('репрайсер: аналитика получила ответ от локального кэша', !!window.Views.repricer.promoAnalyticsData &&
+    window.Views.repricer.promoAnalyticsData.ok === true);
 
   // история изменения цен записана
   const hist = await service.handlers['repricer:history']();
@@ -2271,9 +2281,9 @@ async function run() {
   window.App.go('repricer');
   await wait(900);
   const eTabs = Array.from(doc.querySelectorAll('#rp-tabs .tab')).map((t) => t.textContent.trim());
-  check('Е: в репрайсере девять вложенных вкладок', eTabs.length === 9, eTabs.join(' | '));
+  check('Е: в репрайсере десять вложенных вкладок', eTabs.length === 10, eTabs.join(' | '));
   check('Е: порядок и названия вкладок как в задании',
-    eTabs.join('|') === 'Товары|Массовые правила|Себестоимость|Конкуренты|Акции|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
+    eTabs.join('|') === 'Товары|Массовые правила|Себестоимость|Конкуренты|Акции|Аналитика акций|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
     eTabs.join('|'));
   check('Е: отдельных вкладок «Параметры товаров» и «История запусков» больше нет',
     !eTabs.some((t) => /Параметры товаров|История запусков/i.test(t)));

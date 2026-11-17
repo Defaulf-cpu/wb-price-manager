@@ -203,6 +203,7 @@ function normalizeReportRow(r) {
     deduction: n('deduction'),
     penalty: n('penalty'),
     spp: n('spp', 'ppvzSppPrc', 'ppvz_spp_prc'),
+    sppKnown: ['spp', 'ppvzSppPrc', 'ppvz_spp_prc'].some((k) => r[k] !== undefined && r[k] !== null && r[k] !== ''),
     rrdId: n('rrdId', 'rrd_id'),
     reportId: n('reportId', 'realizationreport_id', 'realizationReportId')
   };
@@ -1159,7 +1160,7 @@ class WBClient {
    * (отключён WB 15.07.2026, но в части кабинетов ещё отвечает — пробуем его при 404).
    *
    * @param {{dateFrom:string,dateTo:string,period?:'daily'|'weekly',fields?:string[],maxPages?:number,onProgress?:Function}} opts
-   * @returns {Promise<{rows:Array,report:object|null,source:string,pages:number}>}
+   * @returns {Promise<{rows:Array,report:object|null,source:string,pages:number,truncated:boolean}>}
    */
   async getSalesReportDetailed(opts) {
     const {
@@ -1173,6 +1174,7 @@ class WBClient {
     let rrdId = 0;
     let pages = 0;
     let report = null;
+    let hasMore = false;
 
     try {
       while (pages < maxPages) {
@@ -1188,14 +1190,15 @@ class WBClient {
         const list = Array.isArray(json) ? json : pick(json, ['data', 'rows', 'report'], null);
         const arr = Array.isArray(list) ? list : [];
         if (json && !Array.isArray(json)) report = json;
-        if (!arr.length) break;
+        if (!arr.length) { hasMore = false; break; }
         for (const r of arr) rows.push(normalizeReportRow(r));
         const lastId = Number(arr[arr.length - 1].rrdId || arr[arr.length - 1].rrd_id || 0);
         if (onProgress) onProgress({ pages, rows: rows.length, rrdId: lastId });
-        if (!lastId || lastId === rrdId) break;
+        if (!lastId || lastId === rrdId) { hasMore = false; break; }
         rrdId = lastId;
+        hasMore = true;
       }
-      return { rows, report, source: 'finance-api', pages };
+      return { rows, report, source: 'finance-api', pages, truncated: pages >= maxPages && hasMore };
     } catch (e) {
       const status = Number(e && e.status);
       if (status === 404 || status === 405 || (e && e.code === '404')) {
@@ -1216,20 +1219,22 @@ class WBClient {
     const rows = [];
     let rrdid = 0;
     let pages = 0;
+    let hasMore = false;
     while (pages < maxPages) {
       pages++;
       const json = await this.request('statistics', 'GET', '/api/v5/supplier/reportDetailByPeriod', {
         query: { dateFrom, dateTo, period, rrdid, limit: 100000, timezone: 'Europe/Moscow' }
       });
       const arr = Array.isArray(json) ? json : (pick(json, ['data', 'rrd'], null) || []);
-      if (!Array.isArray(arr) || !arr.length) break;
+      if (!Array.isArray(arr) || !arr.length) { hasMore = false; break; }
       for (const r of arr) rows.push(normalizeReportRow(r));
       const lastId = Number(arr[arr.length - 1].rrd_id || arr[arr.length - 1].rrdId || 0);
       if (onProgress) onProgress({ pages, rows: rows.length, rrdId: lastId });
-      if (!lastId || lastId === rrdid) break;
+      if (!lastId || lastId === rrdid) { hasMore = false; break; }
       rrdid = lastId;
+      hasMore = true;
     }
-    return { rows, report: null, source: 'reportDetailByPeriod', pages };
+    return { rows, report: null, source: 'reportDetailByPeriod', pages, truncated: pages >= maxPages && hasMore };
   }
 
   // ───────────────────────── Контент ─────────────────────────
@@ -1401,6 +1406,7 @@ class WBClient {
     let offset = 0;
     let pages = 0;
     let total = 0;
+    let exhausted = false;
     while (pages < maxPages) {
       pages++;
       const json = await this.request('analytics', 'POST', '/api/analytics/v1/stocks-report/wb-warehouses', {
@@ -1412,11 +1418,12 @@ class WBClient {
       const declared = Number(pick(json, ['total', 'totalRows', 'total_rows'], 0) || 0);
       if (declared > 0) total = declared;
       list.forEach((r) => rows.push(WBClient.normalizeStockRow(r)));
-      if (!list.length) break;
+      if (!list.length) { exhausted = true; break; }
       offset += list.length;
-      if (total > 0 && offset >= total) break;
+      if (total > 0 && offset >= total) { exhausted = true; break; }
     }
-    return { rows, aggregated: WBClient.aggregateStocks(rows), pages, total: total || rows.length, source: 'wb-warehouses' };
+    const complete = total > 0 ? rows.length >= total : exhausted;
+    return { rows, aggregated: WBClient.aggregateStocks(rows), pages, total: total || rows.length, complete, source: 'wb-warehouses' };
   }
 
   /**
@@ -1465,7 +1472,7 @@ class WBClient {
       retries: 0, asText: true
     });
     const rows = WBClient.parseRemainsPayload(raw).map((r) => WBClient.normalizeStockRow(r));
-    return { rows, aggregated: WBClient.aggregateStocks(rows), pages: 1, total: rows.length, source: 'warehouse-remains', taskId };
+    return { rows, aggregated: WBClient.aggregateStocks(rows), pages: 1, total: rows.length, complete: true, source: 'warehouse-remains', taskId };
   }
 
   /**
