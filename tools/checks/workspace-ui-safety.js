@@ -63,7 +63,7 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     w.App.go('economics'); await until(() => doc.querySelector('#ec-tabs'));
     check('UI: экономика и калькулятор остались внутри репрайсера', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'economics' && !!doc.querySelector('#ec-tabs'));
     w.App.go('calculator'); await until(() => doc.querySelector('#calc-out'));
-    check('UI: отдельный калькулятор показывает категорию, ROI и цену по карте WB', w.S.state.view === 'calculator' && !!doc.querySelector('#calc-category') && /ROI/.test(doc.querySelector('#calc-out').textContent) && /Цена по карте WB/.test(doc.querySelector('#calc-out').textContent));
+    check('UI: отдельный калькулятор показывает категорию, ROI и цену для покупателя', w.S.state.view === 'calculator' && !!doc.querySelector('#calc-category') && /ROI/.test(doc.querySelector('#calc-out').textContent) && /Цена для покупателя/.test(doc.querySelector('#calc-out').textContent));
     w.App.go('costs'); await until(() => doc.querySelector('#c-grid tbody tr'));
     check('UI: себестоимость осталась внутри репрайсера', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'costs' && !!doc.querySelector('#c-grid'));
     w.App.go('repricer'); await until(() => doc.querySelector('#rp-grid tbody tr[data-row-id]'));

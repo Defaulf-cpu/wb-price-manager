@@ -29,14 +29,37 @@ if not defined VERSION (
 )
 
 echo.
-echo  Запускаю полный набор проверок перед сборкой...
-call npm test
+if /i "%~1"=="skip" (
+  echo  Проверки пропущены по аргументу skip.
+goto :checks_done
+)
+if /i "%~1"=="full" (
+  echo  Запускаю ПОЛНЫЙ набор проверок перед сборкой ^(аргумент full^)...
+  call npm test
+  if errorlevel 1 (
+    echo.
+    echo  [ОШИБКА] Полные проверки не пройдены — сборка остановлена.
+    pause
+    exit /b 1
+  )
+goto :checks_done
+)
+echo  Быстрые проверки перед сборкой ^(полные — аргумент full, без проверок — skip^)...
+call node tools/checks/repo-check.js --strict
 if errorlevel 1 (
   echo.
-  echo  [ОШИБКА] Проверки не пройдены — сборка остановлена.
+  echo  [ОШИБКА] Быстрая проверка целостности не пройдена — сборка остановлена.
   pause
   exit /b 1
 )
+call node tools/version.js
+if errorlevel 1 (
+  echo.
+  echo  [ОШИБКА] Проверка версии не пройдена — сборка остановлена.
+  pause
+  exit /b 1
+)
+:checks_done
 
 echo.
 echo  Собираю установщик ^(NSIS^) и портативную версию...

@@ -18,7 +18,7 @@ Views.calculator = {
         basePrice: U.num(first.basePrice, 2490), discount: U.num(first.discount, 35),
         costPrice: U.num(first.costPrice, 620), volume: U.num(first.volume, 1),
         spp: U.num(first.spp, U.num(s.sppDefault)), wallet: U.num(s.walletPct || (s.priceEdit || {}).walletPct || 0),
-        qtyDay: 1, targetMargin: U.num(s.targetMarginPct, 20), targetProfit: 0,
+        qtyDay: 1, targetMargin: U.num(s.targetMarginPct, 20), targetProfit: 0, shelfPrice: 0,
         buyoutPct: 90, returnLogisticsRub: 50, defectPct: 1,
         repackReturns: false, purchaseWithVat: false, useProfitTax: false
       };
@@ -57,13 +57,14 @@ Views.calculator = {
           <label class="field">Прочие расходы, % от цены до СПП<input type="number" class="num" id="calc-other-pct" min="0" max="99" step="0.01" value="0"></label>
           <label class="field">Прочие расходы, ₽/шт<input type="number" class="num" id="calc-other-rub" min="0" step="0.01" value="0"></label>
           <label class="field">СПП, %<input type="number" class="num" id="calc-spp" min="0" max="100" step="0.1" value="${d.spp}"></label>
-          <label class="field">Скидка карты WB / кошелька, %<input type="number" class="num" id="calc-wallet" min="0" max="100" step="0.1" value="${d.wallet}"></label>
+          <label class="field">Желаемая цена на полке, ₽<input type="number" class="num" id="calc-shelf" min="0" step="0.01" value="${d.shelfPrice || ''}" placeholder="0 — считать от базовой цены"></label>
           <label class="checkline"><input type="checkbox" id="calc-purchase-vat" ${d.purchaseWithVat ? 'checked' : ''}> Закупка с НДС (для вычета в ОСНО)</label>
           <label class="checkline"><input type="checkbox" id="calc-profit-tax" ${d.useProfitTax ? 'checked' : ''}> Учитывать налог на прибыль 25% (ОСНО)</label>
           <label class="field">Продажи, шт/день<input type="number" class="num" id="calc-qty" min="0" step="0.1" value="${d.qtyDay}"></label>
           <label class="field">Целевая маржа, %<input type="number" class="num" id="calc-target" min="-100" max="99" step="0.1" value="${d.targetMargin}"></label>
           <label class="field">Целевая прибыль, ₽/шт<input type="number" class="num" id="calc-target-profit" step="0.01" value="${d.targetProfit}"></label>
         </div>
+        <p class="hint" style="margin-top:8px">Если «Желаемая цена на полке» больше 0, весь расчёт идёт от неё: калькулятор сам выведет цену продавца до СПП и базовую цену, которую нужно поставить. Если поле пустое или 0 — расчёт идёт от базовой цены.</p>
         <div class="row wrap" style="margin-top:12px"><button class="btn btn-primary" id="calc-solve" type="button">Рассчитать нужную цену</button><button class="btn" id="calc-apply-category" type="button">Подставить категорию заново</button><button class="btn btn-ghost" id="calc-reset" type="button">Сбросить</button></div>
         <div id="calc-reverse-out" style="margin-top:10px"></div>
         <p class="hint" id="calc-source" style="margin-top:8px"></p></div>
@@ -171,13 +172,15 @@ Views.calculator = {
     };
     const draw = () => {
       const p = params();
-      Object.assign(this.data, { category: p.categoryName, basePrice: p.basePrice, discount: p.discountPct, costPrice: p.costPriceRub, volume: p.volumeLiters, spp: p.sppPct, wallet: num('#calc-wallet'), qtyDay: num('#calc-qty'), targetMargin: num('#calc-target'), targetProfit: num('#calc-target-profit'), buyoutPct: p.buyoutPct, returnLogisticsRub: p.returnLogisticsRub, defectPct: p.defectPct, repackReturns: p.repackReturns, purchaseWithVat: p.purchaseWithVat, useProfitTax: p.useProfitTax });
+      Object.assign(this.data, { category: p.categoryName, basePrice: p.basePrice, discount: p.discountPct, costPrice: p.costPriceRub, volume: p.volumeLiters, spp: p.sppPct, shelfPrice: num('#calc-shelf'), qtyDay: num('#calc-qty'), targetMargin: num('#calc-target'), targetProfit: num('#calc-target-profit'), buyoutPct: p.buyoutPct, returnLogisticsRub: p.returnLogisticsRub, defectPct: p.defectPct, repackReturns: p.repackReturns, purchaseWithVat: p.purchaseWithVat, useProfitTax: p.useProfitTax });
       const osno = p.taxMode === 'osno_vat22_credit';
       $('#calc-purchase-vat').disabled = !osno; $('#calc-profit-tax').disabled = !osno;
-      const seller = p.basePrice * (1 - p.discountPct / 100);
+      const shelfSet = num('#calc-shelf');
+      if (shelfSet > 0 && p.sppPct >= 100) { $('#calc-out').innerHTML = '<div class="alert warn">При СПП 100% и выше цену продавца от цены на полке вывести нельзя. Уменьшите СПП.</div>'; return; }
+      let seller, calcBase;
+      if (shelfSet > 0) { seller = shelfSet / (1 - p.sppPct / 100); calcBase = seller / (1 - p.discountPct / 100); }
+      else { calcBase = p.basePrice; seller = calcBase * (1 - p.discountPct / 100); }
       const c = compute(seller, p);
-      const walletPrice = c.sppPrice * (1 - num('#calc-wallet') / 100);
-      const combined = seller > 0 ? (1 - walletPrice / seller) * 100 : 0;
       const roi = p.costPriceRub > 0 ? c.profit / p.costPriceRub * 100 : 0;
       const costReturn = c.totalCosts > 0 ? c.profit / c.totalCosts * 100 : 0;
       const breakEvenPrice = solvePrice(p, (x) => x.profit);
@@ -186,28 +189,45 @@ Views.calculator = {
       const qty = num('#calc-qty');
       const expense = (v) => v < 0 ? '+' + U.money(-v) : '−' + U.money(v);
       const priceLine = (price) => price === null ? 'недостижима при этих ставках' : U.money(price) + (p.discountPct < 100 ? ' · базовая ' + U.money(price / (1 - p.discountPct / 100)) : '');
-      const lines = [
-        ['Базовая цена', U.money(p.basePrice)], ['Скидка продавца', U.pct(p.discountPct) + ' · −' + U.money(p.basePrice - seller)],
-        ['Цена до СПП (для WB)', '<b>' + U.money(seller) + '</b>'], ['Цена с СПП', U.money(c.sppPrice)],
-        ['Цена по карте WB', U.money(walletPrice)], ['СПП + карта суммарно', U.pct(combined)],
-        ['Комиссия WB', '−' + U.money(c.commission)], ['Прямая логистика', '−' + U.money(c.directLogistics)],
-        ['Эффективная логистика на 1 выкуп', '−' + U.money(c.logistics)],
-        ['Хранение', '−' + U.money(c.storage)], ['Приёмка', '−' + U.money(c.accept)], ['Упаковка эффективная', '−' + U.money(c.packaging)],
-        ['Реклама', '−' + U.money(c.ad)], ['Эквайринг (от цены после СПП)', '−' + U.money(c.acquiring)],
-        ['Брак / утери', '−' + U.money(c.defectLoss)], ['Прочие расходы', '−' + U.money(c.other)],
-        ...(osno ? [['Исходящий НДС 22%', '−' + U.money(c.outgoingVat)], ['Входящий НДС к вычету', '+' + U.money(c.inputVat)], ['НДС к уплате', expense(c.vatPayable)], ['Налог на прибыль 25%', '−' + U.money(c.profitTax)]] : []),
-        ['Налог (расчётная нагрузка)', expense(c.tax)], ['Себестоимость', '−' + U.money(c.cogs)], ['Все расходы и себестоимость', '−' + U.money(c.totalCosts)],
-        ['Прибыль до налога', U.money(c.profitBeforeTax)], ['Прибыль с единицы', '<b class="' + U.profitClass(c.profit) + '">' + U.money(c.profit) + '</b>'],
-        ['Маржа', '<b class="' + U.profitClass(c.marginPct) + '">' + U.pct(c.marginPct) + '</b>'],
-        ['ROI по себестоимости', U.pct(roi)], ['Рентабельность всех затрат', U.pct(costReturn)],
-        ['Наценка к себестоимости по цене продажи', U.pct(p.costPriceRub > 0 ? (seller - p.costPriceRub) / p.costPriceRub * 100 : 0)], ['Цена безубыточности (до СПП)', breakEvenPrice === null ? 'недостижима при этих ставках' : U.money(breakEvenPrice)],
-        ['Цена для целевой маржи', priceLine(targetPrice)], ['Цена для целевой прибыли', priceLine(targetProfitPrice)],
-        ['Запас до безубыточности', breakEvenPrice ? U.pct((seller - breakEvenPrice) / seller * 100) : '—'],
-        ['Выручка в день / 30 дней', U.money(seller * qty) + ' / ' + U.money(seller * qty * 30)],
-        ['Прибыль в день / 30 дней', U.money(c.profit * qty) + ' / ' + U.money(c.profit * qty * 30)]
-      ];
-      $('#calc-out').innerHTML = '<div class="calc-lines">' + lines.map(([k, v]) => `<div class="calc-line"><span class="k">${U.esc(k)}</span><span>${v}</span></div>`).join('') + '</div>' +
-        '<p class="hint" style="margin-top:10px">Эффективная логистика = прямая логистика / доля выкупа + обратная логистика × невыкупленные заказы на один выкуп. Эквайринг считается от цены после СПП. СПП и карта WB не вычитаются из выплаты продавца второй раз.</p>';
+      const renderLines = (rows) => '<div class="calc-lines">' + rows.map(([k, v]) => `<div class="calc-line"><span class="k">${U.esc(k)}</span><span>${v}</span></div>`).join('') + '</div>';
+      const section = (title, rows) => '<details class="calc-cat"><summary>' + U.esc(title) + '</summary>' + renderLines(rows) + '</details>';
+      const kpis = '<div class="calc-kpis">' +
+        '<div class="calc-kpi accent"><span>Базовая цена — какую ставить</span><b>' + U.money(calcBase) + '</b></div>' +
+        '<div class="calc-kpi accent"><span>Цена для покупателя</span><b>' + U.money(c.sppPrice) + '</b><small>с СПП и скидкой продавца</small></div>' +
+        '<div class="calc-kpi"><span>Маржа на выходе, ₽</span><b class="' + U.profitClass(c.profit) + '">' + U.money(c.profit) + '</b></div>' +
+        '<div class="calc-kpi"><span>Маржа на выходе, %</span><b class="' + U.profitClass(c.marginPct) + '">' + U.pct(c.marginPct) + '</b></div>' +
+        '<div class="calc-kpi"><span>ROI</span><b class="' + U.profitClass(roi) + '">' + U.pct(roi) + '</b></div>' +
+        '</div>';
+      $('#calc-out').innerHTML = kpis +
+        section('Цены', [
+          ['Режим расчёта', shelfSet > 0 ? 'от желаемой цены на полке' : 'от базовой цены'],
+          ['Желаемая цена на полке', shelfSet > 0 ? U.money(shelfSet) : 'не задана'],
+          ['Базовая цена (расчётная)', U.money(calcBase)], ['Скидка продавца', U.pct(p.discountPct) + ' · −' + U.money(calcBase - seller)],
+          ['Цена до СПП (для WB)', '<b>' + U.money(seller) + '</b>'], ['Цена для покупателя (с СПП)', U.money(c.sppPrice)]
+        ]) +
+        section('Комиссии и удержания WB', [
+          ['Комиссия WB', '−' + U.money(c.commission)], ['Прямая логистика', '−' + U.money(c.directLogistics)],
+          ['Эффективная логистика на 1 выкуп', '−' + U.money(c.logistics)], ['Хранение', '−' + U.money(c.storage)],
+          ['Приёмка', '−' + U.money(c.accept)], ['Упаковка эффективная', '−' + U.money(c.packaging)],
+          ['Эквайринг (от цены после СПП)', '−' + U.money(c.acquiring)]
+        ]) +
+        section('Прочие расходы и налоги', [
+          ['Реклама', '−' + U.money(c.ad)], ['Брак / утери', '−' + U.money(c.defectLoss)], ['Прочие расходы', '−' + U.money(c.other)],
+          ...(osno ? [['Исходящий НДС 22%', '−' + U.money(c.outgoingVat)], ['Входящий НДС к вычету', '+' + U.money(c.inputVat)], ['НДС к уплате', expense(c.vatPayable)], ['Налог на прибыль 25%', '−' + U.money(c.profitTax)]] : []),
+          ['Налог (расчётная нагрузка)', expense(c.tax)], ['Себестоимость', '−' + U.money(c.cogs)],
+          ['Все расходы и себестоимость', '−' + U.money(c.totalCosts)], ['Рентабельность всех затрат', U.pct(costReturn)],
+          ['Наценка к себестоимости по цене продажи', U.pct(p.costPriceRub > 0 ? (seller - p.costPriceRub) / p.costPriceRub * 100 : 0)]
+        ]) +
+        section('Итоги и подбор цены', [
+          ['Прибыль до налога', U.money(c.profitBeforeTax)], ['Прибыль с единицы', '<b class="' + U.profitClass(c.profit) + '">' + U.money(c.profit) + '</b>'],
+          ['Маржа', '<b class="' + U.profitClass(c.marginPct) + '">' + U.pct(c.marginPct) + '</b>'], ['ROI по себестоимости', U.pct(roi)],
+          ['Цена безубыточности (до СПП)', breakEvenPrice === null ? 'недостижима при этих ставках' : U.money(breakEvenPrice)],
+          ['Цена для целевой маржи', priceLine(targetPrice)], ['Цена для целевой прибыли', priceLine(targetProfitPrice)],
+          ['Запас до безубыточности', breakEvenPrice ? U.pct((seller - breakEvenPrice) / seller * 100) : '—'],
+          ['Выручка в день / 30 дней', U.money(seller * qty) + ' / ' + U.money(seller * qty * 30)],
+          ['Прибыль в день / 30 дней', U.money(c.profit * qty) + ' / ' + U.money(c.profit * qty * 30)]
+        ]) +
+        '<p class="hint" style="margin-top:10px">Главные показатели всегда сверху. Остальные данные сгруппированы по категориям ниже. Эффективная логистика учитывает выкуп и возвраты, эквайринг считается от цены после СПП; отдельная скидка карты/кошелька в калькуляторе больше не используется.</p>';
       if (reverseShown) {
         $('#calc-reverse-out').innerHTML = '<div class="alert ok"><b>Подобранная цена:</b><br>По целевой марже: ' + U.esc(priceLine(targetPrice)) + '<br>По целевой прибыли: ' + U.esc(priceLine(targetProfitPrice)) + '<br><span class="tiny">В расчёте учтены выкуп, возвраты, переупаковка, брак, эквайринг после СПП и выбранный налоговый режим.</span></div>';
       }

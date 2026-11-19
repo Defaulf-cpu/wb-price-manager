@@ -181,11 +181,12 @@ async function main() {
     const saved = (await service.handlers['repricer:competitors:get']())[nm];
     assert.equal(saved.at(-1).price, 1300);
   });
-  await check('отдельный калькулятор считает категорию, карту WB, маржу и ROI без сохранения товара', async () => {
+  await check('отдельный калькулятор считает категорию, цену покупателя, маржу и ROI без сохранения товара', async () => {
     assert.match(doc.querySelector('[data-theme-toggle]').textContent, /Светлая|Тёмная/);
     await w.App.go('calculator'); await until(() => doc.querySelector('#calc-out') && !w.API.pending(), 'калькулятор');
     assert.ok(doc.querySelector('#calc-category')); assert.match(doc.querySelector('#calc-out').textContent, /ROI по себестоимости/);
-    assert.match(doc.querySelector('#calc-out').textContent, /Цена по карте WB/);
+    assert.match(doc.querySelector('#calc-out').textContent, /Цена для покупателя/);
+    assert.ok(!doc.querySelector('#calc-wallet'));
     const costBefore = plain(store.loadCosts().items[nm]);
     input('#calc-base', 2000); input('#calc-cost', 500);
     assert.match(doc.querySelector('#calc-out').textContent, /Прибыль с единицы/);
@@ -204,6 +205,9 @@ async function main() {
     input('#calc-target-profit', 100); doc.querySelector('#calc-solve').click();
     assert.match(doc.querySelector('#calc-reverse-out').textContent, /По целевой прибыли:/);
     assert.match(doc.querySelector('#calc-reverse-out').textContent, /В расчёте учтены выкуп, возвраты/);
+    input('#calc-discount', 20); input('#calc-shelf', 1800);
+    const shelfText = doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' ');
+    assert.match(shelfText, /Базовая цена — какую ставить2 500 ₽/); assert.match(shelfText, /Режим расчётаот желаемой цены на полке/);
     input('#calc-tax', 'osno_vat22_credit', 'change'); input('#calc-purchase-vat', true);
     const osno = doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' ');
     assert.match(osno, /Исходящий НДС 22%−361/); assert.match(osno, /Входящий НДС к вычету\+264/); assert.match(osno, /НДС к уплате−97/);
