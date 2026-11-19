@@ -308,6 +308,8 @@ const MARKERS = [
   ['src/renderer/index.html', 'sidebar-controls', 'тема и сворачивание меню находятся внизу сайдбара'],
   ['src/renderer/index.html', 'sidebar-toggle-chevron', 'у сворачивания меню новая векторная иконка'],
   ['src/renderer/js/app.js', "getElementById('theme-toggle')", 'переключатель темы подключён в подвале сайдбара'],
+  ['src/renderer/js/views/repricer.js', 'rp-notices-toggle', 'у репрайсера есть кнопка уведомлений справа сверху'],
+  ['src/renderer/js/views/repricer.js', 'setNoticeSource', 'информация репрайсера собирается в скрытую панель уведомлений'],
   ['Собрать EXE (Windows).bat', 'Быстрые проверки перед сборкой', 'быстрая сборка Windows без полного теста по умолчанию'],
   ['src/renderer/js/workspace-v4.js', 'применены локально при закрытии', 'закрытие редактора стратегии применяет правки локально'],
   ['src/renderer/js/state.js', 'Сервис вернул демо-товары', 'защита от демо-товаров при выключенном демо'],

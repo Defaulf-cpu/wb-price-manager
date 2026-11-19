@@ -23,20 +23,37 @@ Views.repricer = {
   render(container) {
     this.container = container;
     container.innerHTML = `
-      <div class="tabs" id="rp-tabs">
-        <button type="button" class="tab" data-t="prices">Товары</button>
-        <button type="button" class="tab" data-t="price-tools">Цены и скидки</button>
-        <button type="button" class="tab" data-t="economics">Экономика</button>
-        <button type="button" class="tab" data-t="rules">Массовые правила</button>
-        <button type="button" class="tab" data-t="costs">Себестоимость</button>
-        <button type="button" class="tab" data-t="competitors">Конкуренты</button>
-        <button type="button" class="tab" data-t="journal-prices">Журнал изменения цен</button>
+      <div class="rp-tabs-row">
+        <div class="tabs" id="rp-tabs">
+          <button type="button" class="tab" data-t="prices">Товары</button>
+          <button type="button" class="tab" data-t="price-tools">Цены и скидки</button>
+          <button type="button" class="tab" data-t="economics">Экономика</button>
+          <button type="button" class="tab" data-t="rules">Массовые правила</button>
+          <button type="button" class="tab" data-t="costs">Себестоимость</button>
+          <button type="button" class="tab" data-t="competitors">Конкуренты</button>
+          <button type="button" class="tab" data-t="journal-prices">Журнал изменения цен</button>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm rp-notices-btn" id="rp-notices-toggle" aria-expanded="false" title="Показать или скрыть информационные сообщения репрайсера">🔔 Уведомления <span class="nav-count" id="rp-notices-count" style="display:none"></span></button>
+      </div>
+      <div id="rp-notices" class="card rp-notices" hidden>
+        <div class="spread"><b>Уведомления и справка</b><button type="button" class="btn btn-ghost btn-sm" id="rp-notices-close">Скрыть</button></div>
+        <div id="rp-notices-list" style="margin-top:10px"></div>
       </div>
       <div id="rp-host">${UI.loading('Загружаем настройки репрайсера…')}</div>
     `;
     container.querySelectorAll('#rp-tabs .tab').forEach((t) => {
       t.onclick = async () => { this.tab = t.dataset.t; this.paintTabs(); await this.draw(); };
     });
+    try { this.noticesOpen = window.localStorage.getItem('wb.repricer.noticesOpen') === '1'; } catch (e) { this.noticesOpen = false; }
+    const noticesToggle = container.querySelector('#rp-notices-toggle');
+    if (noticesToggle) noticesToggle.onclick = () => this.setNoticesOpen(!this.noticesOpen);
+    const noticesClose = container.querySelector('#rp-notices-close');
+    if (noticesClose) noticesClose.onclick = () => this.setNoticesOpen(false);
+    container.addEventListener('click', (event) => {
+      if (event.target.closest && event.target.closest('[data-open-notices]')) this.setNoticesOpen(true);
+    });
+    this.setNoticesOpen(this.noticesOpen);
+    this.renderNotices();
     if (!this._subscribed) {
       this._subscribed = true;
       API.on('repricer', (p) => {
@@ -50,6 +67,37 @@ Views.repricer = {
 
   paintTabs() {
     this.container.querySelectorAll('#rp-tabs .tab').forEach((t) => t.classList.toggle('active', t.dataset.t === this.tab));
+  },
+
+  /** Информационные сообщения живут в отдельной скрытой панели, а не висят на странице. */
+  setNoticeSource(key, list) {
+    this._noticeSources = this._noticeSources || {};
+    if (list && list.length) this._noticeSources[key] = list;
+    else delete this._noticeSources[key];
+    this.renderNotices();
+  },
+
+  renderNotices() {
+    if (!this.container) return;
+    const list = Object.values(this._noticeSources || {}).flat();
+    const host = this.container.querySelector('#rp-notices-list');
+    const count = this.container.querySelector('#rp-notices-count');
+    const toggle = this.container.querySelector('#rp-notices-toggle');
+    if (host) host.innerHTML = list.length
+      ? list.map((n) => `<div class="alert ${U.esc(n.kind || 'info')} rp-notice">${n.html}</div>`).join('')
+      : '<div class="hint">Сейчас уведомлений нет. Сюда попадают объяснения расчёта, фазы отправки, причины блокировок и подробности предупреждений.</div>';
+    if (count) { count.textContent = list.length ? String(list.length) : ''; count.style.display = list.length ? '' : 'none'; }
+    if (toggle) toggle.classList.toggle('has-alerts', list.some((n) => n.kind === 'danger' || n.kind === 'warn'));
+  },
+
+  setNoticesOpen(value) {
+    this.noticesOpen = !!value;
+    try { window.localStorage.setItem('wb.repricer.noticesOpen', this.noticesOpen ? '1' : '0'); } catch (e) { /* не критично */ }
+    if (!this.container) return;
+    const panel = this.container.querySelector('#rp-notices');
+    const toggle = this.container.querySelector('#rp-notices-toggle');
+    if (panel) panel.hidden = !this.noticesOpen;
+    if (toggle) toggle.setAttribute('aria-expanded', String(this.noticesOpen));
   },
 
   async loadState() {
@@ -90,6 +138,8 @@ Views.repricer = {
     if (Views.prices) { Views.prices.container = null; Views.prices.grid = null; }
     if (Views.economics) Views.economics.container = null;
     host.innerHTML = UI.loading();
+    this._noticeSources = {};
+    this.renderNotices();
     try {
       await this.loadState();
       if (!current()) return;
@@ -145,12 +195,6 @@ Views.repricer = {
             <button class="btn btn-ok" id="rp-send" disabled title="Отправить цены в WB после подтверждения">Обновить цены (отправить)</button>
           </div>
         </div>
-        <div class="alert info" style="margin-top:12px">
-          Репрайсер считает цену в три слоя: <b>стратегия</b> (конкуренты / маржа / план-факт / оборачиваемость / РРЦ / AI),
-          затем <b>верхнеуровневые ДЦО</b> (защита от out-of-stock, повышение акционной цены — если сработало несколько, берётся максимальная цена),
-          затем <b>красивая цена</b>. Итог загоняется в коридор «минимальная ↔ базовая» и ограничивается шагом
-          <b>${U.pct(cfg.limits.maxChangePerUpdatePct, 0)}</b> за одно обновление${cfg.limits.maxChangePerDayPct ? ' и <b>' + U.pct(cfg.limits.maxChangePerDayPct, 0) + '</b> за сутки' : ''}.
-        </div>
       </div>
       <div id="rp-proposal"></div>
       <div id="rp-tiles" class="row wrap" style="gap:6px;margin-bottom:12px"></div>
@@ -186,6 +230,11 @@ Views.repricer = {
       <div id="rp-grid">${this.results.length ? '' : '<div class="card muted">Нажмите «Пересчитать цены», чтобы репрайсер предложил новые цены по вашим стратегиям.</div>'}</div>
       <div class="bulkbar" id="rp-bulk" style="display:none"></div>
     `;
+
+    this.setNoticeSource('help', [{ kind: 'info', html: `Репрайсер считает цену в три слоя: <b>стратегия</b> (конкуренты / маржа / план-факт / оборачиваемость / РРЦ / AI),
+          затем <b>верхнеуровневые ДЦО</b> (защита от out-of-stock, повышение акционной цены — если сработало несколько, берётся максимальная цена),
+          затем <b>красивая цена</b>. Итог загоняется в коридор «минимальная ↔ базовая» и ограничивается шагом
+          <b>${U.pct(cfg.limits.maxChangePerUpdatePct, 0)}</b> за одно обновление${cfg.limits.maxChangePerDayPct ? ' и <b>' + U.pct(cfg.limits.maxChangePerDayPct, 0) + '</b> за сутки' : ''}.` }]);
 
     const $ = (id) => host.querySelector(id);
     $('#rp-interval').style.display = cfg.schedule.mode === 'interval' ? '' : 'none';
@@ -396,18 +445,19 @@ Views.repricer = {
     const sch = cfg.schedule || {};
     const sendBtn = this.container.querySelector('#rp-send');
 
-    const lifecycle = `<div class="hint rp-lifecycle">Фаза 1: сохранено предложений <b>${U.fmt(items.length)}</b> · расчёт ${U.date(prop.at, true)} · Фаза 2: отправка ${U.date(prop.sentAt, true)} · устарело <b>${U.fmt(prop.staleCount || 0)}</b></div>`;
     const blocked = prop.blocked || [];
-    const blockedHtml = blocked.length ? `
-      <div class="alert danger" style="margin-top:10px">
-        <b>Не вошли в предложение: ${U.fmt(prop.blockedTotal || blocked.length)} товаров с незаполненными данными.</b>
+    const proposalNotices = [{ kind: 'info', html: `<span class="rp-lifecycle">Фаза 1: сохранено предложений <b>${U.fmt(items.length)}</b> · расчёт ${U.date(prop.at, true)} · Фаза 2: отправка ${U.date(prop.sentAt, true)} · устарело <b>${U.fmt(prop.staleCount || 0)}</b></span>` }];
+    if (blocked.length) proposalNotices.push({ kind: 'danger', html: `<b>Не вошли в предложение: ${U.fmt(prop.blockedTotal || blocked.length)} товаров с незаполненными данными.</b>
         <div class="hint" style="margin-top:4px">Репрайсер не предлагает их к отправке, пока не заполнены себестоимость
           и пороги цен — иначе цена ушла бы в WB «на глаз». Примеры:
           ${blocked.slice(0, 4).map((b) => '<span class="mono">' + U.esc(String(b.vendorCode || b.nmID)) + '</span> (' +
             U.esc((b.reasons || []).join(', ')) + ')').join('; ')}</div>
         <div class="hint" style="margin-top:4px">Заполнить можно прямо в таблице (колонки «Стратегия» и «Пол / потолок»),
-          в карточке товара (двойной клик → «Комиссии и параметры») или массово во вкладке «Параметры товаров».</div>
-      </div>` : '';
+          в карточке товара (двойной клик → «Комиссии и параметры») или массово во вкладке «Параметры товаров».</div>` });
+    if (prop.note && items.length) proposalNotices.push({ kind: 'warn', html: U.esc(prop.note) });
+    this.setNoticeSource('proposal', proposalNotices);
+    const blockedLine = blocked.length
+      ? `<div class="hint" style="margin-top:6px">Не вошли в предложение: <b>${U.fmt(prop.blockedTotal || blocked.length)}</b> товаров — <button type="button" class="btn btn-ghost btn-sm" data-open-notices>причины в уведомлениях</button></div>` : '';
 
     if (!items.length) {
       host.innerHTML = `
@@ -419,7 +469,7 @@ Views.repricer = {
             </div>
             ${prop.at ? '<span class="hint">Последний пересчёт: <b>' + U.date(prop.at, true) + '</b></span>' : ''}
           </div>
-          ${lifecycle}${blockedHtml}
+          ${blockedLine}
         </div>`;
       if (sendBtn) sendBtn.disabled = true;
       return;
@@ -454,8 +504,7 @@ Views.repricer = {
             <button class="btn btn-ghost" id="rp-prop-discard">Отклонить</button>
           </div>
         </div>
-        ${prop.note ? `<div class="alert warn" style="margin-top:10px">${U.esc(prop.note)}</div>` : ''}
-        ${lifecycle}${blockedHtml}
+        ${blockedLine}
       </div>`;
 
     if (sendBtn) sendBtn.disabled = prop.phase !== 'proposed';
@@ -1724,14 +1773,16 @@ Views.repricer = {
   /** Плашка с товарами, которые не готовы к отправке (как «ОШИБКА: …» в строке INDEEPA). */
   validationHtml() {
     const bad = this.invalidResults();
-    if (!bad.length) return '';
+    if (!bad.length) { this.setNoticeSource('validation', []); return ''; }
     const sample = bad.slice(0, 5).map((r) =>
       '<span class="mono tiny">' + U.esc(String(r.vendorCode || r.nmID)) + '</span>').join(', ');
-    return `<div class="alert danger" style="margin-bottom:12px">
-      <b>У ${U.fmt(bad.length)} товаров не заполнены данные — репрайсер не предложит их к отправке.</b>
+    this.setNoticeSource('validation', [{ kind: 'danger', html: `<b>У ${U.fmt(bad.length)} товаров не заполнены данные — репрайсер не предложит их к отправке.</b>
       <div class="hint" style="margin-top:4px">Типичные причины: не задана себестоимость, нет порога минимальной цены,
         нет базовой цены. Заполните в строке (колонки «Стратегия» и «Пол / потолок») или массово во вкладке
-        «Параметры товаров». Примеры: ${sample}${bad.length > 5 ? ' и ещё ' + U.fmt(bad.length - 5) : ''}.</div>
+        «Параметры товаров». Примеры: ${sample}${bad.length > 5 ? ' и ещё ' + U.fmt(bad.length - 5) : ''}.</div>` }]);
+    return `<div class="alert danger" style="margin-bottom:12px">
+      <b>У ${U.fmt(bad.length)} товаров не заполнены данные</b> — репрайсер не предложит их к отправке.
+      <button type="button" class="btn btn-ghost btn-sm" data-open-notices>Подробнее в уведомлениях</button>
     </div>`;
   },
 

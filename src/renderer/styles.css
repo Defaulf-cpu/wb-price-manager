@@ -282,6 +282,13 @@ table.grid-table tfoot td {
 @keyframes slidein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ─────────── Прочее ─────────── */
+.rp-tabs-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rp-tabs-row .tabs { flex: 1 1 auto; min-width: 0; }
+.rp-notices-btn { flex: 0 0 auto; margin-top: 4px; display: inline-flex; align-items: center; gap: 7px; }
+.rp-notices-btn.has-alerts { color: var(--warn, #d97706); border-color: var(--warn, #d97706); }
+.rp-notices { margin-bottom: 12px; padding: 14px 16px; }
+.rp-notice { margin-bottom: 8px; }
+.rp-notice:last-child { margin-bottom: 0; }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 .tab {
   padding: 8px 14px; cursor: pointer; color: var(--muted); font-weight: 550;

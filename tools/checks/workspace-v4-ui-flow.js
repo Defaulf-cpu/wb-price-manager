@@ -58,6 +58,14 @@ async function main() {
   async function closeStrategy() { const box = await modal(); await box.querySelector('.modal-close').onclick(); await until(() => !box.isConnected, 'закрытие редактора'); }
   const foot = (box, label) => { const b = [...box.querySelectorAll('.modal-foot button')].find((b) => b.textContent === label); assert.ok(b, label); return b; };
   await rows();
+  await check('информация репрайсера скрыта за кнопкой уведомлений и раскрывается по ней', async () => {
+    const toggle = doc.querySelector('#rp-notices-toggle'), panel = doc.querySelector('#rp-notices');
+    assert.ok(toggle && panel); assert.equal(panel.hidden, true);
+    assert.match(doc.querySelector('#rp-notices-list').textContent, /три слоя/);
+    assert.ok(![...doc.querySelectorAll('#rp-host .alert.info')].some((el) => /три слоя/.test(el.textContent)));
+    toggle.click(); assert.equal(panel.hidden, false); assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+    doc.querySelector('#rp-notices-close').click(); assert.equal(panel.hidden, true);
+  });
   await check('выключенное демо не принимает демо-товары без явной ошибки', async () => {
     const before = plain(w.S.state.items), realInvoke = w.API.invoke, realAppState = w.S.state.appState;
     try {
