@@ -1212,12 +1212,20 @@ Views.itemcard = {
       const el = host.querySelector(id); if (el) el.addEventListener('input', updatePromoPrices);
     });
     updatePromoPrices();
+    // Введённые цифры — локальный черновик: закрытие карточки сохраняет их так же,
+    // как остальные редакторы, а не теряет молча. Кнопка ниже сохраняет сразу.
+    if (window.LocalDrafts) {
+      try {
+        LocalDrafts.bind(host, 'promo-prices-' + this.nmID, () => [{ channel: 'repricer:item-configs:save', payload: { items: { [String(this.nmID)]: { minPrice: ppVal('#pp-minPrice'), minMarginPct: ppVal('#pp-minMarginPct'), minMarginRub: ppVal('#pp-minMarginRub'), basePriceTarget: ppVal('#pp-basePriceTarget'), targetMarginPct: ppVal('#pp-targetMarginPct'), targetMarginRub: ppVal('#pp-targetMarginRub') } } } }], '#ic-promo-price-block input');
+      } catch (_) {}
+    }
     host.querySelector('#pp-save').onclick = async (ev) => {
       const btn = ev.currentTarget; btn.disabled = true;
       const status = host.querySelector('#pp-status');
       try {
         const patch = { minPrice: ppVal('#pp-minPrice'), minMarginPct: ppVal('#pp-minMarginPct'), minMarginRub: ppVal('#pp-minMarginRub'), basePriceTarget: ppVal('#pp-basePriceTarget'), targetMarginPct: ppVal('#pp-targetMarginPct'), targetMarginRub: ppVal('#pp-targetMarginRub') };
-        await API.invoke('repricer:item-configs:save', { items: { [String(this.nmID)]: patch } });
+        const saved = window.LocalDrafts ? await LocalDrafts.commit({ scope: host, report: true }) : (await API.invoke('repricer:item-configs:save', { items: { [String(this.nmID)]: patch } }), true);
+        if (!saved) { status.textContent = 'Сохранение не выполнено — исправьте поля выше.'; return; }
         const target = this.data.itemConfig || (this.data.itemConfig = {});
         Object.entries(patch).forEach(([k, v]) => { if (v === null) delete target[k]; else target[k] = v; });
         S.invalidate();

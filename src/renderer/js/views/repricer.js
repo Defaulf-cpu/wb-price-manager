@@ -256,6 +256,17 @@ Views.repricer = {
             intervalMinutes: U.num($('#rp-interval').value, 60)
           }
         });
+        // Несохранённые правки строки (стратегия, мин. цена, себестоимость…) обязаны
+        // попасть в расчёт: иначе «Пересчёт» считает по старым настройкам, а «Новая цена»
+        // не меняется, хотя в строке уже выбрана другая стратегия. commitEdits сам
+        // сохраняет, пересчитывает и перерисовывает таблицу.
+        if (this.pendingEdits.size) {
+          const saved = await this.commitEdits(null);
+          if (!saved || this.pendingEdits.size) {
+            App.toast('Не удалось сохранить параметры перед пересчётом — исправьте поля и попробуйте ещё раз.', 'err', 7000);
+          }
+          return;
+        }
         const res = await this.calculate({ full: true });
         this.results = res.results || [];
         this.summary = res.summary;
@@ -1628,7 +1639,7 @@ Views.repricer = {
   /** Сохранить пачку правок: одна запись настроек, одна запись расходов, один пересчёт. */
   async commitEdits(btn) {
     const edits = Array.from(this.pendingEdits.entries());
-    if (!edits.length) { App.toast('Нет несохранённых изменений', 'warn'); return; }
+    if (!edits.length) { if (btn) App.toast('Нет несохранённых изменений', 'warn'); return true; }
     if (btn) { btn.disabled = true; btn.textContent = 'Сохраняем…'; }
     try {
       const cfgPatch = {};
@@ -1663,9 +1674,11 @@ Views.repricer = {
       if (this.tab === 'strategies') this.renderStrategies();
       else { this.drawSummary(); this.renderResults(); this.drawTiles(); }
       await this.drawProposal();
+      return true;
     } catch (e) {
       App.toast(e.message, 'err', 9000);
       if (btn) { btn.disabled = false; btn.textContent = 'Сохранить'; }
+      return false;
     }
   },
 

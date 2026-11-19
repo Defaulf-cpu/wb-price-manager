@@ -109,4 +109,12 @@ check('блок «Цена (вне акции)»: целевая Маржа в �
   assert.ok(Math.abs(res.proposed.sellerPrice - 1600) < 1, String(res.proposed.sellerPrice));
 });
 
+check('убыточный товар + стратегия «Маржинальность 20%» сама считает нужную цену', () => {
+  // profit = price − 1800: при текущей 1500 товар в минус (−300), маржа 20% при цене 2250.
+  const losingCtx = ctx({ sellerPrice: 1500, basePrice: 2000, discount: 25, econAt: (p) => ({ revenue: p, profit: p - 1800, marginPct: p > 0 ? ((p - 1800) / p) * 100 : 0 }) });
+  const res = RP.computeItem(losingCtx, cfg(null), { strategy: 'margin', targetMarginPct: 20, basePriceTarget: 3000 });
+  assert.ok(Math.abs(res.proposed.sellerPrice - 2250) < 1, String(res.proposed.sellerPrice));
+  assert.ok(res.proposed.profit > 0 && Math.abs(res.proposed.marginPct - 20) < 0.1, JSON.stringify(res.proposed));
+});
+
 console.log('\nИТОГО custom-strategy: ' + passed + ' пройдено, 0 ошибок');
