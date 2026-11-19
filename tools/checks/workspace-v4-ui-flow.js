@@ -183,6 +183,11 @@ async function main() {
   });
   await check('отдельный калькулятор считает категорию, цену покупателя, маржу и ROI без сохранения товара', async () => {
     assert.match(doc.querySelector('[data-theme-toggle]').textContent, /Светлая|Тёмная/);
+    assert.ok(doc.querySelector('.sidebar-footer .sidebar-controls #theme-toggle'));
+    assert.ok(doc.querySelector('.sidebar-footer .sidebar-controls #sidebar-toggle svg'));
+    assert.ok(doc.querySelector('#btn-sync').previousElementSibling.classList.contains('sidebar-controls'));
+    assert.ok(!doc.querySelector('.logo #sidebar-toggle'));
+    assert.ok(!doc.querySelector('#topbar-actions [data-theme-toggle]'));
     await w.App.go('calculator'); await until(() => doc.querySelector('#calc-out') && !w.API.pending(), 'калькулятор');
     assert.ok(doc.querySelector('#calc-category')); assert.match(doc.querySelector('#calc-out').textContent, /ROI по себестоимости/);
     assert.match(doc.querySelector('#calc-out').textContent, /Цена для покупателя/);

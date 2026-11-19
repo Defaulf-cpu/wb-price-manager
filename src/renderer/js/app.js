@@ -24,7 +24,11 @@ window.App = (function () {
     try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* недоступное хранилище не мешает теме */ }
     if (API.isElectron) API.invoke('ui:theme', theme).catch(() => {});
     document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
-      button.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная';
+      const icon = button.querySelector('.theme-ico');
+      const label = button.querySelector('.theme-label');
+      if (icon) icon.textContent = theme === 'dark' ? '☀' : '☾';
+      if (label) label.textContent = theme === 'dark' ? 'Светлая' : 'Тёмная';
+      if (!icon && !label) button.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная';
       button.style.flexShrink = '0';
       button.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
       button.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
@@ -106,7 +110,6 @@ window.App = (function () {
     try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? '1' : '0'); } catch (_) { /* недоступное хранилище не мешает */ }
     const button = document.getElementById('sidebar-toggle');
     if (button) {
-      button.textContent = sidebarCollapsed ? '›' : '‹';
       button.title = sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню';
       button.setAttribute('aria-label', button.title);
       button.setAttribute('aria-expanded', String(!sidebarCollapsed));
@@ -472,11 +475,6 @@ window.App = (function () {
       });
     }
     if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
-    const themeButton = mk(theme === 'dark' ? '☀ Светлая' : '☾ Тёмная', 'btn-ghost theme-toggle', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
-    themeButton.dataset.themeToggle = '1';
-    themeButton.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
-    themeButton.setAttribute('aria-label', 'Переключить светлую или тёмную тему');
-    themeButton.setAttribute('aria-pressed', String(theme === 'light'));
     mk('Справка', 'btn-ghost', showHelp);
     // в веб-версии (tools/web-server.js) нужна видимая кнопка выхода: сессия живёт 12 часов,
     // а компьютер может быть чужим. В Electron и в dev-сервере кнопки нет — там нет и сессии.
@@ -564,6 +562,8 @@ window.App = (function () {
     setSidebarCollapsed(sidebarCollapsed);
     const sidebarToggle = document.getElementById('sidebar-toggle');
     if (sidebarToggle) sidebarToggle.onclick = () => setSidebarCollapsed(!sidebarCollapsed);
+    const themeToggle = document.getElementById('theme-toggle');
+    if (themeToggle) themeToggle.onclick = () => setTheme(theme === 'dark' ? 'light' : 'dark');
     rememberViewDefaults();
     const dirtyInput = (event) => { if (event.target && event.target.closest && event.target.closest('#view, #modal-root')) formDirty = true; };
     document.addEventListener('input', dirtyInput);
