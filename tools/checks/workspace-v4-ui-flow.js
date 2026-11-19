@@ -191,6 +191,25 @@ async function main() {
     assert.match(doc.querySelector('#calc-out').textContent, /Прибыль с единицы/);
     assert.deepEqual(plain(store.loadCosts().items[nm]), costBefore);
   });
+  await check('калькулятор учитывает выкуп, возвраты, эквайринг после СПП, брак и обратный расчёт', async () => {
+    await w.App.go('calculator'); await until(() => doc.querySelector('#calc-out') && !w.API.pending(), 'калькулятор 2');
+    input('#calc-tax', 'none', 'change'); input('#calc-base', 2000); input('#calc-discount', 0); input('#calc-cost', 500);
+    input('#calc-logistics', 100); input('#calc-buyout', 50); input('#calc-return-logistics', 50);
+    input('#calc-packaging', 100); input('#calc-spp', 10); input('#calc-acquiring', 10); input('#calc-defect', 10);
+    const text = doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' ');
+    assert.match(text, /Эффективная логистика на 1 выкуп−250/);
+    assert.match(text, /Эквайринг \(от цены после СПП\)−180/);
+    assert.match(text, /Брак \/ утери−60/);
+    input('#calc-repack', true); assert.match(doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' '), /Упаковка эффективная−200/); input('#calc-repack', false);
+    input('#calc-target-profit', 100); doc.querySelector('#calc-solve').click();
+    assert.match(doc.querySelector('#calc-reverse-out').textContent, /По целевой прибыли:/);
+    assert.match(doc.querySelector('#calc-reverse-out').textContent, /В расчёте учтены выкуп, возвраты/);
+    input('#calc-tax', 'osno_vat22_credit', 'change'); input('#calc-purchase-vat', true);
+    const osno = doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' ');
+    assert.match(osno, /Исходящий НДС 22%−361/); assert.match(osno, /Входящий НДС к вычету\+264/); assert.match(osno, /НДС к уплате−97/);
+    input('#calc-tax', 'usn6_vat5', 'change');
+    assert.match(doc.querySelector('#calc-out').textContent.replace(/\s+/g, ' '), /Налог \(расчётная нагрузка\)−210/);
+  });
   await check('все реальные локальные collectors обошлись без WB send/включения планировщика и без JS ошибок', async () => {
     const forbidden = ['wb:apply-prices', 'wb:apply-size-prices', 'repricer:send', 'repricer:proposal-send', 'repricer:promo-apply'];
     assert.ok(calls.every((r) => !forbidden.includes(r.channel))); assert.deepEqual(errors, []);
