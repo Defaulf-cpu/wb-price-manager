@@ -65,6 +65,7 @@ const CHANNELS = [
   'repricer:boost-options',
   'repricer:health',
   'strategies:template',
+  'strategies:custom-save',
   'analytics:load',
   'spp:refresh',
   'repricer:send',

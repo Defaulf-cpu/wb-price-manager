@@ -107,6 +107,8 @@ const DEFAULT_CONFIG = {
 
   strategyTemplates: {}, // безопасные параметры шаблонов; без исполняемого кода
 
+  customStrategies: [], // свои правило-ориентированные стратегии (формат INDEEPA, см. evaluateCustomStrategy)
+
   /** Пресеты стратегий для быстрого назначения. */
   presets: [
     { id: 0, name: 'Без стратегии (только пороги)', strategy: 'default' },
@@ -131,6 +133,147 @@ const STRATEGIES = [
   { id: 'boost', name: 'Лесенка буста', hint: 'Дневные квоты заказов по возрастающим точным ценам акций. После лимита — следующая ступень; после последней — выход до 00:00 МСК. Не гарантирует точное число заказов из-за задержек WB.' },
   { id: 'hold', name: 'Держать цену', hint: 'Ничего не меняет — только следит за порогами и предупреждает.' }
 ];
+
+/**
+ * Конкретные алгоритмы встроенных стратегий — то, что показывает шестерёнка в разделе
+ * «Стратегии». Текст обязан соответствовать switch в computeItem; при изменении логики
+ * движка обновляйте и этот справочник (его проверяет tools/version.js по маркерам).
+ */
+const STRATEGY_ALGORITHMS = {
+  default: { steps: ['Собираем кандидатов: базовая цена, акционная цена (если есть), цена конкурента (если есть и в наличии).', 'Отбрасываем кандидатов вне коридора [минимальный порог; базовая цена].', 'Если внутри коридора больше одного кандидата — берём наименьшую цену; если ни одного — ставим базовую цену.'], inputs: ['BasePrice', 'PromoPrice', 'CompetitorPrice', 'CalcMinPrice', 'CalcMaxPrice'] },
+  margin: { steps: ['Ищем цену, при которой маржа равна целевой (бинарный поиск по экономике товара).', 'Не опускаемся ниже минимального порога и цены минимальной маржи.', 'Если целевая маржа недостижима даже на потолке коридора — держим максимум коридора.'], inputs: ['TargetMarginPrice', 'CalcMinPrice', 'CalcMaxPrice'] },
+  competitor: { steps: ['Берём самого дешёвого включённого конкурента в наличии (или выбранного в карточке).', 'Применяем отстройку товара: процент или рубли, знак работает в обе стороны.', 'Зажимаем результат в коридор. Конкурента нет — работает стратегия «По умолчанию».'], inputs: ['CompetitorPrice', 'CalcMinPrice', 'CalcMaxPrice'] },
+  planfact: { steps: ['Считаем выполнение месячного плана: факт продаж месяца против графика «план × день/число дней».', 'Отстаём больше чем на 3% — снижаем цену (до −25% при чувствительности 8%: коэффициент 1 − отставание × чувствительность/10).', 'Опережаем больше чем на 3% — повышаем цену симметрично. Дальше — общий коридор и лимиты шага.'], inputs: ['SalesMonthQty', 'PlanQtyMonth', 'SellerPrice'] },
+  turnover: { steps: ['Оборачиваемость = остаток / продажи в день.', 'Оборачиваемость выше порога распродажи — цена к минимальному порогу.', 'Выше цели × 1.5 — снижаем на 3%; не выше цели — повышаем на 3% (не выше коридора).'], inputs: ['TurnoverDays', 'SumStock', 'SalesPerDay', 'CalcMinPrice'] },
+  rrp: { steps: ['Считаем цену для покупателя: цена продавца × (1 − СПП) × (1 − кошелёк).', 'Если покупатель платит ниже РРЦ — поднимаем цену продавца до РРЦ / ((1 − СПП)(1 − кошелёк)).', 'Если РРЦ соблюдается — цену не меняем.'], inputs: ['RRP', 'BuyerPrice', 'SppPct'] },
+  ai: { steps: ['Перебираем 40 цен от минимального порога до потолка коридора.', 'Для каждой считаем прибыль и модель спроса: темп меняется на эластичность × относительное изменение цены.', 'Берём цену с максимальной прогнозной прибылью в месяц.'], inputs: ['CalcMinPrice', 'CalcMaxPrice', 'SalesPerDay', 'Profit'] },
+  promo: { steps: ['Если товар в акции и акционная цена не ниже порога — берём акционную цену.', 'Акции нет — ставим базовую цену.'], inputs: ['PromoPrice', 'BasePrice', 'CalcMinPrice'] },
+  boost: { steps: ['По дневным квотам заказов идём по ступеням акций от дешёвой цены к дорогой.', 'Квота ступени исчерпана — следующая ступень; после последней — выход из лесенки до 00:00 МСК.', 'Счётчик дня сбрасывается в полночь МСК; WB отдаёт заказы с задержкой, поэтому ровно N продаж не гарантируется.'], inputs: ['SalesPerDay', 'PromoPrice'] },
+  hold: { steps: ['Цену не меняем.', 'Работают только общие защитные слои: коридор, лимиты шага, блокировки ошибок.'], inputs: ['SellerPrice'] }
+};
+
+/**
+ * Поля, доступные правилам своих стратегий (аналоги alias-ов INDEEPA, но для WB).
+ * Значения собирает computeItem из контекста товара; null = данных нет, условие с таким
+ * полем не сработает, а расчёт от такого поля пропустит правило (как coalesce в INDEEPA).
+ */
+const CUSTOM_FIELDS = [
+  { alias: 'SumStock', label: 'Сумма остатков, шт' },
+  { alias: 'BasePrice', label: 'Базовая цена (до скидки), ₽' },
+  { alias: 'SellerPrice', label: 'Цена продавца (после скидки, до СПП), ₽' },
+  { alias: 'BuyerPrice', label: 'Цена для покупателя (после СПП), ₽' },
+  { alias: 'CalcMinPrice', label: 'Расчётный минимальный порог, ₽' },
+  { alias: 'CalcMaxPrice', label: 'Расчётный потолок коридора, ₽' },
+  { alias: 'MinMarginPrice', label: 'Цена минимальной маржи, ₽' },
+  { alias: 'TargetMarginPrice', label: 'Цена целевой маржи, ₽' },
+  { alias: 'CompetitorPrice', label: 'Цена конкурента (минимум в наличии), ₽' },
+  { alias: 'PromoPrice', label: 'Акционная цена, ₽' },
+  { alias: 'CostPrice', label: 'Себестоимость, ₽' },
+  { alias: 'MarginPct', label: 'Текущая маржа, %' },
+  { alias: 'Profit', label: 'Текущая прибыль с единицы, ₽' },
+  { alias: 'SalesPerDay', label: 'Продажи, шт/день (средние за 30 дней)' },
+  { alias: 'SalesMonthQty', label: 'Продано с начала месяца, шт' },
+  { alias: 'PlanQtyMonth', label: 'План продаж на месяц, шт' },
+  { alias: 'PlanRatioPct', label: 'Выполнение графика плана, %' },
+  { alias: 'TurnoverDays', label: 'Оборачиваемость, дней' },
+  { alias: 'SppPct', label: 'СПП, %' },
+  { alias: 'DiscountPct', label: 'Скидка продавца, %' },
+  { alias: 'RRP', label: 'РРЦ, ₽' }
+];
+const CUSTOM_FIELD_ALIASES = new Set(CUSTOM_FIELDS.map((f) => f.alias));
+
+/** Операторы условий своих стратегий. Код 70 ('>') совместим с INDEEPA. */
+const CUSTOM_OPERATORS = { 10: '=', 20: '!=', 40: '<', 50: '<=', 60: '>=', 70: '>' };
+
+function customFieldValue(fields, alias) {
+  const v = fields ? fields[alias] : undefined;
+  return v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
+}
+
+function customElementPass(el, fields) {
+  const left = el.leftExpressionType === 10 || el.leftExpressionType === 'field'
+    ? customFieldValue(fields, el.leftExpression)
+    : customFieldValue({ x: el.leftExpression }, 'x');
+  const right = el.rightExpressionType === 10 || el.rightExpressionType === 'field'
+    ? customFieldValue(fields, el.rightExpression)
+    : customFieldValue({ x: el.rightExpression }, 'x');
+  if (left === null || right === null) return false;
+  switch (Number(el.compareOperator)) {
+    case 10: return Math.abs(left - right) < 0.005;
+    case 20: return Math.abs(left - right) >= 0.005;
+    case 40: return left < right;
+    case 50: return left <= right;
+    case 60: return left >= right;
+    case 70: return left > right;
+    default: return false;
+  }
+}
+
+function customGroupPass(group, fields) {
+  const elements = (group && group.elements) || [];
+  if (!elements.length) return true;
+  const values = elements.map((el) => customElementPass(el, fields));
+  return group.isOr ? values.some(Boolean) : values.every(Boolean);
+}
+
+function customCalcPrice(cfg, fields) {
+  if (!cfg || !cfg.priceCalcExpressionConfig) return null;
+  const c = cfg.priceCalcExpressionConfig;
+  const x = customFieldValue(fields, c.inputFieldAlias);
+  if (x === null || x <= 0) return null;
+  const amount = Math.abs(num(c.changeAmount)); // всегда положительная: направление задаёт changeType (грабля INDEEPA №6.4)
+  const pct = Number(c.valueType) === 10;
+  if (Number(c.changeType) === 10) return pct ? x * (1 + amount / 100) : x + amount;
+  if (Number(c.changeType) === 20) return pct ? x * (1 - amount / 100) : x - amount;
+  if (Number(c.changeType) === 30) return amount > 0 && !pct ? x + amount : x;
+  return null;
+}
+
+/**
+ * Своя стратегия в формате INDEEPA: правила сверху вниз, первое сработавшее побеждает.
+ * Если расчёт правила дал пусто/0/отрицательное — правило пропускается (аналог coalesce(a,-1) > 0).
+ * Возвращает { price, rawPrice, ruleName } или null, если цену менять не надо.
+ */
+function evaluateCustomStrategy(def, fields) {
+  if (!def || def.enabled === false || !Array.isArray(def.rules)) return null;
+  for (const rule of def.rules) {
+    if (!rule || rule.enabled === false) continue;
+    const groups = Array.isArray(rule.conditions) ? rule.conditions : [];
+    if (!groups.every((g) => customGroupPass(g, fields))) continue;
+    const price = customCalcPrice(rule.priceCalcConfig, fields);
+    if (price === null || !(price > 0)) continue;
+    return { price: r2(price), rawPrice: r2(price), ruleName: String(rule.name || 'Правило без названия') };
+  }
+  return null;
+}
+
+/** Проверка своей стратегии перед сохранением. Возвращает текст ошибки или ''. */
+function validateCustomStrategy(def) {
+  if (!def || typeof def !== 'object' || Array.isArray(def)) return 'Стратегия должна быть объектом.';
+  if (!String(def.name || '').trim()) return 'Укажите название стратегии.';
+  if (!Array.isArray(def.rules) || !def.rules.length) return 'Добавьте хотя бы одно правило.';
+  if (def.rules.length > 60) return 'Слишком много правил: максимум 60.';
+  for (const [i, rule] of def.rules.entries()) {
+    const where = 'Правило №' + (i + 1) + ': ';
+    if (!rule || typeof rule !== 'object') return where + 'некорректная структура.';
+    if (!String(rule.name || '').trim()) return where + 'укажите название.';
+    const calc = rule.priceCalcConfig && rule.priceCalcConfig.priceCalcExpressionConfig;
+    if (!calc) return where + 'не задан расчёт цены.';
+    if (!CUSTOM_FIELD_ALIASES.has(String(calc.inputFieldAlias))) return where + 'неизвестный исходный показатель «' + calc.inputFieldAlias + '».';
+    if (![10, 20, 30].includes(Number(calc.changeType))) return where + 'неизвестный тип изменения.';
+    if (![0, 10].includes(Number(calc.valueType))) return where + 'неизвестная единица изменения.';
+    if (!Number.isFinite(Number(calc.changeAmount)) || Number(calc.changeAmount) < 0) return where + 'величина изменения должна быть неотрицательным числом.';
+    for (const group of rule.conditions || []) {
+      for (const el of (group && group.elements) || []) {
+        if (!CUSTOM_OPERATORS[Number(el.compareOperator)]) return where + 'неизвестный оператор сравнения.';
+        if ((el.leftExpressionType === 10 || el.leftExpressionType === 'field') && !CUSTOM_FIELD_ALIASES.has(String(el.leftExpression))) return where + 'неизвестное поле условия «' + el.leftExpression + '».';
+        if ((el.rightExpressionType === 10 || el.rightExpressionType === 'field') && !CUSTOM_FIELD_ALIASES.has(String(el.rightExpression))) return where + 'неизвестное поле справа «' + el.rightExpression + '».';
+        if (!(el.rightExpressionType === 10 || el.rightExpressionType === 'field') && !Number.isFinite(Number(el.rightExpression))) return where + 'правая часть условия должна быть числом.';
+      }
+    }
+  }
+  return '';
+}
 
 /**
  * «Красивая цена»: округление до шаблона (…9 / …90 / …99).
@@ -829,7 +972,35 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const comp = bestCompetitorPrice(marginCtx, I);
   const promoPrice = num(ctx.promoPrice, 0) > 0 ? num(ctx.promoPrice) : null;
 
-  switch (strategy) {
+  // ── Свои стратегии (формат INDEEPA): правила сверху вниз, первое сработавшее побеждает ──
+  const customDef = (C.customStrategies || []).find((s) => s && s.id === strategy);
+  if (customDef) {
+    const rawCompetitors = (ctx.competitors || []).filter((c) => c.enabled !== false && num(c.stock, 1) > 0 && num(c.price) > 0);
+    const pp = planProgress(marginCtx, I);
+    const fields = {
+      SumStock: num(ctx.stock), BasePrice: curBase, SellerPrice: curSeller, BuyerPrice: curBuyer,
+      CalcMinPrice: priceFloor, CalcMaxPrice: corridorMax, MinMarginPrice: minByMargin,
+      TargetMarginPrice: ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null,
+      CompetitorPrice: rawCompetitors.length ? Math.min(...rawCompetitors.map((c) => num(c.price))) : null,
+      PromoPrice: promoPrice, CostPrice: ctx.params && num(ctx.params.costPriceRub) > 0 ? num(ctx.params.costPriceRub) : null,
+      MarginPct: marginAt(curSeller), Profit: profitAt(curSeller),
+      SalesPerDay: num(ctx.salesPerDay), SalesMonthQty: num(ctx.salesMonthQty),
+      PlanQtyMonth: num(I.planQtyMonth) > 0 ? num(I.planQtyMonth) : null,
+      PlanRatioPct: pp ? pp.ratio * 100 : null,
+      TurnoverDays: num(ctx.turnoverDays), SppPct: num(ctx.sppPct), DiscountPct: curDisc,
+      RRP: num(ctx.rrp || I.rrp) > 0 ? num(ctx.rrp || I.rrp) : null
+    };
+    const hit = evaluateCustomStrategy(customDef, fields);
+    strategyName = customDef.id;
+    if (hit) {
+      target = hit.price;
+      notes.push(`Своя стратегия «${customDef.name}»: правило «${hit.ruleName}» → ${Math.round(hit.price)} ₽ (до коридора и лимитов).`);
+    } else {
+      target = curSeller;
+      notes.push(`Своя стратегия «${customDef.name}»: ни одно правило не сработало — цена не меняется.`);
+    }
+    layers.push({ layer: 'Стратегия', name: strategyName, price: r2(target), note: notes[notes.length - 1] || '' });
+  } else switch (strategy) {
     case 'boost':
       target = ctx.boostPlan && Number(ctx.boostPlan.target) > 0 ? Number(ctx.boostPlan.target) : curSeller;
       notes.push(ctx.boostPlan ? ctx.boostPlan.reason || 'Лесенка буста' : 'Настройте ступени лесенки буста');
@@ -961,7 +1132,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     }
   }
 
-  layers.push({ layer: 'Стратегия', name: strategyName, price: r2(target), note: notes[notes.length - 1] || '' });
+  if (!customDef) layers.push({ layer: 'Стратегия', name: strategyName, price: r2(target), note: notes[notes.length - 1] || '' });
 
   // ── СЛОЙ 2: верхнеуровневые ДЦО (приоритет выше, берём максимальную цену) ──
   const dco = [];
@@ -1020,7 +1191,8 @@ function computeItem(ctx, cfg, itemCfg, ec) {
 
   // ── коридор ──
   const beforeCorridor = finalPrice;
-  finalPrice = Math.min(Math.max(finalPrice, priceFloor > 0 ? priceFloor : 1), corridorMax);
+  const corridorCeil = customDef && customDef.ignoreMaximums ? (hardMax > 0 ? hardMax : Infinity) : corridorMax;
+  finalPrice = Math.min(Math.max(finalPrice, priceFloor > 0 ? priceFloor : 1), corridorCeil);
   if (Math.abs(finalPrice - beforeCorridor) > 0.5) {
     notes.push(hardMax > 0 && finalPrice >= hardMax - 0.5 ? `Цена ограничена потолком карточки maxPrice: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽.` : `Цена ограничена коридором: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽ (мин ${Math.round(priceFloor)}, базовая ${Math.round(corridorMax)}).`);
   }
@@ -1259,7 +1431,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     vendorCode: ctx.vendorCode || '',
     title: ctx.title || '',
     strategy: strategyName,
-    strategyTitle: (STRATEGIES.find((s) => s.id === strategyName) || {}).name || strategyName,
+    strategyTitle: (STRATEGIES.find((s) => s.id === strategyName) || (C.customStrategies || []).find((s) => s && s.id === strategyName) || {}).name || strategyName,
     current: {
       basePrice: curBase, discount: r2(curDisc), sellerPrice: r2(curSeller), buyerPrice: r2(curBuyer),
       costPriceRub: num(ctx.params && ctx.params.costPriceRub),
@@ -1440,6 +1612,11 @@ function itemConfig(defaults, user, templates) {
 return {
   DEFAULT_CONFIG,
   STRATEGIES,
+  STRATEGY_ALGORITHMS,
+  CUSTOM_FIELDS,
+  CUSTOM_OPERATORS,
+  evaluateCustomStrategy,
+  validateCustomStrategy,
   beautifulPrice,
   planPromos,
   toBaseAndDiscount,

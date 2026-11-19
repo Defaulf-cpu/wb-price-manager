@@ -10,7 +10,7 @@ function evaluate(row, candidate, options = {}) {
   if (!candidate || !A.finite(candidate.basePrice) || !A.finite(candidate.discount)) return { ok: false, issues: [{ code: 'PRICE_INVALID', message: 'Цена и скидка должны быть конечными числами.', level: 'critical' }] };
   const basePrice = Math.round(Number(candidate.basePrice)), discount = Math.round(Number(candidate.discount)), sellerPrice = basePrice * (1 - discount / 100);
   if (!Number.isSafeInteger(basePrice) || basePrice < 1 || basePrice > 1000000000 || discount < 0 || discount > 95) add('PRICE_INVALID', 'Недопустимая цена или скидка после округления.');
-  if (!RP.STRATEGIES.some((s) => s.id === ic.strategy)) add('STRATEGY_INVALID', 'Неизвестная стратегия товара — проверьте настройки.');
+  if (!RP.STRATEGIES.some((s) => s.id === ic.strategy) && !(cfg.customStrategies || []).some((s) => s.id === ic.strategy)) add('STRATEGY_INVALID', 'Неизвестная стратегия товара — проверьте настройки.');
   if (ctx.allowSend === false) add('SEND_DISABLED', 'Отправка в WB отключена для товара.');
   if (options.lock && options.lock.active) add('SAFETY_LOCK', 'Есть критическая ошибка последнего расчёта. Исправьте её и выполните пересчёт.');
   if (ic.strategy === 'boost' && !options.boost) add('BOOST_PROTECTED', 'Товар управляется лесенкой. Прямое изменение цены вне её подтверждённого предложения запрещено.');

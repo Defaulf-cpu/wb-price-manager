@@ -2109,7 +2109,10 @@ function createService(store, emit, electron, integrations) {
         config: cfg,
         defaults: cfg.defaults,
         presets: cfg.presets,
-        strategies: RP.STRATEGIES,
+        strategies: [...RP.STRATEGIES, ...(cfg.customStrategies || []).map((d) => ({ id: d.id, name: d.name, hint: 'Своя стратегия: ' + ((d.rules || []).length) + ' правил(а), первое сработавшее побеждает.', custom: true }))],
+        customStrategies: cfg.customStrategies || [],
+        customFields: RP.CUSTOM_FIELDS,
+        strategyAlgorithms: RP.STRATEGY_ALGORITHMS,
         itemConfigs: publicItemConfigs(),
         competitors: await competitorsMap(),
         competitorCount: Object.keys(await competitorsMap()).length,
@@ -2165,7 +2168,7 @@ function createService(store, emit, electron, integrations) {
         if (!WorkspaceConfig.plain(value)) throw new WBError('Некорректные настройки товара.', { code: 'BAD_CONFIG' });
         const clean = { ...value }, restart = clean.restartBoost === true;
         delete clean.boostRuntime; delete clean.safetyLock; delete clean.restartBoost;
-        if (clean.strategy && !RP.STRATEGIES.some((s) => s.id === clean.strategy)) throw new WBError('Неизвестная стратегия.', { code: 'BAD_CONFIG' });
+        if (clean.strategy && !RP.STRATEGIES.some((s) => s.id === clean.strategy) && !(repricerCfg().customStrategies || []).some((s) => s.id === clean.strategy)) throw new WBError('Неизвестная стратегия.', { code: 'BAD_CONFIG' });
         for (const key of ['targetMarginPct', 'minMarginPct', 'planSensitivityPct', 'targetTurnoverDays', 'competitorOffsetPct', 'elasticityPct']) {
           if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '') WorkspaceConfig.template({ [key]: clean[key] });
         }
@@ -2195,6 +2198,44 @@ function createService(store, emit, electron, integrations) {
       if (values === null) delete templates[id]; else templates[id] = values;
       store.saveRepricer({ strategyTemplates: templates }, { replaceKeys: ['strategyTemplates'] });
       return { ok: true, templates };
+    },
+
+    /**
+     * Свои стратегии (конструктор в формате INDEEPA). Каждая правка кладёт предыдущую
+     * версию в revisions (до 10) — откат делается повторным сохранением выбранной версии.
+     * Удаление: payload { id, strategy: null }. В WB ничего не отправляется.
+     */
+    'strategies:custom-save': async (payload) => {
+      const list = (repricerCfg().customStrategies || []).slice();
+      const id = String((payload && payload.id) || (payload && payload.strategy && payload.strategy.id) || '');
+      const at = new Date().toISOString();
+      if (!payload || payload.strategy === null) {
+        const next = list.filter((d) => d.id !== id);
+        if (next.length === list.length) throw new WBError('Своя стратегия не найдена.', { code: 'BAD_CONFIG' });
+        store.saveRepricer({ customStrategies: next }, { replaceKeys: ['customStrategies'] });
+        return { ok: true, customStrategies: next };
+      }
+      WorkspaceConfig.assertTree(payload.strategy, 20000, 12);
+      const def = JSON.parse(JSON.stringify(payload.strategy));
+      const problem = RP.validateCustomStrategy(def);
+      if (problem) throw new WBError(problem, { code: 'BAD_STRATEGY' });
+      def.name = String(def.name).trim().slice(0, 120);
+      def.enabled = def.enabled !== false;
+      def.ignoreMaximums = !!def.ignoreMaximums;
+      def.rules = def.rules.map((rule) => ({ ...rule, name: String(rule.name).trim().slice(0, 160), enabled: rule.enabled !== false, schedule: null }));
+      if (id) {
+        const idx = list.findIndex((d) => d.id === id);
+        if (idx < 0) throw new WBError('Своя стратегия не найдена.', { code: 'BAD_CONFIG' });
+        const prev = list[idx];
+        const revisions = [{ savedAt: prev.updatedAt || at, name: prev.name, enabled: prev.enabled, ignoreMaximums: !!prev.ignoreMaximums, rules: prev.rules }, ...(prev.revisions || [])].slice(0, 10);
+        list[idx] = { ...def, id, createdAt: prev.createdAt || at, updatedAt: at, revisions };
+      } else {
+        def.id = 'custom-' + crypto.randomUUID().slice(0, 8);
+        def.createdAt = at; def.updatedAt = at; def.revisions = [];
+        list.push(def);
+      }
+      store.saveRepricer({ customStrategies: list }, { replaceKeys: ['customStrategies'] });
+      return { ok: true, customStrategies: list, id: def.id };
     },
 
     'repricer:competitors:get': async () => competitorsMap(),
@@ -3766,7 +3807,7 @@ function createService(store, emit, electron, integrations) {
           if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
           result.inputFingerprint = inputFingerprint(result.nmID, fingerprints);
           result.issues = StatMath.issuesFor(result, !!fingerprints.drafts[String(result.nmID)]);
-          if (!RP.STRATEGIES.some((s) => s.id === result.strategy)) result.issues.push({ code: 'STRATEGY_INVALID', message: 'Неизвестная стратегия товара', level: 'critical' });
+          if (!RP.STRATEGIES.some((s) => s.id === result.strategy) && !(cfg.customStrategies || []).some((s) => s.id === result.strategy)) result.issues.push({ code: 'STRATEGY_INVALID', message: 'Неизвестная стратегия товара', level: 'critical' });
           result.autoBlocked = result.issues.some((i) => i.level === 'critical');
           result.manualAllowSend = result.allowSend;
           if (result.autoBlocked) { result.allowSend = false; result.needSend = false; }
@@ -5074,7 +5115,7 @@ function createService(store, emit, electron, integrations) {
   }
 
   const priceChannels = new Set(['wb:apply-prices', 'wb:apply-size-prices', 'wb:promo-join', 'repricer:send', 'repricer:proposal-send', 'repricer:promo-apply', 'repricer:promo-exit', 'repricer:promo-restore']);
-  const inputChannels = new Set(['keys:set', 'keys:clear', 'settings:save', 'settings:reset', 'costs:save', 'costs:import', 'costs:clear', 'prices:draft-save', 'prices:draft-clear', 'repricer:save', 'repricer:item-configs:save', 'strategies:template', 'data:refresh-all', 'backup:import', 'backup:restore', 'repricer:calc', 'repricer:competitors:save', 'promos:import-noms', 'promos:noms:save', 'promos:clear-noms']);
+  const inputChannels = new Set(['keys:set', 'keys:clear', 'settings:save', 'settings:reset', 'costs:save', 'costs:import', 'costs:clear', 'prices:draft-save', 'prices:draft-clear', 'repricer:save', 'repricer:item-configs:save', 'strategies:template', 'strategies:custom-save', 'data:refresh-all', 'backup:import', 'backup:restore', 'repricer:calc', 'repricer:competitors:save', 'promos:import-noms', 'promos:noms:save', 'promos:clear-noms']);
   // Счётчик включает и вложенные асинхронные вызовы обработчиков: удаление или
   // импорт не могут обогнать запрос WB, который ещё запишет результат в этот профиль.
   for (const [channel, fn] of Object.entries(handlers)) {

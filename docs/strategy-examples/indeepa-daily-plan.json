@@ -1,0 +1,373 @@
+{
+  "name": "Конкурент + дневной план (через CalcMaxPrice)",
+  "formula": "",
+  "addCosts": false,
+  "ignoreMaximums": false,
+  "disableStdFormulas": null,
+  "testDataRows": [],
+  "type": 1,
+  "rules": [
+    {
+      "name": "9. Заказов 25+ — Расчетная базовая цена",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "24",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CalcMaxPrice",
+          "changeType": 30,
+          "valueType": 0,
+          "changeAmount": 0
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "8. Заказов 21-24 — Конкурент по карте + 10%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "20",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 10,
+          "valueType": 10,
+          "changeAmount": 10
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "7. Заказов 17-20 — Конкурент по карте + 6%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "16",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 10,
+          "valueType": 10,
+          "changeAmount": 6
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "6. Заказов 13-16 — Конкурент по карте + 3%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "12",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 10,
+          "valueType": 10,
+          "changeAmount": 3
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "5. Заказов 9-12 — Как у конкурента по карте",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "8",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 30,
+          "valueType": 0,
+          "changeAmount": 0
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "4. Заказов 5-8 — Конкурент по карте - 2%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "4",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 20,
+          "valueType": 10,
+          "changeAmount": 2
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "3. Заказов 1-4 — Конкурент по карте - 3%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "QtyTodayBaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "0",
+              "rightExpression2": null
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 20,
+          "valueType": 10,
+          "changeAmount": 3
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    },
+    {
+      "name": "2. Заказов 0 — Конкурент по карте - 5%",
+      "conditions": [
+        {
+          "isOr": false,
+          "elements": [
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "SumStock",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "3",
+              "rightExpression2": ""
+            },
+            {
+              "leftExpressionType": 10,
+              "leftExpression": "CompetitorPriceOzonCard_BaseExt",
+              "compareOperator": 70,
+              "rightExpressionType": 0,
+              "rightExpression": "9",
+              "rightExpression2": null
+            }
+          ],
+          "children": []
+        }
+      ],
+      "priceCalcConfig": {
+        "priceCalcExpression": null,
+        "priceCalcExpressionConfig": {
+          "inputFieldAlias": "CompetitorPriceOzonCard_BaseExt",
+          "changeType": 20,
+          "valueType": 10,
+          "changeAmount": 5
+        },
+        "useConfig": true
+      },
+      "enabled": true,
+      "schedule": null
+    }
+  ],
+  "schedule": null,
+  "enabled": true
+}

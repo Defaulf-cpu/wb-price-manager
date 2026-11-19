@@ -304,16 +304,235 @@
       buttons: [{ label: 'Вернуть базовые параметры', class: 'btn-ghost', keepOpen: true, onClick: () => { this._strategyEditorDirty = true; body.querySelectorAll('[data-strategy-field]').forEach((i) => { i.value = RP.DEFAULT_CONFIG.defaults[i.dataset.strategyField]; }); if (strategy === 'boost') { body.querySelector('#boost-days').value = 7; body.querySelectorAll('.boost-quota').forEach((i) => i.value = 2); body.querySelectorAll('.boost-margin').forEach((i) => i.value = Math.max(0, Number(effective.minMarginPct) || 0)); } this._strategyCapture(); } }, { label: 'Отменить изменения', class: 'btn-ghost', keepOpen: true, onClick: async () => { discard = true; if (previousPending) this.pendingEdits.set(String(nmID), copy(previousPending)); else this.pendingEdits.delete(String(nmID)); await modal.close(); this.renderResults(); this.drawEditBar(); } }, { label: 'Сохранить и закрыть', class: 'btn-primary', keepOpen: true, onClick: async () => { if (!this._strategyCapture()) return false; saved = true; if (!await this.commitEdits(null, { quiet: true, noRetry: true })) { saved = false; return false; } await modal.close(); } }] });
   };
 
+  const CUSTOM_OPS = [[70, '>'], [60, '≥'], [50, '≤'], [40, '<'], [10, '='], [20, '≠']];
+  const customFieldsOf = (state) => (state && state.customFields) || RP.CUSTOM_FIELDS || [];
+  const cloneJson = (v) => JSON.parse(JSON.stringify(v));
+
+  /** Черновик своей стратегии из встроенной: приближённый перевод механики в правила. */
+  function seedFromBuiltin(entry) {
+    const rule = (name, elements, alias, changeType = 30, valueType = 0, changeAmount = 0) => ({
+      name, enabled: true, schedule: null,
+      conditions: [{ isOr: false, elements, children: [] }],
+      priceCalcConfig: { useConfig: true, priceCalcExpression: null, priceCalcExpressionConfig: { inputFieldAlias: alias, changeType, valueType, changeAmount } }
+    });
+    const el = (left, right) => ({ leftExpressionType: 10, leftExpression: left, compareOperator: 70, rightExpressionType: 0, rightExpression: String(right), rightExpression2: null });
+    const seeds = {
+      competitor: [rule('Как у конкурента (черновик копии)', [el('SumStock', 0), el('CompetitorPrice', 9)], 'CompetitorPrice')],
+      margin: [rule('Цена целевой маржи (черновик копии)', [el('TargetMarginPrice', 0)], 'TargetMarginPrice')],
+      promo: [rule('Акционная цена (черновик копии)', [el('PromoPrice', 0)], 'PromoPrice')],
+      hold: [rule('Держать цену (черновик копии)', [], 'SellerPrice')],
+      turnover: [rule('Распродажа при оборачиваемости выше 60 дней (черновик)', [el('TurnoverDays', 60)], 'CalcMinPrice'), rule('Обычная цена (черновик копии)', [], 'SellerPrice')],
+      default: [rule('Базовая цена (черновик копии)', [], 'BasePrice')]
+    };
+    return {
+      name: 'Копия: ' + entry.name, enabled: true, ignoreMaximums: false,
+      rules: seeds[entry.id] || [rule('Базовая цена (черновик копии)', [], 'BasePrice')]
+    };
+  }
+
+  /** Шестерёнка: конкретный алгоритм стратегии, а не только подсказка. */
+  function openAlgorithm(state, entry, container) {
+    const algo = (state.strategyAlgorithms || RP.STRATEGY_ALGORITHMS || {})[entry.id];
+    const fields = customFieldsOf(state);
+    const labelOf = (alias) => { const f = fields.find((x) => x.alias === alias); return f ? f.label : alias; };
+    const body = U.el(`<div>
+      <div class="alert info">${U.esc(entry.hint || '')}</div>
+      ${algo ? `<h3 style="margin-top:12px">Как считается — по шагам</h3><ol style="margin:6px 0 0;padding-left:20px;line-height:1.75">${algo.steps.map((s) => '<li>' + U.esc(s) + '</li>').join('')}</ol>
+      <h3 style="margin-top:12px">Используемые показатели</h3><div class="row wrap">${(algo.inputs || []).map((a) => '<span class="badge">' + U.esc(a) + ' — ' + U.esc(labelOf(a)) + '</span>').join(' ')}</div>` : '<p class="hint">Для своих стратегий алгоритм — это список правил в редакторе: правила проверяются сверху вниз, первое сработавшее побеждает.</p>'}
+      <p class="hint" style="margin-top:10px">После стратегии всегда работают общие защитные слои: ценовой коридор товара, лимит шага за обновление/сутки, защита от карантина и блокировки по ошибкам. Отправка в WB — только отдельным подтверждением или автоотправкой по расписанию.</p>
+    </div>`);
+    UI.modal({ title: '⚙ ' + entry.name + ' — алгоритм', size: 'lg', content: body, beforeClose: () => true,
+      buttons: entry.custom ? [{ label: 'Закрыть', class: 'btn-primary' }] : [
+        { label: 'Закрыть', class: 'btn-ghost' },
+        { label: 'Копировать в свою стратегию', class: 'btn-primary', onClick: async (api) => { await api.close(); openCustomEditor(state, seedFromBuiltin(entry), container); App.toast('Создана копия-черновик. Исходная стратегия не изменена; проверьте правила и сохраните.', 'ok', 7000); } }
+      ] });
+  }
+
+  /** Редактор своей стратегии: правила, тест на числах, JSON, история версий для отката. */
+  function openCustomEditor(state, def, container) {
+    const fields = customFieldsOf(state);
+    const fieldOptions = (sel) => fields.map((f) => `<option value="${f.alias}" ${f.alias === sel ? 'selected' : ''}>${U.esc(f.alias)} — ${U.esc(f.label)}</option>`).join('');
+    let draft = cloneJson(def || { name: '', enabled: true, ignoreMaximums: false, rules: [] });
+    delete draft.revisions;
+    const revisions = (def && def.revisions) || [];
+    const testValues = { SumStock: 25, BasePrice: 2000, SellerPrice: 1500, BuyerPrice: 1290, CalcMinPrice: 1100, CalcMaxPrice: 2000, CompetitorPrice: 1400, PromoPrice: 0, SalesPerDay: 12, TurnoverDays: 20, SppPct: 14, DiscountPct: 25, MarginPct: 18, Profit: 270, CostPrice: 700 };
+    const root = U.el('<div class="custom-strategy-editor"></div>');
+    const newElement = () => ({ leftExpressionType: 10, leftExpression: 'SumStock', compareOperator: 70, rightExpressionType: 0, rightExpression: '0', rightExpression2: null });
+    const newRule = () => ({ name: 'Новое правило', enabled: true, schedule: null, conditions: [{ isOr: false, elements: [newElement()], children: [] }], priceCalcConfig: { useConfig: true, priceCalcExpression: null, priceCalcExpressionConfig: { inputFieldAlias: 'CompetitorPrice', changeType: 30, valueType: 0, changeAmount: 0 } } });
+
+    function ruleHtml(rule, idx) {
+      const group = (rule.conditions && rule.conditions[0]) || { isOr: false, elements: [] };
+      const calc = rule.priceCalcConfig.priceCalcExpressionConfig;
+      const els = (group.elements || []).map((el, ei) => `<div class="row wrap cs-cond">
+        <select data-r="${idx}" data-e="${ei}" data-k="leftExpression">${fieldOptions(el.leftExpression)}</select>
+        <select data-r="${idx}" data-e="${ei}" data-k="compareOperator">${CUSTOM_OPS.map(([v, l]) => `<option value="${v}" ${Number(el.compareOperator) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select data-r="${idx}" data-e="${ei}" data-k="rightExpressionType"><option value="0" ${Number(el.rightExpressionType) !== 10 ? 'selected' : ''}>число</option><option value="10" ${Number(el.rightExpressionType) === 10 ? 'selected' : ''}>поле</option></select>
+        ${Number(el.rightExpressionType) === 10
+          ? `<select data-r="${idx}" data-e="${ei}" data-k="rightExpression">${fieldOptions(el.rightExpression)}</select>`
+          : `<input type="number" step="any" data-r="${idx}" data-e="${ei}" data-k="rightExpression" value="${U.esc(el.rightExpression)}" style="width:110px">`}
+        <button type="button" class="btn btn-ghost btn-sm" data-cond-del="${idx}:${ei}" title="Удалить условие">✕</button></div>`).join('');
+      return `<section class="card cs-rule" data-rule="${idx}">
+        <div class="spread wrap"><div class="row wrap"><b>#${idx + 1}</b><input data-r="${idx}" data-k="name" value="${U.esc(rule.name)}" style="min-width:260px"><label class="checkline"><input type="checkbox" data-r="${idx}" data-k="enabled" ${rule.enabled !== false ? 'checked' : ''}> включено</label></div>
+        <div class="row"><button type="button" class="btn btn-ghost btn-sm" data-rule-up="${idx}" title="Выше (приоритетнее)">↑</button><button type="button" class="btn btn-ghost btn-sm" data-rule-down="${idx}" title="Ниже">↓</button><button type="button" class="btn btn-ghost btn-sm" data-rule-copy="${idx}">Копия</button><button type="button" class="btn btn-ghost btn-sm" data-rule-del="${idx}">Удалить</button></div></div>
+        <div class="row wrap" style="margin-top:8px"><span class="hint">Условия:</span><select data-r="${idx}" data-k="isOr"><option value="0" ${!group.isOr ? 'selected' : ''}>все (И)</option><option value="1" ${group.isOr ? 'selected' : ''}>любое (ИЛИ)</option></select><button type="button" class="btn btn-ghost btn-sm" data-cond-add="${idx}">+ условие</button></div>
+        ${els || '<div class="hint">Без условий — правило срабатывает всегда (удобно последним, «по умолчанию»).</div>'}
+        <div class="row wrap" style="margin-top:8px"><span class="hint">Новая цена:</span>
+          <select data-r="${idx}" data-k="inputFieldAlias">${fieldOptions(calc.inputFieldAlias)}</select>
+          <select data-r="${idx}" data-k="changeType"><option value="30" ${Number(calc.changeType) === 30 ? 'selected' : ''}>установить как есть</option><option value="10" ${Number(calc.changeType) === 10 ? 'selected' : ''}>увеличить</option><option value="20" ${Number(calc.changeType) === 20 ? 'selected' : ''}>уменьшить</option></select>
+          <input type="number" step="any" min="0" data-r="${idx}" data-k="changeAmount" value="${calc.changeAmount}" style="width:100px">
+          <select data-r="${idx}" data-k="valueType"><option value="0" ${Number(calc.valueType) !== 10 ? 'selected' : ''}>₽</option><option value="10" ${Number(calc.valueType) === 10 ? 'selected' : ''}>%</option></select>
+        </div></section>`;
+    }
+
+    function render() {
+      root.innerHTML = `
+        <div class="alert info">Правила проверяются <b>сверху вниз</b> — первое сработавшее побеждает, остальные не смотрят. Если расчёт правила дал пусто или 0, оно пропускается. После правил всегда работают коридор товара и лимиты шага. Сохранение ничего не отправляет в WB.</div>
+        <div class="grid g2" style="margin-top:10px">
+          <label class="field">Название стратегии<input id="cs-name" value="${U.esc(draft.name)}" maxlength="120"></label>
+          <div class="col"><label class="checkline"><input type="checkbox" id="cs-enabled" ${draft.enabled !== false ? 'checked' : ''}> Стратегия включена</label>
+          <label class="checkline"><input type="checkbox" id="cs-ignore-max" ${draft.ignoreMaximums ? 'checked' : ''}> Игнорировать верхнюю границу коридора (потолок карточки maxPrice всё равно действует)</label></div>
+        </div>
+        <div id="cs-rules">${draft.rules.map(ruleHtml).join('') || '<div class="hint">Правил пока нет.</div>'}</div>
+        <div class="row wrap"><button type="button" class="btn btn-sm" id="cs-rule-add">+ Правило</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="cs-test-btn">Протестировать на числах ниже</button><span id="cs-test-out" class="hint"></span></div>
+        <div class="grid g4" style="margin-top:8px">${Object.keys(testValues).map((k) => `<label class="field">${U.esc(k)}<input type="number" step="any" data-test-field="${k}" value="${testValues[k]}"></label>`).join('')}</div>
+        ${revisions.length ? `<h3 style="margin-top:14px">История версий — откат</h3><div class="col">${revisions.map((r, i) => `<div class="row wrap"><span class="hint">${U.date(r.savedAt, true)} · ${U.esc(r.name)} · ${(r.rules || []).length} правил</span><button type="button" class="btn btn-ghost btn-sm" data-revision="${i}">Откатить к этой версии</button></div>`).join('')}</div>` : ''}
+        <h3 style="margin-top:14px">JSON стратегии (формат INDEEPA, совместимый поднабор)</h3>
+        <textarea id="cs-json" rows="8" style="width:100%" spellcheck="false">${U.esc(JSON.stringify(draft, null, 2))}</textarea>
+        <div class="row wrap"><button type="button" class="btn btn-ghost btn-sm" id="cs-json-apply">Применить JSON</button><span class="hint">Импорт стратегий INDEEPA — кнопкой «Импорт JSON» в разделе «Стратегии»: поля Ozon заменятся ближайшими полями WB, неподдерживаемые условия будут отброшены с предупреждением.</span></div>
+        <div id="cs-error" aria-live="polite"></div>`;
+      wire();
+    }
+
+    function readHeader() {
+      draft.name = root.querySelector('#cs-name').value;
+      draft.enabled = root.querySelector('#cs-enabled').checked;
+      draft.ignoreMaximums = root.querySelector('#cs-ignore-max').checked;
+    }
+    function wire() {
+      root.querySelectorAll('[data-test-field]').forEach((i) => { i.oninput = () => { testValues[i.dataset.testField] = Number(i.value); }; });
+      root.querySelector('#cs-rule-add').onclick = () => { readHeader(); draft.rules.push(newRule()); render(); };
+      root.querySelectorAll('[data-rule-up],[data-rule-down],[data-rule-copy],[data-rule-del],[data-cond-add],[data-cond-del]').forEach((b) => {
+        b.onclick = () => {
+          readHeader();
+          const [ri, ei] = (b.dataset.condDel || '').split(':').map(Number);
+          if (b.dataset.ruleUp !== undefined && b.dataset.ruleUp !== '') { const i = Number(b.dataset.ruleUp); if (i > 0) [draft.rules[i - 1], draft.rules[i]] = [draft.rules[i], draft.rules[i - 1]]; }
+          else if (b.dataset.ruleDown !== undefined && b.dataset.ruleDown !== '') { const i = Number(b.dataset.ruleDown); if (i < draft.rules.length - 1) [draft.rules[i + 1], draft.rules[i]] = [draft.rules[i], draft.rules[i + 1]]; }
+          else if (b.dataset.ruleCopy !== undefined && b.dataset.ruleCopy !== '') { const i = Number(b.dataset.ruleCopy); draft.rules.splice(i + 1, 0, cloneJson(draft.rules[i])); }
+          else if (b.dataset.ruleDel !== undefined && b.dataset.ruleDel !== '') draft.rules.splice(Number(b.dataset.ruleDel), 1);
+          else if (b.dataset.condAdd !== undefined && b.dataset.condAdd !== '') draft.rules[Number(b.dataset.condAdd)].conditions[0].elements.push(newElement());
+          else if (b.dataset.condDel) draft.rules[ri].conditions[0].elements.splice(ei, 1);
+          render();
+        };
+      });
+      root.querySelectorAll('select[data-r], input[data-r]').forEach((i) => {
+        i.onchange = () => {
+          const rule = draft.rules[Number(i.dataset.r)], k = i.dataset.k;
+          if (i.dataset.e !== undefined) { const el = rule.conditions[0].elements[Number(i.dataset.e)]; el[k] = k === 'compareOperator' || k === 'rightExpressionType' ? Number(i.value) : i.value; if (k === 'rightExpressionType') el.rightExpression = Number(i.value) === 10 ? 'CompetitorPrice' : '0'; }
+          else if (k === 'name') rule.name = i.value;
+          else if (k === 'enabled') rule.enabled = i.checked;
+          else if (k === 'isOr') rule.conditions[0].isOr = i.value === '1';
+          else rule.priceCalcConfig.priceCalcExpressionConfig[k] = ['changeType', 'valueType'].includes(k) ? Number(i.value) : (k === 'changeAmount' ? Number(i.value) : i.value);
+          if (k === 'rightExpressionType' || k === 'leftExpression') render();
+        };
+      });
+      root.querySelector('#cs-test-btn').onclick = () => {
+        readHeader();
+        const problem = RP.validateCustomStrategy(draft);
+        const out = root.querySelector('#cs-test-out');
+        if (problem) { out.innerHTML = '<span class="neg">' + U.esc(problem) + '</span>'; return; }
+        const hit = RP.evaluateCustomStrategy(draft, testValues);
+        out.innerHTML = hit ? 'Сработало правило <b>' + U.esc(hit.ruleName) + '</b> → цена <b>' + U.money(hit.price) + '</b> (до коридора и лимитов).' : 'Ни одно правило не сработало — цена не изменится.';
+      };
+      const jsonApply = root.querySelector('#cs-json-apply');
+      if (jsonApply) jsonApply.onclick = () => {
+        try {
+          const parsed = JSON.parse(root.querySelector('#cs-json').value);
+          const problem = RP.validateCustomStrategy(parsed);
+          if (problem) throw new Error(problem);
+          draft = parsed; delete draft.revisions; render();
+          App.toast('JSON применён к черновику. Не забудьте сохранить стратегию.', 'ok');
+        } catch (e) { root.querySelector('#cs-error').innerHTML = '<div class="alert danger">' + U.esc(e.message) + '</div>'; }
+      };
+      root.querySelectorAll('[data-revision]').forEach((b) => {
+        b.onclick = () => { const r = revisions[Number(b.dataset.revision)]; draft = { name: r.name, enabled: r.enabled, ignoreMaximums: r.ignoreMaximums, rules: cloneJson(r.rules || []) }; render(); App.toast('Черновик заменён выбранной версией. Сохраните, чтобы откат вступил в силу.', 'warn', 7000); };
+      });
+    }
+
+    render();
+    UI.modal({ title: def && def.id ? '⚙ Своя стратегия: ' + def.name : '⚙ Новая своя стратегия', size: 'lg', content: root, beforeClose: () => true,
+      buttons: [
+        { label: 'Отмена', class: 'btn-ghost' },
+        { label: 'Сохранить стратегию', class: 'btn-primary', keepOpen: true, onClick: async (api) => {
+          readHeader();
+          const problem = RP.validateCustomStrategy(draft);
+          if (problem) { root.querySelector('#cs-error').innerHTML = '<div class="alert danger">' + U.esc(problem) + '</div>'; return false; }
+          try {
+            const res = await API.invoke('strategies:custom-save', { id: def && def.id, strategy: draft });
+            rp.results = [];
+            App.toast('Своя стратегия сохранена. Назначить её товарам можно в репрайсере; требуется новый пересчёт.', 'ok', 7000);
+            await api.close();
+            if (container) Views.strategies.render(container);
+            return true;
+          } catch (e) { root.querySelector('#cs-error').innerHTML = '<div class="alert danger">' + U.esc(e.message) + '</div>'; return false; }
+        } }
+      ] });
+  }
+
+  /** Импорт стратегии INDEEPA: Ozon-alias → ближайшее поле WB, остальное честно отбрасываем. */
+  function importIndeepa(state, container, file) {
+    const map = { SumStock: 'SumStock', CalcMinPrice: 'CalcMinPrice', CalcMaxPrice: 'CalcMaxPrice', CompetitorPrice: 'CompetitorPrice', CompetitorPriceOzonCard_BaseExt: 'CompetitorPrice', CompetitorPrice_BaseExt: 'CompetitorPrice', BasePrice: 'BasePrice', OZONCurrentRetailPrice: 'SellerPrice', QtyTodayBaseExt: 'SalesPerDay', CostPrice: 'CostPrice', SppPercent: 'SppPct' };
+    file.text().then((text) => {
+      try {
+        const src = JSON.parse(text);
+        if (!src || !Array.isArray(src.rules)) throw new Error('В файле нет массива rules.');
+        let dropped = 0;
+        const rules = [];
+        for (const r of src.rules) {
+          const calc = r.priceCalcConfig && r.priceCalcConfig.priceCalcExpressionConfig;
+          if (!calc || !map[calc.inputFieldAlias]) { dropped++; continue; }
+          const elements = [];
+          for (const g of r.conditions || []) for (const el of g.elements || []) {
+            if (!map[el.leftExpression] || Number(el.compareOperator) !== 70) { dropped++; continue; }
+            elements.push({ leftExpressionType: 10, leftExpression: map[el.leftExpression], compareOperator: 70, rightExpressionType: 0, rightExpression: String(el.rightExpression), rightExpression2: null });
+          }
+          rules.push({ name: String(r.name || 'Правило INDEEPA'), enabled: r.enabled !== false, schedule: null, conditions: [{ isOr: false, elements, children: [] }], priceCalcConfig: { useConfig: true, priceCalcExpression: null, priceCalcExpressionConfig: { inputFieldAlias: map[calc.inputFieldAlias], changeType: Number(calc.changeType), valueType: Number(calc.valueType), changeAmount: Math.abs(Number(calc.changeAmount) || 0) } } });
+        }
+        if (!rules.length) throw new Error('Не удалось перенести ни одного правила: нет поддерживаемых полей.');
+        openCustomEditor(state, { name: String(src.name || 'Импорт INDEEPA'), enabled: src.enabled !== false, ignoreMaximums: !!src.ignoreMaximums, rules }, container);
+        App.toast('Импорт INDEEPA открыт как черновик: правил перенесено ' + rules.length + (dropped ? ', отброшено элементов: ' + dropped + ' (неподдерживаемые поля/операторы).' : '.'), 'warn', 9000);
+      } catch (e) { App.toast('Импорт не удался: ' + e.message, 'err', 8000); }
+    });
+  }
+
   Views.strategies = {
     title: 'Стратегии', subtitle: 'Механика и параметры базовых шаблонов. Защитные ограничения остаются обязательными.',
     async render(container) {
       this.container = container; container.innerHTML = UI.loading(); const epoch = API.generation();
       try {
         const state = await API.invoke('repricer:state'); if (epoch !== API.generation() || !container.isConnected) return;
-        container.innerHTML = `<div class="alert info">Шаблон задаёт значения для товаров без личного переопределения. Изменения не отправляют цены. «Лесенка буста» настраивается отдельно у каждого товара кнопкой ⚙; её квоты ежедневно сбрасываются в 00:00 МСК.</div><div class="strategy-library">${state.strategies.map((s) => `<section class="card strategy-template" data-template="${s.id}"><div class="spread"><h2>${U.esc(s.name)}</h2>${UI.badge((state.config.strategyTemplates || {})[s.id] ? 'Изменён' : 'Базовый', (state.config.strategyTemplates || {})[s.id] ? 'warn' : '')}</div><p>${U.esc(s.hint)}</p><div class="strategy-pipeline"><span>Источник</span><b>→</b><span>Маржа / коридор</span><b>→</b><span>Лимиты / контроль</span></div><div class="grid g2">${fieldsHtml(s.id, { ...state.defaults, ...(state.config.strategyTemplates || {})[s.id] })}</div><div class="row wrap"><button class="btn btn-primary btn-sm" data-template-save>Сохранить шаблон</button><button class="btn btn-ghost btn-sm" data-template-reset>Вернуть базовый</button></div></section>`).join('')}</div>`;
+        const builtins = state.strategies.filter((s) => !s.custom);
+        const customs = state.customStrategies || [];
+        container.innerHTML = `<div class="alert info">Шаблон задаёт значения для товаров без личного переопределения. Изменения не отправляют цены. Шестерёнка ⚙ у стратегии показывает её конкретный алгоритм; встроенную можно скопировать в свою и экспериментировать на копии. «Лесенка буста» настраивается отдельно у каждого товара кнопкой ⚙; её квоты ежедневно сбрасываются в 00:00 МСК.</div>
+        <div class="strategy-library">${builtins.map((s) => `<section class="card strategy-template" data-template="${s.id}"><div class="spread"><h2>${U.esc(s.name)}</h2>${UI.badge((state.config.strategyTemplates || {})[s.id] ? 'Изменён' : 'Базовый', (state.config.strategyTemplates || {})[s.id] ? 'warn' : '')}</div><p>${U.esc(s.hint)}</p><div class="strategy-pipeline"><span>Источник</span><b>→</b><span>Маржа / коридор</span><b>→</b><span>Лимиты / контроль</span></div><div class="grid g2">${fieldsHtml(s.id, { ...state.defaults, ...(state.config.strategyTemplates || {})[s.id] })}</div><div class="row wrap"><button class="btn btn-primary btn-sm" data-template-save>Сохранить шаблон</button><button class="btn btn-ghost btn-sm" data-template-reset title="Откат шаблона к базовым значениям">Вернуть базовый</button><button class="btn btn-ghost btn-sm" data-template-algo title="Посмотреть конкретный алгоритм стратегии">⚙ Алгоритм</button><button class="btn btn-ghost btn-sm" data-template-copy title="Создать свою копию и экспериментировать на ней">Копировать в свою</button></div></section>`).join('')}</div>
+        <div class="spread" style="margin-top:18px"><h2>Мои стратегии</h2><div class="row wrap"><button class="btn btn-primary btn-sm" id="cs-create">+ Создать стратегию</button><label class="btn btn-ghost btn-sm" style="cursor:pointer">Импорт INDEEPA JSON<input type="file" id="cs-import" accept=".json,application/json" hidden></label></div></div>
+        <p class="hint">Свои стратегии собираются из правил как в INDEEPA: сверху вниз, первое сработавшее побеждает. Их можно назначать товарам в репрайсере наравне со встроенными. Каждая правка сохраняет предыдущую версию — откат доступен в редакторе.</p>
+        <div class="strategy-library">${customs.map((d) => `<section class="card strategy-template"><div class="spread"><h2>${U.esc(d.name)}</h2>${UI.badge(d.enabled === false ? 'Выключена' : (d.rules || []).length + ' правил', d.enabled === false ? 'warn' : '')}</div><p class="hint">Обновлена ${U.date(d.updatedAt, true)}${(d.revisions || []).length ? ' · версий для отката: ' + d.revisions.length : ''}</p><div class="row wrap"><button class="btn btn-primary btn-sm" data-custom-edit="${d.id}">⚙ Редактировать</button><button class="btn btn-ghost btn-sm" data-custom-copy="${d.id}">Копировать</button><button class="btn btn-ghost btn-sm" data-custom-delete="${d.id}">Удалить</button></div></section>`).join('') || '<div class="card muted">Своих стратегий пока нет. Создайте с нуля, скопируйте встроенную или импортируйте JSON INDEEPA.</div>'}</div>`;
         container.querySelectorAll('[data-template]').forEach((card) => {
+          const entry = builtins.find((s) => s.id === card.dataset.template);
           const save = async (reset) => { if (!reset && [...card.querySelectorAll('input')].some((i) => !i.reportValidity())) return; const values = {}; card.querySelectorAll('[data-strategy-field]').forEach((i) => { values[i.dataset.strategyField] = Number(i.value); }); try { await API.invoke('strategies:template', { strategy: card.dataset.template, values: reset ? null : values }); rp.results = []; App.toast(reset ? 'Базовые настройки восстановлены' : 'Шаблон сохранён, требуется новый пересчёт', 'ok'); this.render(container); } catch (e) { App.toast(e.message, 'err'); } };
           card.querySelector('[data-template-save]').onclick = () => save(false); card.querySelector('[data-template-reset]').onclick = () => save(true);
+          card.querySelector('[data-template-algo]').onclick = () => openAlgorithm(state, entry, container);
+          card.querySelector('[data-template-copy]').onclick = () => { openCustomEditor(state, seedFromBuiltin(entry), container); App.toast('Создана копия-черновик «' + entry.name + '». Исходная стратегия не изменена.', 'ok', 6000); };
+        });
+        const createBtn = container.querySelector('#cs-create');
+        if (createBtn) createBtn.onclick = () => openCustomEditor(state, null, container);
+        const importInput = container.querySelector('#cs-import');
+        if (importInput) importInput.onchange = () => { if (importInput.files && importInput.files[0]) importIndeepa(state, container, importInput.files[0]); };
+        container.querySelectorAll('[data-custom-edit]').forEach((b) => { b.onclick = () => openCustomEditor(state, customs.find((d) => d.id === b.dataset.customEdit), container); });
+        container.querySelectorAll('[data-custom-copy]').forEach((b) => { b.onclick = () => { const src = customs.find((d) => d.id === b.dataset.customCopy); const copyDef = cloneJson(src); delete copyDef.id; delete copyDef.revisions; copyDef.name = 'Копия: ' + src.name; openCustomEditor(state, copyDef, container); }; });
+        container.querySelectorAll('[data-custom-delete]').forEach((b) => {
+          b.onclick = () => { const src = customs.find((d) => d.id === b.dataset.customDelete); UI.confirmDialog('Удалить свою стратегию', '<div class="alert warn">Стратегия «' + U.esc(src.name) + '» будет удалена. Товары, которым она назначена, получат ошибку «неизвестная стратегия» и заблокируются от отправки до переназначения. В WB ничего не отправляется.</div>', async () => { await API.invoke('strategies:custom-save', { id: src.id, strategy: null }); rp.results = []; App.toast('Стратегия удалена', 'ok'); this.render(container); }); };
         });
       } catch (e) { if (container.isConnected) container.innerHTML = '<div class="alert danger">' + U.esc(e.message) + '</div>'; }
     }

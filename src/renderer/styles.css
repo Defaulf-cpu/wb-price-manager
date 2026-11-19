@@ -282,6 +282,9 @@ table.grid-table tfoot td {
 @keyframes slidein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ─────────── Прочее ─────────── */
+.cs-rule { margin: 10px 0; padding: 12px 14px; }
+.cs-cond { align-items: center; margin-top: 6px; }
+.custom-strategy-editor textarea { font-family: ui-monospace, monospace; font-size: 12px; }
 .rp-tabs-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .rp-tabs-row .tabs { flex: 1 1 auto; min-width: 0; }
 .rp-notices-btn { flex: 0 0 auto; margin-top: 4px; display: inline-flex; align-items: center; gap: 7px; }

@@ -1,0 +1,60 @@
+{
+ "name": "Следование за конкурентом (минимальная проверенная)",
+ "formula": "",
+ "addCosts": false,
+ "ignoreMaximums": false,
+ "disableStdFormulas": null,
+ "testDataRows": [
+  {
+   "inputs": {
+    "SumStock": "5",
+    "CompetitorPrice": "6053",
+    "expectedValue": "null"
+   },
+   "expectedValue": "null"
+  }
+ ],
+ "type": 1,
+ "rules": [
+  {
+   "name": "Следование за конкурентом",
+   "conditions": [
+    {
+     "isOr": false,
+     "elements": [
+      {
+       "leftExpressionType": 10,
+       "leftExpression": "SumStock",
+       "compareOperator": 70,
+       "rightExpressionType": 0,
+       "rightExpression": "0",
+       "rightExpression2": ""
+      },
+      {
+       "leftExpressionType": 10,
+       "leftExpression": "CompetitorPrice",
+       "compareOperator": 70,
+       "rightExpressionType": 0,
+       "rightExpression": "9",
+       "rightExpression2": null
+      }
+     ],
+     "children": []
+    }
+   ],
+   "priceCalcConfig": {
+    "priceCalcExpression": null,
+    "priceCalcExpressionConfig": {
+     "inputFieldAlias": "CompetitorPrice",
+     "changeType": 30,
+     "valueType": 0,
+     "changeAmount": 0
+    },
+    "useConfig": true
+   },
+   "enabled": true
+  }
+ ],
+ "schedule": null,
+ "enabled": true
+}
