@@ -368,7 +368,7 @@ Views.promos = {
       title: `${p.name} — условия для репрайсера`,
       content: body,
       buttons: [
-        { label: 'Перейти к акции в кабинете WB ↗', class: 'btn-ghost', keepOpen: true, onClick: () => {
+        { label: 'Перейти к акции в кабинете WB ↗', class: 'btn-promo-link', keepOpen: true, onClick: () => {
             API.openExternal(U.promoCabinetUrl({ id: p.id, name: p.name }, st.settings));
             App.toast('Открыли кабинет WB: акция «' + (p.name || p.id) + '», ID ' + p.id, 'ok', 9000);
           } },

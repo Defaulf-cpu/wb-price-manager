@@ -58,6 +58,17 @@ async function main() {
   async function closeStrategy() { const box = await modal(); await box.querySelector('.modal-close').onclick(); await until(() => !box.isConnected, 'закрытие редактора'); }
   const foot = (box, label) => { const b = [...box.querySelectorAll('.modal-foot button')].find((b) => b.textContent === label); assert.ok(b, label); return b; };
   await rows();
+  await check('выключенное демо не принимает демо-товары без явной ошибки', async () => {
+    const before = plain(w.S.state.items), realInvoke = w.API.invoke, realAppState = w.S.state.appState;
+    try {
+      w.S.state.appState = { ...realAppState, demo: false };
+      w.API.invoke = async (channel) => channel === 'wb:goods'
+        ? { demo: true, items: plain(goods), overrides: {}, stats: [], settings: w.S.state.settings }
+        : realInvoke(channel);
+      await assert.rejects(() => w.S.loadGoods(true), /демо-товары/);
+      assert.deepEqual(plain(w.S.state.items), before);
+    } finally { w.API.invoke = realInvoke; w.S.state.appState = realAppState; }
+  });
   await check('назначение открывает редактор; отмена убирает сам выбор, сохраняя предыдущую правку', async () => {
     rp.stageEdit(nm, 'config', { tag: 'До редактора' });
     input('.rp-strategy[data-nm="' + nm + '"]', 'margin', 'change');
@@ -68,10 +79,10 @@ async function main() {
     assert.equal(store.loadItemConfigs()[nm].strategy, undefined);
     await rp.commitEdits(null, { quiet: true }); assert.equal(store.loadItemConfigs()[nm].tag, 'До редактора');
   });
-  await check('крестик не сохраняет параметры; «Сохранить и закрыть» применяет, повторное открытие показывает число', async () => {
+  await check('крестик применяет параметры локально; «Сохранить и закрыть» применяет, повторное открытие показывает число', async () => {
     await rp.openStrategyEditor(nm, 'margin'); const box = await modal();
     input('[data-strategy-field="targetMarginPct"]', 37, 'input', box); await closeStrategy();
-    assert.equal(store.loadItemConfigs()[nm].targetMarginPct, undefined);
+    assert.equal(store.loadItemConfigs()[nm].targetMarginPct, 37);
     await rp.openStrategyEditor(nm, 'margin'); const box2 = await modal(); input('[data-strategy-field="targetMarginPct"]', 37, 'input', box2); await foot(box2, 'Сохранить и закрыть').onclick();
     assert.equal(store.loadItemConfigs()[nm].targetMarginPct, 37); assert.equal(store.loadItemConfigs()[nm].strategy, 'margin');
     await rp.openStrategyEditor(nm); assert.equal(doc.querySelector('[data-strategy-field="targetMarginPct"]').value, '37'); await closeStrategy();
@@ -99,17 +110,17 @@ async function main() {
     await w.Views.itemcard.open(Number(nm)); w.Views.itemcard.tab = 'commissions'; await w.Views.itemcard.drawTab();
     assert.equal(doc.querySelector('#ic-p-costPriceRub').value, '40'); assert.equal(doc.querySelector('#ic-p-currency').value, 'CNY');
     input('#ic-p-otherRub', 8); await w.Views.itemcard.modal.close();
-    assert.equal(store.loadCosts().items[nm].otherRub, 7);
+    assert.equal(store.loadCosts().items[nm].otherRub, 8);
     await w.Views.itemcard.open(Number(nm)); w.Views.itemcard.tab = 'commissions'; await w.Views.itemcard.drawTab(); input('#ic-p-otherRub', 8); doc.querySelector('#ic-p-save').click(); await until(() => store.loadCosts().items[nm].otherRub === 8 && !w.API.pending(), 'явное сохранение карточки');
     assert.equal(store.loadCosts().items[nm].costEntered, 40); assert.equal(store.loadCosts().items[nm].costPriceRub, 520); assert.equal(store.loadCosts().items[nm].otherRub, 8);
     assert.equal((await service.handlers['items:card']({ nmID: Number(nm) })).overrides.costPriceRub, 520);
     await w.Views.itemcard.modal.close();
   });
-  await check('старый редактор себестоимости использует исходную валюту и сохраняет её только по кнопке «Сохранить»', async () => {
+  await check('старый редактор себестоимости использует исходную валюту; закрытие окна применяет её локально', async () => {
     w.Views.costs.openItemEditor(Number(nm)); const box = doc.querySelector('#modal-root .modal');
     assert.equal(box.querySelector('#ce-costPriceRub').value, '40'); assert.equal(box.querySelector('#ce-currency').value, 'CNY');
     input('#ce-costPriceRub', 42, 'input', box); await box.querySelector('.modal-close').onclick();
-    assert.equal(store.loadCosts().items[nm].costEntered, 40);
+    assert.equal(store.loadCosts().items[nm].costEntered, 42);
     w.Views.costs.openItemEditor(Number(nm)); const box2 = doc.querySelector('#modal-root .modal'); input('#ce-costPriceRub', 42, 'input', box2); await box2.querySelector('.btn-primary').onclick();
     assert.equal(store.loadCosts().items[nm].costEntered, 42); assert.equal(store.loadCosts().items[nm].costPriceRub, 546); assert.equal(store.loadCosts().items[nm].currency, 'CNY');
     assert.equal((await service.handlers['items:card']({ nmID: Number(nm) })).overrides.costPriceRub, 546);
@@ -162,6 +173,23 @@ async function main() {
     assert.equal(rp.itemFilter.issueLevel, 'critical');
     assert.ok(rp.filteredResults().length >= 1); assert.ok(rp.filteredResults().every((r) => r.autoBlocked));
     assert.ok(rp.results.some((r) => !r.autoBlocked)); assert.ok(doc.querySelector('#rp-health-filter'));
+  });
+  await check('закрытие редактора конкурентов применяет последнее значение локально', async () => {
+    rp.openCompetitors(Number(nm)); const box = doc.querySelector('#modal-root .modal');
+    const last = [...box.querySelectorAll('#cp-list [data-f="price"]')].at(-1); last.value = '1300';
+    await box.querySelector('.modal-close').onclick();
+    const saved = (await service.handlers['repricer:competitors:get']())[nm];
+    assert.equal(saved.at(-1).price, 1300);
+  });
+  await check('отдельный калькулятор считает категорию, карту WB, маржу и ROI без сохранения товара', async () => {
+    assert.match(doc.querySelector('[data-theme-toggle]').textContent, /Светлая|Тёмная/);
+    await w.App.go('calculator'); await until(() => doc.querySelector('#calc-out') && !w.API.pending(), 'калькулятор');
+    assert.ok(doc.querySelector('#calc-category')); assert.match(doc.querySelector('#calc-out').textContent, /ROI по себестоимости/);
+    assert.match(doc.querySelector('#calc-out').textContent, /Цена по карте WB/);
+    const costBefore = plain(store.loadCosts().items[nm]);
+    input('#calc-base', 2000); input('#calc-cost', 500);
+    assert.match(doc.querySelector('#calc-out').textContent, /Прибыль с единицы/);
+    assert.deepEqual(plain(store.loadCosts().items[nm]), costBefore);
   });
   await check('все реальные локальные collectors обошлись без WB send/включения планировщика и без JS ошибок', async () => {
     const forbidden = ['wb:apply-prices', 'wb:apply-size-prices', 'repricer:send', 'repricer:proposal-send', 'repricer:promo-apply'];

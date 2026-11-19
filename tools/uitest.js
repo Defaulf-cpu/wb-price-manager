@@ -164,11 +164,11 @@ async function run() {
   check('акции загружены', window.S.state.promos.length > 0, window.S.state.promos.length + ' шт');
 
   const navCount = doc.querySelectorAll('.nav-item').length;
-  check('навигация построена', navCount === 7, navCount + ' пунктов');
+  check('навигация построена', navCount === 8, navCount + ' пунктов');
   check('модуль репрайсера загружен в интерфейс', !!window.RP && typeof window.RP.computeItem === 'function');
 
   // обход всех разделов
-  for (const id of ['dashboard', 'prices', 'repricer', 'promos', 'economics', 'costs', 'reports', 'settings']) {
+  for (const id of ['dashboard', 'prices', 'repricer', 'calculator', 'promos', 'economics', 'costs', 'reports', 'settings']) {
     window.App.go(id);
     await wait(450);
     const view = doc.getElementById('view');
@@ -1882,7 +1882,7 @@ async function run() {
   check('INDEEPA: статус выгодности показан бейджем',
     /Супер-выгодный|Выгодный|Невыгодный|Без индекса/.test(rpText2));
   check('INDEEPA: есть цена покупателю (СПП) сейчас и станет',
-    /Цена с СПП,/.test(rpHtml2) && /Новая с СПП,/.test(rpHtml2));
+    /Текущая цена с СПП,/.test(rpHtml2) && /Новая цена с СПП,/.test(rpHtml2));
   check('INDEEPA: есть колонка «Акции» с решениями', /<th[^>]*>\s*Акции/.test(rpHtml2) || /Акции/.test(rpHtml2));
   check('INDEEPA: есть колонка «План продаж»', /План продаж/.test(rpHtml2));
 

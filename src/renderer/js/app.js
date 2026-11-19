@@ -6,6 +6,7 @@ window.App = (function () {
   const NAV = [
     { id: 'dashboard', ico: '▦', label: 'Панель' },
     { id: 'repricer', ico: '⟳', label: 'Репрайсер' },
+    { id: 'calculator', ico: 'fx', label: 'Калькулятор' },
     { id: 'strategies', ico: '◈', label: 'Стратегии' },
     { id: 'promos', ico: '％', label: 'Акции WB' },
     { id: 'reports', ico: '🖶', label: 'Отчёты' },
@@ -23,7 +24,7 @@ window.App = (function () {
     try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* недоступное хранилище не мешает теме */ }
     if (API.isElectron) API.invoke('ui:theme', theme).catch(() => {});
     document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
-      button.textContent = theme === 'dark' ? '☀' : '☾';
+      button.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная';
       button.style.flexShrink = '0';
       button.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
       button.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
@@ -455,7 +456,7 @@ window.App = (function () {
       });
     }
     if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
-    const themeButton = mk(theme === 'dark' ? '☀' : '☾', 'btn-ghost theme-toggle', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
+    const themeButton = mk(theme === 'dark' ? '☀ Светлая' : '☾ Тёмная', 'btn-ghost theme-toggle', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
     themeButton.dataset.themeToggle = '1';
     themeButton.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
     themeButton.setAttribute('aria-label', 'Переключить светлую или тёмную тему');

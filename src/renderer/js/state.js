@@ -84,6 +84,9 @@ window.S = (function () {
     try {
       const res = await API.invoke('wb:goods', { force: !!force });
       if (state.dataContext && res.dataContext && state.dataContext !== res.dataContext) throw new Error('Режим данных изменился — обновите кабинет.');
+      if (state.appState && state.appState.demo === false && res.demo === true) {
+        throw new Error('Сервис вернул демо-товары, хотя демо-режим выключен и выбран кабинет WB. Товары не показаны, чтобы не смешать кабинеты. Нажмите «Обновить данные из WB» ещё раз; если ошибка повторится, пересохраните ключи в настройках.');
+      }
       invalidateProductViews(false);
       state.goodsRevision = (state.goodsRevision || 0) + 1;
       state.items = res.items || [];

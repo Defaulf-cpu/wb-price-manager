@@ -23,6 +23,7 @@ Views.itemcard = {
       title: 'Карточка товара',
       size: 'lg',
       dismissable: true,
+      beforeClose: async () => LocalDrafts.commit({ scope: modal.body, report: true }),
       content: UI.loading('Читаем данные товара из WB и кэша приложения…'),
       buttons: [
         /**
@@ -30,8 +31,8 @@ Views.itemcard = {
          * окном, но товар можно открыть в «Ценах и скидках» — таблица отфильтруется
          * по этому нм-коду.
          */
-        { label: 'Открыть в разделе', class: 'btn-ghost', onClick: () => {
-            modal.close();
+        { label: 'Открыть в разделе', class: 'btn-ghost', onClick: async () => {
+            if (!await modal.close()) return false;
             S.state.filters = S.state.filters || {};
             S.state.filters.q = String(id);
             S.state.filters.flag = 'all';
@@ -599,6 +600,7 @@ Views.itemcard = {
     const p = this.econ().params;
     const srcSpp = (p.costSources || {}).sppPct || 'none';
     const srcMap = {
+      official: 'официальный заказ/продажа из ЛК WB',
       watch: 'наблюдение витрины WB',
       fact: 'среднее по продажам WB',
       manual: 'ваш ручной ввод',
@@ -629,8 +631,10 @@ Views.itemcard = {
             ['Остаток на витрине', last.stock === null || last.stock === undefined ? '—' : U.num(last.stock).toFixed(0) + ' шт'],
             ['Наблюдалось', U.date(last.at, true) + ' · ' + srcLabel(last.source)]
           ]) : '<p class="muted">Наблюдений пока нет. Нажмите «Обновить с витрины» или впишите цены вручную ниже.</p>'}
+          <div class="alert info" style="margin-top:12px"><b>Официальный путь без витрины:</b> СПП можно получить из последних заказов/продаж личного кабинета WB кнопкой ниже. Это не live-цена витрины для каждого покупателя, а последнее датированное наблюдение кабинета.${f.sppPctOfficial !== null && f.sppPctOfficial !== undefined ? `<br>Сейчас в ЛК: <b>${U.pct(f.sppPctOfficial)}</b> · ${U.esc(f.sppOfficialSource === 'orders' ? 'заказ' : 'продажа')} ${U.date(f.sppOfficialAt, true)}.` : ''}</div>
           <div class="row wrap" style="gap:8px;margin-top:12px;align-items:center">
             <button class="btn btn-primary" id="pw-fetch" ${demo ? 'disabled' : ''}>Обновить с витрины</button>
+            <button class="btn btn-ok" id="pw-official">СПП из ЛК WB (официальный API)</button>
             <button class="btn" id="pw-open">Открыть карточку на WB</button>
             <span class="tiny muted" id="pw-status">${demo ? 'демо-режим'
               : (autoFetch ? 'автозапросы включены, кэш ' + ttl + ' мин' : 'автозапросы выключены — кнопка делает один запрос')}</span>
@@ -736,7 +740,7 @@ Views.itemcard = {
       }
       if (r.blocked) {
         result.innerHTML = '<div class="alert warn">' + U.esc(msg || 'Витрина WB заблокировала запрос.') +
-          ' <span class="tiny">Дальше не пробуем. Откройте карточку и впишите цены вручную ниже.</span></div>';
+          ' <span class="tiny">Дальше не пробуем и защиту не обходим. Нажмите «СПП из ЛК WB (официальный API)» выше — подтянем последнее наблюдение из заказов/продаж кабинета, либо впишите цены вручную ниже.</span></div>';
         return;
       }
       if (r.ok === false) {
@@ -786,6 +790,16 @@ Views.itemcard = {
     };
 
     host.querySelector('#pw-fetch').onclick = () => runFetch({ nmIDs: [nmID] }, 'Витрина');
+    host.querySelector('#pw-official').onclick = async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      try {
+        const res = await API.invoke('spp:refresh');
+        await S.loadGoods(false); await S.refreshFacts();
+        App.toast(res.note || 'СПП обновлён из личного кабинета WB.', 'ok', 9000);
+        await this.reloadCard(); if (this.tab === 'watch') await this.tabWatch(host);
+      } catch (e) { App.toast(e.message || String(e), 'warn', 9000); }
+      finally { if (button.isConnected) button.disabled = false; }
+    };
     host.querySelector('#pw-open').onclick = () => {
       API.openExternal('https://www.wildberries.ru/catalog/' + nmID + '/detail.aspx');
     };

@@ -331,8 +331,8 @@ Views.costs = {
     body.querySelectorAll('input[type="number"]').forEach((input) => { input.min = '0'; if (/Pct$/.test(input.id)) input.max = '100'; });
     UI.modal({
       title: `Себестоимость — ${r.title}`, content: body, size: 'md',
-      beforeClose: () => LocalDrafts.captureScope(body, true),
-      buttons: [{ label: 'Закрыть без сохранения', class: 'btn-ghost' }, { label: 'Сохранить', class: 'btn-primary', onClick: async (modal) => { if (await LocalDrafts.commit({ scope: body, report: true })) await modal.close(); } }]
+      beforeClose: async (_modal, intent) => intent === 'discard' || LocalDrafts.commit({ scope: body, report: true }),
+      buttons: [{ label: 'Закрыть без сохранения', class: 'btn-ghost', closeIntent: 'discard', onClick: () => { LocalDrafts.discard('cost-editor-' + nmID); } }, { label: 'Сохранить', class: 'btn-primary', onClick: async (modal) => { if (await LocalDrafts.commit({ scope: body, report: true })) await modal.close(); } }]
     });
     LocalDrafts.bind(body, 'cost-editor-' + nmID, collect, 'input[id^="ce-"], select[id^="ce-"]');
   },

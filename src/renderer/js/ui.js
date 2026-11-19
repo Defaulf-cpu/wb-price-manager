@@ -67,7 +67,7 @@ window.UI = (function () {
           try {
             btn.disabled = true;
             const r = b.onClick ? await b.onClick(api) : true;
-            if (r !== false && !b.keepOpen) await close();
+            if (r !== false && !b.keepOpen) await close(b.closeIntent);
           } catch (error) { toast(error.message || String(error), 'err', 8000); }
           finally { if (btn.isConnected) btn.disabled = false; }
         };
@@ -83,11 +83,12 @@ window.UI = (function () {
       if (o.onClose) o.onClose();
       return true;
     }
-    function close() {
+    function close(intent) {
       if (closed) return true;
       if (closingPromise) return closingPromise;
+      api.closeIntent = intent || api.closeIntent || 'commit';
       let result;
-      try { result = o.beforeClose ? o.beforeClose(api) : window.LocalDrafts && LocalDrafts.hasScope(box) ? LocalDrafts.captureScope(box, true) : true; }
+      try { result = o.beforeClose ? o.beforeClose(api, api.closeIntent) : window.LocalDrafts && LocalDrafts.hasScope(box) ? LocalDrafts.captureScope(box, true) : true; }
       catch (error) { toast(error.message || String(error), 'err', 8000); return false; }
       if (result && typeof result.then === 'function') {
         closingPromise = result.then((ok) => ok === false ? false : closeNow()).catch((error) => { toast(error.message || String(error), 'err', 8000); return false; }).finally(() => { closingPromise = null; });

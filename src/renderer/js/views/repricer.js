@@ -3491,7 +3491,7 @@ Views.repricer = {
     let resetting = false;
     const editor = UI.modal({
       title: `Настройки артикула — ${r.title}`, content: body, size: '',
-      beforeClose: () => resetting || LocalDrafts.captureScope(body, true),
+      beforeClose: async (_modal, intent) => resetting || intent === 'discard' || LocalDrafts.commit({ scope: body, report: true }),
       buttons: [
         { label: 'Сбросить к общим', class: 'btn-ghost', keepOpen: true, onClick: async () => {
           LocalDrafts.discard('item-config-' + nmID);
@@ -3502,7 +3502,7 @@ Views.repricer = {
           this.openItemConfig(nmID); App.toast('Индивидуальные настройки удалены', 'ok');
         } },
         { label: 'Сохранить', class: 'btn-primary', onClick: async (modal) => { if (await LocalDrafts.commit({ scope: body, report: true })) await modal.close(); } },
-        { label: 'Закрыть без сохранения', class: 'btn-ghost' }
+        { label: 'Закрыть без сохранения', class: 'btn-ghost', closeIntent: 'discard', onClick: () => { LocalDrafts.discard('item-config-' + nmID); } }
       ]
     });
     LocalDrafts.bind(body, 'item-config-' + nmID, () => [{ channel: 'repricer:item-configs:save', payload: { items: { [String(nmID)]: collect() } } }]);
@@ -3775,12 +3775,14 @@ Views.repricer = {
     let competitorsSaved = false;
     UI.modal({
       title: `Конкуренты — ${r ? r.title : nmID}`, content: body, size: 'md',
-      beforeClose: async () => {
-        if (competitorsSaved) return true;
-        // Учитываем последнее введённое значение даже без потери фокуса и только записываем его в память.
+      beforeClose: async (_modal, intent) => {
+        if (competitorsSaved || intent === 'discard') return true;
+        // Учитываем последнее введённое значение даже без потери фокуса и применяем его локально при закрытии.
         body.querySelectorAll('#cp-list input').forEach((input) => input.onchange && input.onchange());
         if (comps.some((c) => !(Number(c.price) > 0) || Number(c.stock) < 0)) { App.toast('Цена конкурента должна быть больше 0, остаток — неотрицательным.', 'warn'); return false; }
         LocalDrafts.stage('competitors-' + nmID, [{ channel: 'repricer:competitors:save', payload: { items: { [String(nmID)]: comps } } }]);
+        if (!await LocalDrafts.commit({ id: 'competitors-' + nmID })) return false;
+        competitorsSaved = true; this.rstate = await API.invoke('repricer:state');
         return true;
       },
       buttons: [{ label: 'Сохранить и закрыть', class: 'btn-primary', onClick: async (modal) => {
@@ -3789,7 +3791,7 @@ Views.repricer = {
         LocalDrafts.stage('competitors-' + nmID, [{ channel: 'repricer:competitors:save', payload: { items: { [String(nmID)]: comps } } }]);
         if (!await LocalDrafts.commit({ id: 'competitors-' + nmID })) return false;
         competitorsSaved = true; this.rstate = await API.invoke('repricer:state'); await modal.close();
-      } }, { label: 'Закрыть без сохранения', class: 'btn-ghost' }]
+      } }, { label: 'Закрыть без сохранения', class: 'btn-ghost', closeIntent: 'discard' }]
     });
   },
 

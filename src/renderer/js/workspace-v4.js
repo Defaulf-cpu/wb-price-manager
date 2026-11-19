@@ -25,6 +25,13 @@
     const revision = S.state.goodsRevision, epoch = API.generation();
     const result = await API.invoke('repricer:calc', options || { full: true });
     if (epoch !== API.generation() || revision !== S.state.goodsRevision) throw new Error('Товары обновились во время расчёта. Выполните новый пересчёт.');
+    if (Array.isArray(result.results) && Array.isArray(S.state.items) && S.state.items.length) {
+      const known = new Set(S.state.items.map((item) => String(item.nmID)));
+      if (result.results.some((row) => !known.has(String(row.nmID)))) {
+        this.results = []; this.summary = null;
+        throw new Error('Расчёт вернул товары, которых нет в текущем кабинете/режиме. Результат отброшен; обновите данные из WB и выполните пересчёт.');
+      }
+    }
     return result;
   };
   const loadState = rp.loadState;
@@ -33,6 +40,16 @@
     if (this._dataIdentity && this._dataIdentity !== identity) { this.results = []; this.summary = null; this.selection = new Set(); }
     this._dataIdentity = identity;
     const result = await loadState.call(this);
+    if (result && typeof result.demo === 'boolean' && typeof S.state.demo === 'boolean' && result.demo !== S.state.demo) {
+      this.results = []; this.summary = null; this.selection = new Set();
+      throw new Error('Репрайсер получил ' + (result.demo ? 'демо-товары' : 'товары WB') + ', а приложение находится в режиме ' + (S.state.demo ? 'демо' : 'кабинета WB') + '. Расчёт остановлен, чтобы не показать товары другого режима. Обновите данные из WB.');
+    }
+    if (Array.isArray(this.results) && this.results.length && Array.isArray(S.state.items) && S.state.items.length) {
+      const known = new Set(S.state.items.map((item) => String(item.nmID)));
+      if (this.results.some((row) => !known.has(String(row.nmID)))) {
+        this.results = []; this.summary = null; this.selection = new Set();
+      }
+    }
     return result;
   };
   const oldErrors = rp.rowErrors;
@@ -43,14 +60,22 @@
     return `<div class="rp-strategy-control"><select class="rp-strategy" data-nm="${r.nmID}" title="${U.esc(((this.rstate.strategies || []).find((s) => s.id === selected) || {}).hint || 'Общая стратегия кабинета')}" aria-label="Стратегия товара ${r.nmID}"><option value="">Общая стратегия</option>${(this.rstate.strategies || []).map((s) => `<option value="${s.id}" ${selected === s.id ? 'selected' : ''}>${U.esc(s.name)}</option>`).join('')}</select><button class="btn btn-xs rp-strategy-gear" data-strategy-edit="${r.nmID}" title="Настройки стратегии" aria-label="Настройки стратегии товара ${r.nmID}">⚙</button></div>`;
   };
   rp.currentPriceBlock = function (r) {
-    const c = r.current || {}, w = r.wallet || {}, v = this.valueStatus(r), p = r.promo || {};
+    const c = r.current || {}, w = r.wallet || {}, p = r.promo || {};
     const fact = (S.state.facts || {})[String(r.nmID)] || {};
-    return `<div class="rp-price-block"><div class="spread">${UI.badge(v.label, v.kind)}${UI.badge(p.inPromo ? 'Есть наблюдение акции' : 'Участие не подтверждено', p.inPromo ? 'info' : '')}</div>${kv([
-      ['Цена до СПП, ₽', U.money(c.sellerPrice)], ['Скидка продавца', U.pct(c.discount)],
-      ['Цена с СПП, ₽', U.money(U.num(c.sellerPrice) * (1 - U.num(w.sppPct) / 100))], ['СПП WB', U.pct(w.sppPct)],
-      ['С кошельком*, ₽', U.money(w.nowBuyer || c.buyerPrice)], ['Кошелёк* (модель)', U.pct(w.walletPct)],
-      ['Текущая маржа', `<span class="${U.profitClass(c.marginPct)}">${U.pct(c.marginPct)}</span>`], ['Прибыль, ₽', `<span class="${U.profitClass(c.profit)}">${U.money(c.profit)}</span>`]
-    ])}<div class="tiny muted">База ${U.money(c.basePrice)} ${this.sizePriceNote(r)}</div><div class="tiny rp-spp-source" title="Источник СПП; скидка кошелька задаётся отдельно">${(c.costSources || {}).sppPct === 'official' && fact.sppOfficialAt ? 'СПП из ЛК: ' + U.esc(fact.sppOfficialSource === 'orders' ? 'заказ' : 'продажа') + ' · ' + U.date(fact.sppOfficialAt, true) + ' · не live-витрина' : 'Источник СПП: ' + U.esc(((c.costSources || {}).sppPct || 'настройки'))}</div><div class="tiny muted">*Кошелёк — модель по настройке, не наблюдение WB.</div><div class="rp-draft-summary"><span class="tiny muted">Моя цена · локальный черновик</span><br>${this.myPriceCellHtml(r)}</div></div>`;
+    const cfg = this.rowConfig(r.nmID), target = U.num(cfg.targetMarginPct !== undefined ? cfg.targetMarginPct : (this.rstate.defaults || {}).targetMarginPct);
+    const minMargin = U.num(cfg.minMarginPct !== undefined ? cfg.minMarginPct : (this.rstate.defaults || {}).minMarginPct);
+    const currentIndex = !(U.num((r.cost || {}).rub) > 0) ? 'Без индекса' : (U.num(c.profit) < 0 || U.num(c.marginPct) < minMargin ? 'Невыгодный' : (target > 0 && U.num(c.marginPct) >= target ? 'Супер-выгодный' : 'Выгодный'));
+    const sppPrice = U.num(c.sellerPrice) * (1 - U.num(w.sppPct) / 100);
+    const walletPrice = U.num(w.nowBuyer || c.buyerPrice);
+    const combinedPct = U.num(c.sellerPrice) > 0 ? (1 - walletPrice / U.num(c.sellerPrice)) * 100 : 0;
+    const promoNames = [...new Set((r.promoActions || []).map((a) => a.promoName).filter(Boolean))].slice(0, 3).join(', ');
+    return `<div class="rp-price-block"><div class="spread">${UI.badge(currentIndex, currentIndex === 'Невыгодный' ? 'danger' : currentIndex === 'Без индекса' ? '' : 'info')}${UI.badge(p.inPromo ? 'Есть наблюдение акции' : 'Участие не подтверждено', p.inPromo ? 'info' : '')}</div>${kv([
+      ['Индекс цены', U.esc(currentIndex)], ['Участие в акции', p.inPromo ? 'Да, по наблюдению цены' : 'Не подтверждено'],
+      ['Текущая цена, ₽', U.money(c.sellerPrice)], ['Акции', U.esc(promoNames || '—')],
+      ['Текущая цена с СПП, ₽', U.money(sppPrice)], ['% СПП', U.pct(w.sppPct)],
+      ['Текущая цена по карте WB, ₽', U.money(walletPrice)], ['% СПП + карта', U.pct(combinedPct)],
+      ['Текущая маржа, %', `<span class="${U.profitClass(c.marginPct)}">${U.pct(c.marginPct)}</span>`], ['Текущая маржа, ₽', `<span class="${U.profitClass(c.profit)}">${U.money(c.profit)}</span>`]
+    ])}<div class="tiny muted">База ${U.money(c.basePrice)} · скидка продавца ${U.pct(c.discount)} ${this.sizePriceNote(r)}</div><div class="tiny rp-spp-source" title="Источник СПП; скидка кошелька задаётся отдельно">${(c.costSources || {}).sppPct === 'official' && fact.sppOfficialAt ? 'СПП из ЛК: ' + U.esc(fact.sppOfficialSource === 'orders' ? 'заказ' : 'продажа') + ' · ' + U.date(fact.sppOfficialAt, true) + ' · не live-витрина' : 'Источник СПП: ' + U.esc(((c.costSources || {}).sppPct || 'настройки'))}</div><div class="tiny muted">*Карта WB — модель по настройке кошелька, не наблюдение WB.</div><div class="rp-draft-summary"><span class="tiny muted">Моя цена · локальный черновик</span><br>${this.myPriceCellHtml(r)}</div></div>`;
   };
   rp.nextPriceBlock = function (r) {
     const d = (S.state.priceDrafts || {})[String(r.nmID)], c = r.current || {}, w = r.wallet || {};
@@ -59,12 +84,15 @@
     const raw = (S.state.items || []).find((i) => String(i.nmID) === String(r.nmID)) || {};
     const unit = d ? EC.analyze(S.state.settings, raw, (S.state.overrides || {})[String(r.nmID)] || {}, { basePrice: next.basePrice, discountPct: next.discount }, (S.state.facts || {})[String(r.nmID)]).next : ((r.cost || {}).next || {});
     if (d && unit) { next.profit = unit.profit; next.marginPct = unit.marginPct; }
+    const nextIndex = this.valueStatus({ ...r, proposed: next });
     return `<div class="rp-price-block">${this.strategyControl(r)}${kv([
-      ['Новая до СПП, ₽', U.money(next.sellerPrice)], ['Комиссия, ₽', U.money(unit.commission)],
-      ['Новая с СПП, ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100))], ['Логистика, ₽', U.money(unit.logistics)],
-      ['С кошельком* (модель), ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100) * (1 - U.num(w.walletPct) / 100))], ['Расходы всего, ₽', U.money(unit.totalCosts)],
-      ['Новая маржа', `<span class="${U.profitClass(next.marginPct)}">${U.pct(next.marginPct)}</span>`], ['Новая прибыль, ₽', `<span class="${U.profitClass(next.profit)}">${U.money(next.profit)}</span>`]
-    ])}<div class="tiny muted">База ${U.money(next.basePrice)} · скидка ${U.pct(next.discount)} · эквайринг ${U.money(unit.acquiring)}${d ? ' · приоритет ручного черновика' : ''}</div>
+      ['Индекс новой цены', U.esc(nextIndex.label)], ['Тип новой цены', U.esc(d ? 'Ручной черновик' : (next.priceMode || r.strategyTitle || r.strategy || 'Стратегия'))],
+      ['Новая цена, ₽', U.money(next.sellerPrice)], ['Комиссия новой цены, ₽', U.money(unit.commission)],
+      ['Новая цена с СПП, ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100))], ['Доставка новой цены, ₽', U.money(unit.logistics)],
+      ['Новая цена по карте WB, ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100) * (1 - U.num(w.walletPct) / 100))], ['Расходы новой цены, ₽', U.money(unit.totalCosts)],
+      ['Эквайринг, ₽', U.money(unit.acquiring)], ['Новая маржа, %', `<span class="${U.profitClass(next.marginPct)}">${U.pct(next.marginPct)}</span>`],
+      ['Новая маржа, ₽', `<span class="${U.profitClass(next.profit)}">${U.money(next.profit)}</span>`]
+    ])}<div class="tiny muted">База ${U.money(next.basePrice)} · скидка ${U.pct(next.discount)}${d ? ' · приоритет ручного черновика' : ''}</div>
       <div class="spread tiny"><span>Δ ${U.signed(U.num(next.sellerPrice) - U.num(c.sellerPrice))} ₽</span><button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button></div>
       ${r.boost ? `<div class="tiny ${r.boost.blocked ? 'neg' : 'muted'}">${U.esc(r.boost.reason || '')}</div>` : ''}
       ${errors.length ? '<div class="rp-validation neg tiny">Обновление заблокировано: ' + U.esc(errors.join('; ')) + '</div>' : (r.warnings || []).length ? `<div class="tiny warnc" title="${U.esc(r.warnings.join('\n'))}">⚠ ${r.warnings.length} предупреждений</div>` : UI.badge(r.needSend ? 'Предложено, не отправлено' : 'Без изменений')}
@@ -76,7 +104,8 @@
     const nm = String(r.nmID), saved = (S.state.costs || {})[nm] || {}, pending = (this.pendingEdits.get(nm) || {}).cost || {}, value = { ...saved, ...pending };
     const pct = U.num(value.otherPct), rub = U.num(value.otherRub), price = U.num((r.current || {}).sellerPrice), spp = U.num((r.wallet || {}).sppPct), wallet = U.num((r.wallet || {}).walletPct), sum = price * pct / 100 + rub;
     const ratio = (denom) => denom > 0 ? U.pct(sum / denom * 100, 2) : '—';
-    return `<div class="rp-other-costs"><label>От цены до СПП, %<input type="number" class="rp-other-pct num" data-nm="${nm}" min="0" max="99" step="0.01" value="${pct}" aria-label="Прочие расходы процент ${nm}"></label><label>Дополнительно, ₽/шт<input type="number" class="rp-other-rub num" data-nm="${nm}" min="0" step="0.01" value="${rub}" aria-label="Прочие расходы рубли ${nm}"></label><div class="tiny muted">Расход = процент × цена + фиксированная сумма. Оба поля складываются.</div>${kv([['Всего, ₽', U.money(sum)], ['% до СПП', ratio(price)], ['% с СПП', ratio(price * (1 - spp / 100))], ['% с кошельком', ratio(price * (1 - spp / 100) * (1 - wallet / 100))], ['% себестоимости', ratio((r.cost || {}).rub)]])}</div>`;
+    const nextPrice = U.num((r.proposed || {}).sellerPrice), nextSum = nextPrice * pct / 100 + rub;
+    return `<div class="rp-other-costs"><label>Прочие расходы, % от цены до СПП<input type="number" class="rp-other-pct num" data-nm="${nm}" min="0" max="99" step="0.01" value="${pct}" aria-label="Прочие расходы процент ${nm}"></label><label>Прочие расходы, ₽<input type="number" class="rp-other-rub num" data-nm="${nm}" min="0" step="0.01" value="${rub}" aria-label="Прочие расходы рубли ${nm}"></label><div class="tiny muted">Первые два поля заполняются. Расход = процент × цена + фиксированная сумма; в экономике он учитывается один раз.</div>${kv([['Прочие расходы, ₽ (текущая цена)', U.money(sum)], ['Прочие расходы, % от цены до СПП', ratio(price)], ['Прочие расходы, % от цены с СПП', ratio(price * (1 - spp / 100))], ['Прочие расходы, % от цены с картой WB', ratio(price * (1 - spp / 100) * (1 - wallet / 100))], ['Прочие расходы, % от себестоимости', ratio((r.cost || {}).rub)], ['Для новой цены, ₽', U.money(nextSum)]])}</div>`;
   };
   rp.abcBlock = function (r) {
     return '<div class="rp-abc" data-source="archive" title="Три буквы: выручка / оценочная прибыль / количество. A — первые 80%, B — до 95%, C — остальные. Равные вклады имеют один класс.">' + [[30, '1 мес · 30д'], [90, '3 мес · 90д'], [180, '6 мес · 180д']].map(([days, label]) => {
@@ -108,7 +137,7 @@
     if (!host.isConnected || !host.querySelector('#rp-cols')) return;
     const tools = host.querySelector('#rp-cols').parentElement;
     if (!tools.querySelector('#rp-spp-refresh')) {
-      const spp = U.el('<button class="btn btn-sm" id="rp-spp-refresh">СПП из ЛК</button>'); tools.appendChild(spp);
+      const spp = U.el('<button class="btn btn-sm" id="rp-spp-refresh" title="Официальный API WB: последние заказы/продажи кабинета, не live-витрина">СПП из ЛК (API WB)</button>'); tools.appendChild(spp);
       spp.onclick = async () => { spp.disabled = true; try { const res = await API.invoke('spp:refresh'); await S.loadGoods(false); await S.refreshFacts(); App.toast(res.note, 'ok', 9000); this.draw(); } catch (e) { App.toast(e.message, 'warn', 9000); } finally { spp.disabled = false; } };
       const abc = U.el('<button class="btn btn-sm" id="rp-abc-load">Загрузить ABC · 90д</button>'); tools.appendChild(abc);
       abc.onclick = async () => { abc.disabled = true; try { const res = await API.invoke('analytics:load'); App.toast(res.note, res.ok ? 'ok' : 'warn', 10000); this.results = []; await this.draw(); } catch (e) { App.toast(e.message, 'warn', 9000); } finally { abc.disabled = false; } };
@@ -231,7 +260,7 @@
     }
     if (epoch !== API.generation()) { this._strategyEditorOpen = false; return; }
     const boost = config.boost || {}, selected = new Map((boost.steps || []).map((s) => [String(s.promoId), s]));
-    const body = U.el(`<div><div class="alert info">${U.esc(entry.hint)}<br><b>Ввод только записывается в память. Кнопка «Сохранить и закрыть» применяет локально; крестик/Escape — без сохранения. В WB ничего не отправляется.</b></div>
+    const body = U.el(`<div><div class="alert info">${U.esc(entry.hint)}<br><b>Закрытие окна крестиком, Escape или кнопкой «Сохранить и закрыть» применяет изменения локально. Кнопка «Отменить изменения» отбрасывает их. В WB ничего не отправляется.</b></div>
       <div id="strategy-edit-error" aria-live="polite"></div>
       ${strategy === 'boost' ? `<div class="grid g2"><label class="field">Начало (МСК)<input id="boost-start" type="date" value="${boost.startDate || options.day || moscowDay()}" required></label><label class="field">Срок работы, дней<input id="boost-days" type="number" min="1" max="365" value="${boost.durationDays || 7}" required></label></div><label class="checkline"><input type="checkbox" id="boost-restart"> Явно перезапустить лесенку (сбросить текущий дневной счётчик)</label>
       <p class="hint">Ежедневный сброс в 00:00 МСК. Считаем заказы без известных отмен. Движение — от дешёвой ступени к дорогой; список ниже показан по убыванию цены. После последней — цена выше выбранных порогов до следующего дня. Срок включает день начала.</p>
@@ -267,8 +296,9 @@
       beforeClose: async () => {
         if (discard || saved || epoch !== API.generation()) return true;
         if (!this._strategyCapture()) return false;
-        App.toast('Изменения стратегии остались несохранёнными в памяти. Нажмите «Сохранить» в панели изменений, чтобы применить.', 'warn', 7000);
-        return true;
+        saved = await this.commitEdits(null, { quiet: true, noRetry: true });
+        if (saved) App.toast('Изменения стратегии применены локально при закрытии. В WB ничего не отправлено.', 'ok', 7000);
+        return saved;
       },
       onClose: () => { this._strategyEditorOpen = false; this._strategyEditorDirty = false; this._strategyCapture = null; },
       buttons: [{ label: 'Вернуть базовые параметры', class: 'btn-ghost', keepOpen: true, onClick: () => { this._strategyEditorDirty = true; body.querySelectorAll('[data-strategy-field]').forEach((i) => { i.value = RP.DEFAULT_CONFIG.defaults[i.dataset.strategyField]; }); if (strategy === 'boost') { body.querySelector('#boost-days').value = 7; body.querySelectorAll('.boost-quota').forEach((i) => i.value = 2); body.querySelectorAll('.boost-margin').forEach((i) => i.value = Math.max(0, Number(effective.minMarginPct) || 0)); } this._strategyCapture(); } }, { label: 'Отменить изменения', class: 'btn-ghost', keepOpen: true, onClick: async () => { discard = true; if (previousPending) this.pendingEdits.set(String(nmID), copy(previousPending)); else this.pendingEdits.delete(String(nmID)); await modal.close(); this.renderResults(); this.drawEditBar(); } }, { label: 'Сохранить и закрыть', class: 'btn-primary', keepOpen: true, onClick: async () => { if (!this._strategyCapture()) return false; saved = true; if (!await this.commitEdits(null, { quiet: true, noRetry: true })) { saved = false; return false; } await modal.close(); } }] });

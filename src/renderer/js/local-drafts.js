@@ -170,7 +170,7 @@ window.LocalDrafts = (function () {
     try {
       const snapshot = form.collect(); if (!snapshot) return false; validateOperations(snapshot);
       const operations = formOperations(form, snapshot);
-      if (operations.length) { stage(form.id, operations, { after: form.after, form, snapshot }); setStatus(form, 'Не сохранено — нажмите «Сохранить». Изменения только в памяти, не применены.'); }
+      if (operations.length) { stage(form.id, operations, { after: form.after, form, snapshot }); setStatus(form, form.host.closest && form.host.closest('.modal') ? 'Не сохранено — закрытие окна применит изменения локально; «Закрыть без сохранения» отбросит их. В WB ничего не отправляется.' : 'Не сохранено — нажмите «Сохранить». Изменения только в памяти, не применены.'); }
       form.dirty = false; return true;
     } catch (e) { failure = e.message; setStatus(form, e.message, true); banner(); return false; }
   }

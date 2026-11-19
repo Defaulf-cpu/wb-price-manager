@@ -66,6 +66,7 @@ const REQUIRED = [
   'src/renderer/js/views/itemcard.js',
   'src/renderer/js/views/promos.js',
   'src/renderer/js/views/economics.js',
+  'src/renderer/js/views/calculator.js',
   'src/renderer/js/views/costs.js',
   'src/renderer/js/views/reports.js',
   'src/renderer/js/views/settings.js',

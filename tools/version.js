@@ -247,7 +247,7 @@ const MARKERS = [
   ['electron/promo-import.js', 'conflictingStatuses', 'неоднозначное участие файла не подтверждается'],
   ['electron/service.js', 'const liveDiscount =', 'текущая скидка WB важнее старого снимка'],
   ['src/renderer/js/views/promos.js', 'Плановая цена — точный порог', 'импорт по реальным заголовкам PDF'],
-  ['src/renderer/index.html', 'workspace-boost-v4', 'общая ревизия ресурсов СПП/ABC/лесенки и рабочего места'],
+  ['src/renderer/index.html', 'workspace-v12', 'общая ревизия ресурсов СПП/ABC/лесенки и рабочего места'],
   ['docs/API.md', '28.8 Сверка структуры по PDF владельца', 'контракт фактической структуры WB'],
   ['electron/wb-client.js', 'offset += pageLimit', 'полная пагинация каталога без подстановки длины страницы'],
   ['electron/wb-client.js', 'completionReason: reason', 'явная полнота и причины усечения каталога'],
@@ -296,6 +296,11 @@ const MARKERS = [
   ['tools/checks/local-drafts-flow.js', 'in-flight явного сохранения', 'приёмка гонок явного сохранения'],
   ['tools/checks/workspace-v4-ui-flow.js', 'возврат к исходному', 'реальный renderer проверяет возврат ввода и закрытие'],
   ['docs/WORKSPACE-V4.md', 'Ровно N заказов', 'инструкция и честные ограничения лесенки'],
+  ['src/renderer/js/views/calculator.js', 'ROI по себестоимости', 'отдельный калькулятор с категорией и ROI'],
+  ['src/renderer/js/workspace-v4.js', 'применены локально при закрытии', 'закрытие редактора стратегии применяет правки локально'],
+  ['src/renderer/js/state.js', 'Сервис вернул демо-товары', 'защита от демо-товаров при выключенном демо'],
+  ['src/renderer/js/views/itemcard.js', 'СПП из ЛК WB (официальный API)', 'официальный путь СПП без витрины'],
+  ['src/renderer/js/app.js', '☀ Светлая', 'полная подпись кнопки темы'],
 
 ];
 
@@ -311,7 +316,7 @@ const REQUIRED_FILES = [
   'src/renderer/js/api.js', 'src/renderer/js/app.js', 'src/renderer/js/state.js',
   'src/renderer/js/ui.js', 'src/renderer/js/util.js',
   'src/renderer/js/views/costs.js', 'src/renderer/js/views/dashboard.js',
-  'src/renderer/js/views/economics.js', 'src/renderer/js/views/itemcard.js',
+  'src/renderer/js/views/economics.js', 'src/renderer/js/views/calculator.js', 'src/renderer/js/views/itemcard.js',
   'src/renderer/js/views/prices.js', 'src/renderer/js/views/promos.js',
   'src/renderer/js/views/reports.js', 'src/renderer/js/views/repricer.js',
   'src/renderer/js/views/settings.js',
