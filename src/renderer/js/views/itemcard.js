@@ -925,8 +925,27 @@ Views.itemcard = {
               <option value="">Как в общих настройках</option>
               ${RP.STRATEGIES.map((s) => `<option value="${s.id}" ${cfg.strategy === s.id ? 'selected' : ''}>${U.esc(s.name)}</option>`).join('')}
             </select></label>
-          ${fld('minPrice', 'Минимальная цена (пол), ₽', cfg.minPrice, 'ниже не опускаемся')}
-          ${fld('maxPrice', 'Максимальная цена (потолок), ₽', cfg.maxPrice, 'выше не поднимаем')}
+        </div>
+        <div class="thresholds" id="ic-thresholds">
+          <div class="th-head"><span>Расчётные значения — обновляются при вводе</span><span>Пороги товара — заполняются цифрами</span></div>
+          <div class="th-grid">
+            <div class="th-calc">
+              <div><span>Расчётная мин. цена, ₽</span><b id="th-floor">—</b></div>
+              <div><span>Мин. цена для покупателя (после СПП), ₽</span><b id="th-floor-buyer">—</b></div>
+              <div><span>Марж. расчётной мин. цены</span><b id="th-floor-margin">—</b></div>
+              <div><span>Расчётный потолок, ₽</span><b id="th-ceil">—</b></div>
+              <div><span>Рабочий коридор репрайсера</span><b id="th-corridor">—</b></div>
+            </div>
+            <div class="th-inputs">
+              ${fld('minPrice', 'Мин. цена, ₽ *', cfg.minPrice, 'не ниже этой цены')}
+              ${fld('minMarginPct', 'Мин. марж., %', cfg.minMarginPct, 'пол по марже')}
+              ${fld('minMarginRub', 'Мин. марж., ₽', cfg.minMarginRub, 'пол по прибыли')}
+              ${fld('maxPrice', 'Макс. цена, ₽', cfg.maxPrice, 'не выше этой цены')}
+              ${fld('maxMarginPct', 'Макс. марж., %', cfg.maxMarginPct, 'потолок по марже')}
+              ${fld('maxMarginRub', 'Макс. марж., ₽', cfg.maxMarginRub, 'потолок по прибыли')}
+            </div>
+          </div>
+          <p class="hint">Мин. цена заполняется в валюте кабинета: «удерживать цену не ниже 500 ₽» — заполнить 500; «ровно 500» — Мин и Макс по 500. Действующий минимум — самый строгий из минимальных порогов, потолок — самый строгий из максимальных; репрайсер строго работает внутри коридора. Расчёт слева предварительный, по текущей экономике карточки; точный коридор покажет пересчёт репрайсера.</p>
         </div>
         <p class="hint" style="margin-top:8px">Личная стратегия важнее общей: она применяется только к этому артикулу.</p>
       </div>
@@ -942,6 +961,39 @@ Views.itemcard = {
       if (!el || el.value === '') return null;
       return U.num(el.value);
     };
+
+    // Компактный блок порогов (как в INDEEPA): слева расчёт, справа ввод; пересчёт при вводе.
+    const thParams = this.econ().params;
+    const thSpp = U.num(thParams.sppPct);
+    const thUnitAt = (price) => EC.calcUnit(price, thParams);
+    const thPriceFor = (get, target) => {
+      let lo = 1, hi = Math.max(100000, U.num(this.econ().current.revenue) * 4);
+      if (get(thUnitAt(hi)) < target) return null;
+      for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (get(thUnitAt(mid)) >= target) hi = mid; else lo = mid; }
+      return hi;
+    };
+    const updateThresholds = () => {
+      const v = (k) => { const el = host.querySelector('#ic-p-' + k); return el && el.value !== '' ? U.num(el.value) : null; };
+      const floorByPct = v('minMarginPct') > 0 ? thPriceFor((u) => u.marginPct, v('minMarginPct')) : null;
+      const floorByRub = v('minMarginRub') > 0 ? thPriceFor((u) => u.profit, v('minMarginRub')) : null;
+      const floors = [v('minPrice'), floorByPct, floorByRub].filter((x) => x > 0);
+      const floor = floors.length ? Math.max(...floors) : null;
+      const ceilByPct = v('maxMarginPct') > 0 ? thPriceFor((u) => u.marginPct, v('maxMarginPct')) : null;
+      const ceilByRub = v('maxMarginRub') > 0 ? thPriceFor((u) => u.profit, v('maxMarginRub')) : null;
+      const ceils = [v('maxPrice'), ceilByPct, ceilByRub].filter((x) => x > 0);
+      const ceil = ceils.length ? Math.min(...ceils) : null;
+      const set = (id, text) => { const el = host.querySelector(id); if (el) el.textContent = text; };
+      set('#th-floor', floor ? U.money(floor) : 'не задан');
+      set('#th-floor-buyer', floor ? U.money(floor * (1 - thSpp / 100)) : '—');
+      set('#th-floor-margin', floor ? U.pct(thUnitAt(floor).marginPct) + ' · ' + U.money(thUnitAt(floor).profit) : '—');
+      set('#th-ceil', ceil ? U.money(ceil) : 'не задан');
+      set('#th-corridor', floor || ceil ? (floor ? U.money(floor) : '…') + ' — ' + (ceil ? U.money(ceil) : '…') + (floor && ceil && ceil < floor ? ' ⚠ конфликт: применится минимум' : '') : 'не задан');
+    };
+    ['minPrice', 'minMarginPct', 'minMarginRub', 'maxPrice', 'maxMarginPct', 'maxMarginRub'].forEach((k) => {
+      const el = host.querySelector('#ic-p-' + k);
+      if (el) el.addEventListener('input', updateThresholds);
+    });
+    updateThresholds();
 
     /**
      * СПП считается от двух цен: нашей (после наших скидок) и той, что видит покупатель
@@ -1039,7 +1091,7 @@ Views.itemcard = {
         await S.saveCosts({ [String(this.nmID)]: costs });
 
         const strategy = host.querySelector('#ic-p-strategy').value;
-        const itemCfg = { strategy: strategy || null, minPrice: num('minPrice'), maxPrice: num('maxPrice') };
+        const itemCfg = { strategy: strategy || null, minPrice: num('minPrice'), maxPrice: num('maxPrice'), minMarginPct: num('minMarginPct'), minMarginRub: num('minMarginRub'), maxMarginPct: num('maxMarginPct'), maxMarginRub: num('maxMarginRub') };
         await API.invoke('repricer:item-configs:save', { items: { [String(this.nmID)]: itemCfg } });
 
         S.invalidate();

@@ -82,4 +82,25 @@ check('выключенная стратегия и отсутствие сов�
   assert.ok(none.notes.some((n) => /ни одно правило не сработало/.test(n)));
 });
 
+check('порог «минимальная Маржа, ₽» поднимает пол коридора', () => {
+  // basicEcon: profit = price − 400. Прибыль 1200 ₽ достигается при цене 1600 ₽.
+  const res = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, minMarginRub: 1200, allowNegativeMargin: false });
+  assert.equal(res.corridor.minByProfit, 1600);
+  assert.equal(res.corridor.min, 1600);
+});
+
+check('максимальная Маржа (% и ₽) не даёт цене уйти в космос', () => {
+  const byPct = RP.computeItem(ctx(), cfg(null), { strategy: 'margin', targetMarginPct: 20, basePriceTarget: 2000, maxMarginPct: 30, allowNegativeMargin: false });
+  // маржа 30% при profit=price−400: price = 400/(1−0.30) ≈ 571 — но пол по умолчанию ниже; потолок должен ограничить сверху
+  assert.ok(byPct.corridor.maxByMargin > 0 && byPct.proposed.sellerPrice <= byPct.corridor.maxByMargin + 1, JSON.stringify(byPct.corridor));
+  const byRub = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, maxMarginRub: 900 });
+  assert.equal(byRub.corridor.maxByProfit, 1300); // profit 900 при цене 1300
+});
+
+check('конфликт порогов: минимальный побеждает и пишется предупреждение', () => {
+  const res = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, minPrice: 1800, maxMarginRub: 100 });
+  assert.equal(res.corridor.min, 1800);
+  assert.ok(res.warnings.some((w) => /Пороги конфликтуют/.test(w)), res.warnings.join(' | '));
+});
+
 console.log('\nИТОГО custom-strategy: ' + passed + ' пройдено, 0 ошибок');

@@ -115,7 +115,7 @@
       for (const key of ['costPriceRub', 'packagingRub', 'commissionPct', 'logisticsRub', 'storageRub', 'adPct', 'sppPct', 'stock', 'salesPerDay', 'otherPct', 'otherRub']) { const input = host.querySelector('#ic-p-' + key); costs[key === 'costPriceRub' ? 'costEntered' : key] = !input || input.value === '' ? null : Number(input.value); }
       costs.currency = host.querySelector('#ic-p-currency').value;
       config.strategy = host.querySelector('#ic-p-strategy').value || null;
-      for (const key of ['minPrice', 'maxPrice']) { const input = host.querySelector('#ic-p-' + key); config[key] = !input || input.value === '' ? null : Number(input.value); }
+      for (const key of ['minPrice', 'maxPrice', 'minMarginPct', 'minMarginRub', 'maxMarginPct', 'maxMarginRub']) { const input = host.querySelector('#ic-p-' + key); config[key] = !input || input.value === '' ? null : Number(input.value); }
       return [{ channel: 'costs:save', payload: { items: { [String(nmID)]: costs } } }, { channel: 'repricer:item-configs:save', payload: { items: { [String(nmID)]: config } } }];
     }, 'ic-p-save', '[id^="ic-p-"]', () => this.nmID === nmID && this.reloadCard());
     const originalReset = host.querySelector('#ic-p-reset').onclick;

@@ -3430,6 +3430,10 @@ Views.repricer = {
             ${fld('basePriceTarget', 'Базовая цена (потолок), ₽', c.basePriceTarget || r.basePrice, 'потолок коридора')}
             ${fld('targetMarginPct', 'Целевая маржа, %', c.targetMarginPct, '', '0.5')}
             ${fld('minMarginPct', 'Минимальная маржа, %', c.minMarginPct, '', '0.5')}
+            ${fld('minMarginRub', 'Минимальная маржа, ₽', c.minMarginRub, 'пол по прибыли', '1')}
+            ${fld('maxPrice', 'Максимальная цена, ₽', c.maxPrice, 'жёсткий потолок', '1')}
+            ${fld('maxMarginPct', 'Максимальная маржа, %', c.maxMarginPct, 'потолок по марже', '0.5')}
+            ${fld('maxMarginRub', 'Максимальная маржа, ₽', c.maxMarginRub, 'потолок по прибыли', '1')}
             ${fld('rrp', 'РРЦ (цена для покупателя), ₽', c.rrp, 'для стратегии «Удержание РРЦ»')}
             ${fld('targetDiscountPct', 'Целевая скидка, %', c.targetDiscountPct, 'если нужно держать скидку витрины')}
           </div>
@@ -3489,6 +3493,10 @@ Views.repricer = {
       basePriceTarget: body.querySelector('#ic-basePriceTarget').value === '' ? null : U.num(body.querySelector('#ic-basePriceTarget').value),
       targetMarginPct: U.num(body.querySelector('#ic-targetMarginPct').value),
       minMarginPct: U.num(body.querySelector('#ic-minMarginPct').value),
+      minMarginRub: body.querySelector('#ic-minMarginRub').value === '' ? null : U.num(body.querySelector('#ic-minMarginRub').value),
+      maxPrice: body.querySelector('#ic-maxPrice').value === '' ? null : U.num(body.querySelector('#ic-maxPrice').value),
+      maxMarginPct: body.querySelector('#ic-maxMarginPct').value === '' ? null : U.num(body.querySelector('#ic-maxMarginPct').value),
+      maxMarginRub: body.querySelector('#ic-maxMarginRub').value === '' ? null : U.num(body.querySelector('#ic-maxMarginRub').value),
       rrp: body.querySelector('#ic-rrp').value === '' ? null : U.num(body.querySelector('#ic-rrp').value),
       targetDiscountPct: body.querySelector('#ic-targetDiscountPct').value === '' ? null : U.num(body.querySelector('#ic-targetDiscountPct').value),
       allowNegativeMargin: body.querySelector('#ic-allowNeg').checked,

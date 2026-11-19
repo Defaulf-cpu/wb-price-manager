@@ -2172,6 +2172,12 @@ function createService(store, emit, electron, integrations) {
         for (const key of ['targetMarginPct', 'minMarginPct', 'planSensitivityPct', 'targetTurnoverDays', 'competitorOffsetPct', 'elasticityPct']) {
           if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '') WorkspaceConfig.template({ [key]: clean[key] });
         }
+        // Пороги коридора в рублях и максимальная Маржа: неотрицательные конечные числа.
+        for (const key of ['minPrice', 'maxPrice', 'minMarginRub', 'maxMarginRub']) {
+          if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '' && (!Number.isFinite(Number(clean[key])) || Number(clean[key]) < 0 || Number(clean[key]) > 1000000000)) throw new WBError('Порог «' + key + '» должен быть неотрицательным числом.', { code: 'BAD_CONFIG' });
+        }
+        if (clean.maxMarginPct !== undefined && clean.maxMarginPct !== null && clean.maxMarginPct !== '' && (!Number.isFinite(Number(clean.maxMarginPct)) || Number(clean.maxMarginPct) < 0 || Number(clean.maxMarginPct) > 99)) throw new WBError('Максимальная Маржа должна быть от 0 до 99%.', { code: 'BAD_CONFIG' });
+        if (Number(clean.minMarginRub) > 0 && Number(clean.maxMarginRub) > 0 && Number(clean.maxMarginRub) < Number(clean.minMarginRub)) throw new WBError('Максимальная Маржа, ₽ не может быть ниже минимальной.', { code: 'BAD_CONFIG' });
         if (Object.prototype.hasOwnProperty.call(clean, 'boost') && clean.boost !== null) {
           const validated = Boost.validate(clean.boost), old = items[nm] && items[nm].boost;
           let same = false;

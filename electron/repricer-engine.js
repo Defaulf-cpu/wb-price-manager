@@ -518,6 +518,19 @@ function priceForMargin(ctx, targetPct, minPrice, maxPrice) {
   return (lo + hi) / 2;
 }
 
+/** Цена, при которой прибыль с единицы равна targetRub (для порогов «мин./макс. Маржа, ₽»). */
+function priceForProfit(ctx, targetRub, minPrice, maxPrice) {
+  let lo = Math.max(1, num(minPrice));
+  let hi = Math.max(lo + 1, num(maxPrice));
+  if (marginOf(ctx, hi).profit < targetRub) return null;
+  if (marginOf(ctx, lo).profit >= targetRub) return lo;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (marginOf(ctx, mid).profit >= targetRub) hi = mid; else lo = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 /** Минимальная цена конкурента (из включённых и имеющихся в наличии). */
 function bestCompetitorPrice(ctx, cfg) {
   const list = (ctx.competitors || []).filter((c) => c.enabled !== false && num(c.stock, 1) > 0 && num(c.price) > 0);
@@ -963,7 +976,15 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   // минимальная цена по марже (точка, где маржа = minMargin);
   // при разрешённой отрицательной марже пол определяется только минимальным порогом
   const minByMargin = (ctx.econAt && !allowNeg) ? priceForMargin(marginCtx, minMargin, 1, searchMax) : null;
-  const priceFloor = Math.max(corridorMin, minByMargin || 0);
+  // Порог «минимальная Маржа, ₽»: цена, ниже которой прибыль с единицы меньше заданной.
+  const minMarginRub = num(I.minMarginRub, 0);
+  const minByProfit = (ctx.econAt && !allowNeg && minMarginRub > 0) ? priceForProfit(marginCtx, minMarginRub, 1, searchMax) : null;
+  const priceFloor = Math.max(corridorMin, minByMargin || 0, minByProfit || 0);
+  // Максимальные пороги по марже: цена, выше которой Маржа превышает заданный максимум.
+  const maxMarginPct = num(I.maxMarginPct, 0);
+  const maxMarginRub = num(I.maxMarginRub, 0);
+  const maxByMargin = (ctx.econAt && maxMarginPct > 0) ? priceForMargin(marginCtx, maxMarginPct, 1, searchMax) : null;
+  const maxByProfit = (ctx.econAt && maxMarginRub > 0) ? priceForProfit(marginCtx, maxMarginRub, 1, searchMax) : null;
 
   // ── СЛОЙ 1: универсальная стратегия ──
   let target = curSeller;
@@ -1191,7 +1212,16 @@ function computeItem(ctx, cfg, itemCfg, ec) {
 
   // ── коридор ──
   const beforeCorridor = finalPrice;
-  const corridorCeil = customDef && customDef.ignoreMaximums ? (hardMax > 0 ? hardMax : Infinity) : corridorMax;
+  let corridorCeil = customDef && customDef.ignoreMaximums ? (hardMax > 0 ? hardMax : Infinity) : corridorMax;
+  // Максимальная Маржа (% и ₽) — тот же потолок, только заданный через маржу, а не ценой.
+  if (!(customDef && customDef.ignoreMaximums)) {
+    if (maxByMargin) corridorCeil = Math.min(corridorCeil, maxByMargin);
+    if (maxByProfit) corridorCeil = Math.min(corridorCeil, maxByProfit);
+  }
+  if (corridorCeil < priceFloor) {
+    warnings.push(`Пороги конфликтуют: минимальный порог ${Math.round(priceFloor)} ₽ выше максимального ${Math.round(corridorCeil)} ₽ — применён минимальный, проверьте настройки товара.`);
+    corridorCeil = priceFloor;
+  }
   finalPrice = Math.min(Math.max(finalPrice, priceFloor > 0 ? priceFloor : 1), corridorCeil);
   if (Math.abs(finalPrice - beforeCorridor) > 0.5) {
     notes.push(hardMax > 0 && finalPrice >= hardMax - 0.5 ? `Цена ограничена потолком карточки maxPrice: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽.` : `Цена ограничена коридором: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽ (мин ${Math.round(priceFloor)}, базовая ${Math.round(corridorMax)}).`);
@@ -1457,7 +1487,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       profitMonthWithPromo: promoJoin ? r2(econAfter.profit * perDay * 30 * upliftFactor) : null,
       breakEvenUpliftPct: promoJoin ? (promoPlan.chosen.breakEvenUpliftPct === undefined ? null : promoPlan.chosen.breakEvenUpliftPct) : null
     },
-    corridor: { min: r2(priceFloor), max: r2(corridorMax), minByMargin: minByMargin === null ? null : r2(minByMargin) },
+    corridor: { min: r2(priceFloor), max: Number.isFinite(corridorCeil) ? r2(corridorCeil) : r2(corridorMax), minByMargin: minByMargin === null ? null : r2(minByMargin), minByProfit: minByProfit === null ? null : r2(minByProfit), maxByMargin: maxByMargin === null ? null : r2(maxByMargin), maxByProfit: maxByProfit === null ? null : r2(maxByProfit) },
     maxPrice: hardMax > 0 ? r2(hardMax) : null,
     promoExitBlockedByMaxPrice,
     needSend: needSend && allowSend,
@@ -1617,6 +1647,7 @@ return {
   CUSTOM_OPERATORS,
   evaluateCustomStrategy,
   validateCustomStrategy,
+  priceForProfit,
   beautifulPrice,
   planPromos,
   toBaseAndDiscount,
