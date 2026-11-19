@@ -6,6 +6,7 @@ window.App = (function () {
   const NAV = [
     { id: 'dashboard', ico: '▦', label: 'Панель' },
     { id: 'repricer', ico: '⟳', label: 'Репрайсер' },
+    { id: 'strategies', ico: '◈', label: 'Стратегии' },
     { id: 'promos', ico: '％', label: 'Акции WB' },
     { id: 'reports', ico: '🖶', label: 'Отчёты' },
     { id: 'pl-summary', ico: '∑', label: 'Сводка P&L' },
@@ -22,7 +23,9 @@ window.App = (function () {
     try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* недоступное хранилище не мешает теме */ }
     if (API.isElectron) API.invoke('ui:theme', theme).catch(() => {});
     document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
-      button.textContent = theme === 'dark' ? '☀ Светлая' : '☾ Тёмная';
+      button.textContent = theme === 'dark' ? '☀' : '☾';
+      button.style.flexShrink = '0';
+      button.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
       button.setAttribute('aria-label', theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
       button.setAttribute('aria-pressed', String(theme === 'light'));
     });
@@ -64,7 +67,7 @@ window.App = (function () {
     }
   }
   function hasUnsavedProfileEdits() {
-    return formDirty || !!(S.state.priceEdits && S.state.priceEdits.size) ||
+    return (formDirty && !['repricer', 'strategies'].includes(S.state.view) && !(S.state.view === 'settings' && Views.settings.tab !== 'general')) || !!(window.LocalDrafts && LocalDrafts.hasWork()) || !!(S.state.priceEdits && S.state.priceEdits.size) ||
       !!(Views.repricer && Views.repricer.pendingEdits && Views.repricer.pendingEdits.size);
   }
 
@@ -136,6 +139,7 @@ window.App = (function () {
       return;
     }
     const doSwitch = async () => {
+      if (window.LocalDrafts && LocalDrafts.hasWork()) { toast('Есть несохранённые изменения: сначала нажмите «Сохранить» или отмените их.', 'warn', 7000); return false; }
       await S.saveSettings({ demoMode: false });
       await S.loadAppState();
       toast('Демо-режим выключен — работаем с кабинетом WB', 'ok');
@@ -179,8 +183,10 @@ window.App = (function () {
     el.innerHTML = `${U.fmt(st.items.length)} товаров · ${st.demo ? 'демо' : 'WB API'}<br>обновлено ${U.date(when, true)}${facts}`;
   }
 
-  function go(id, options) {
+  async function go(id, options) {
     if (switchingProfile) return;
+    if (id === 'promos') Views.promos.tab = options && options.tab || (options && options.keepTab ? Views.promos.tab : 'calendar');
+    if (id === 'settings') Views.settings.tab = options && options.tab || (options && options.keepTab ? Views.settings.tab : 'general');
     const embedded = { prices: 'price-tools', economics: 'economics', costs: 'costs' };
     if (embedded[id]) { Views.repricer.tab = embedded[id]; id = 'repricer'; }
     else if (id === 'repricer' && !(options && options.keepTab)) Views.repricer.tab = 'prices';
@@ -207,6 +213,7 @@ window.App = (function () {
    * Показывает прогресс по разделам и итог — что загружено, а что не удалось и почему.
    */
   async function refreshAllData(opts) {
+    if (window.LocalDrafts && LocalDrafts.hasWork()) throw new Error('Есть несохранённые изменения: сначала нажмите «Сохранить» или отмените их. Обновление данных их не сохраняет.');
     const o = opts || {};
     const modal = UI.modal({
       title: 'Обновление данных из кабинета WB',
@@ -395,6 +402,7 @@ window.App = (function () {
           { label: 'Перейти без сохранения', class: 'btn-danger', keepOpen: true, onClick: (d) => { d.close(); return switchProfile(id, true); } } ] });
       return false;
     }
+    if (window.LocalDrafts) LocalDrafts.discardAll();
     API.beginProfileChange();
     if (Views.prices && Views.prices._clickTimer) { clearTimeout(Views.prices._clickTimer); Views.prices._clickTimer = null; }
     switchingProfile = true;
@@ -438,7 +446,7 @@ window.App = (function () {
       host.appendChild(b);
       return b;
     };
-    if (id === 'prices' || id === 'dashboard' || id === 'promos' || id === 'costs' || id === 'economics') {
+    if (id === 'repricer' || id === 'prices' || id === 'dashboard' || id === 'promos' || id === 'costs' || id === 'economics') {
       mk('Обновить из WB', '', async (e) => {
         e.target.disabled = true;
         try { await refreshAllData({ facts: true }); }
@@ -447,8 +455,9 @@ window.App = (function () {
       });
     }
     if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
-    const themeButton = mk(theme === 'dark' ? '☀ Светлая' : '☾ Тёмная', 'btn-ghost', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
+    const themeButton = mk(theme === 'dark' ? '☀' : '☾', 'btn-ghost theme-toggle', () => setTheme(theme === 'dark' ? 'light' : 'dark'));
     themeButton.dataset.themeToggle = '1';
+    themeButton.title = theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему';
     themeButton.setAttribute('aria-label', 'Переключить светлую или тёмную тему');
     themeButton.setAttribute('aria-pressed', String(theme === 'light'));
     mk('Справка', 'btn-ghost', showHelp);

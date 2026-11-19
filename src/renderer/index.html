@@ -3,16 +3,12 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' econ:; img-src 'self' data: https: econ:; style-src 'self' 'unsafe-inline'; script-src 'self' econ: 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* econ:" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' econ:; img-src 'self' data: https: econ:; style-src 'self' 'unsafe-inline'; script-src 'self' econ:; connect-src 'self' http://localhost:* http://127.0.0.1:* econ:" />
 <title>WB Price Manager — цены, акции, экономика</title>
-<link rel="stylesheet" href="./styles.css?v=promo-board-m3" />
+<link rel="stylesheet" href="./styles.css?v=workspace-boost-v4" />
 </head>
 <body>
-<script>
-  // Общие модули расчётов: в Electron отдаются по протоколу econ:, в браузере — dev-сервером.
-  document.write('<script src="' + (window.wbApp ? 'econ:///economics.js?v=promo-board-m3' : '/economics.js?v=promo-board-m3') + '"><\/script>');
-  document.write('<script src="' + (window.wbApp ? 'econ:///repricer-engine.js?v=promo-board-m3' : '/repricer-engine.js?v=promo-board-m3') + '"><\/script>');
-</script>
+<script src="./js/econ-bootstrap.js?v=workspace-boost-v4"></script>
 <div id="app">
   <aside class="sidebar">
     <div class="logo">
@@ -42,23 +38,26 @@
 </div>
 <div id="modal-root"></div>
 <div id="toast-root"></div>
-<script src="./js/util.js?v=promo-board-m3"></script>
-<script src="./js/api.js?v=promo-board-m3"></script>
-<script src="./js/state.js?v=promo-board-m3"></script>
-<script src="./js/rules.js?v=promo-board-m3"></script>
-<script src="./js/ui.js?v=promo-board-m3"></script>
-<script src="./js/grid-layout.js?v=promo-board-m3"></script>
-<script src="./js/tax-ui.js?v=promo-board-m3"></script>
-<script src="./js/views/itemcard.js?v=promo-board-m3"></script>
-<script src="./js/views/dashboard.js?v=promo-board-m3"></script>
-<script src="./js/views/prices.js?v=promo-board-m3"></script>
-<script src="./js/views/repricer.js?v=promo-board-m3"></script>
-<script src="./js/views/promos.js?v=promo-board-m3"></script>
-<script src="./js/views/economics.js?v=promo-board-m3"></script>
-<script src="./js/views/costs.js?v=promo-board-m3"></script>
-<script src="./js/views/reports.js?v=promo-board-m3"></script>
-<script src="./js/views/pl-summary.js?v=promo-board-m3"></script>
-<script src="./js/views/settings.js?v=promo-board-m3"></script>
-<script src="./js/app.js?v=promo-board-m3"></script>
+<script src="./js/util.js?v=workspace-boost-v4"></script>
+<script src="./js/api.js?v=workspace-boost-v4"></script>
+<script src="./js/state.js?v=workspace-boost-v4"></script>
+<script src="./js/rules.js?v=workspace-boost-v4"></script>
+<script src="./js/ui.js?v=workspace-boost-v4"></script>
+<script src="./js/grid-layout.js?v=workspace-boost-v4"></script>
+<script src="./js/tax-ui.js?v=workspace-boost-v4"></script>
+<script src="./js/views/itemcard.js?v=workspace-boost-v4"></script>
+<script src="./js/views/dashboard.js?v=workspace-boost-v4"></script>
+<script src="./js/views/prices.js?v=workspace-boost-v4"></script>
+<script src="./js/views/repricer.js?v=workspace-boost-v4"></script>
+<script src="./js/views/promos.js?v=workspace-boost-v4"></script>
+<script src="./js/views/economics.js?v=workspace-boost-v4"></script>
+<script src="./js/views/costs.js?v=workspace-boost-v4"></script>
+<script src="./js/views/reports.js?v=workspace-boost-v4"></script>
+<script src="./js/views/pl-summary.js?v=workspace-boost-v4"></script>
+<script src="./js/views/settings.js?v=workspace-boost-v4"></script>
+<script src="./js/local-drafts.js?v=workspace-boost-v4"></script>
+  <script src="./js/workspace-v4.js?v=workspace-boost-v4"></script>
+  <script src="./js/workspace-forms.js?v=workspace-boost-v4"></script>
+<script src="./js/app.js?v=workspace-boost-v4"></script>
 </body>
 </html>

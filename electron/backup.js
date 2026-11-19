@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const WorkspaceConfig = require('./workspace-config');
 const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, REPRICER_FILE, COMPETITORS_FILE,
   ITEMCONFIGS_FILE, PRICES_HISTORY_FILE, REPRICER_RUNS_FILE, FACTCOSTS_FILE,
@@ -285,6 +286,8 @@ function createBackupManager(options) {
     const valid = item.shape === 'array' ? Array.isArray(value) : isPlainObject(value);
     if (!valid) throw new BackupError('Неверная структура набора «' + item.title + '» (' + item.file + ').', 'BAD_FILE');
     cloneSafe(value);
+    try { WorkspaceConfig.validateDataset(item.key, value); }
+    catch (e) { throw new BackupError('Набор «' + item.title + '»: ' + e.message, 'BAD_FILE'); }
   }
 
   function makeDocument(kind, includeKeys, password) {

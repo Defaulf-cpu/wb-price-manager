@@ -324,35 +324,47 @@ async function run() {
     let brokenTelegramCalls = 0;
     const brokenTelegram = { handleServiceEvent() { brokenTelegramCalls++; throw new Error('Telegram недоступен'); } };
     const service = createService(serviceStore, (channel, payload) => emitted.push({ channel, payload }), null, { telegramNotifier: brokenTelegram });
-    service.cache.goods = { items: [{ nmID: 555, price: 900, discount: 0 }] };
-    global.fetch = async () => jsonResponse(200, { data: {} });
+    serviceStore.saveCosts({ 555: { costPriceRub: 100 } }); serviceStore.saveItemConfigs({ 555: { minPrice: 300 } });
+    const mockPrices = (goods, posted) => async (url, init) => {
+      const u = new URL(String(url));
+      if (u.pathname === '/api/v2/list/goods/filter') return jsonResponse(200, { data: { listGoods: Number(u.searchParams.get('offset')) ? [] : goods, total: goods.length } });
+      if (u.pathname === '/api/v2/upload/task') { posted.push(...JSON.parse(init.body).data); return jsonResponse(200, { data: { id: 777 } }); }
+      if (u.pathname === '/api/v2/history/goods/task') return jsonResponse(200, { data: { uploadID: 777, historyGoods: posted.map((r) => ({ ...r, status: 2 })) } });
+      if (u.pathname === '/content/v2/get/cards/list') return jsonResponse(200, { cards: [], cursor: { total: 0 } });
+      if (/\/supplier\//.test(u.pathname)) return jsonResponse(200, []);
+      throw new Error('Неожиданный запрос теста: ' + u.pathname);
+    };
+    const pricePosts = [];
+    global.fetch = mockPrices([{ nmID: 555, price: 900, discount: 0 }], pricePosts);
     global.setTimeout = function (fn, ms, ...args) {
       // Сокращаем только паузу WB-проверки статусов загрузки; сетевые тайм-ауты сохраняем.
       return originalSetTimeout(fn, Number(ms) === 1500 ? 0 : ms, ...args);
     };
     let priceResult;
-    try { priceResult = await service.handlers['wb:apply-prices']({ items: [{ nmID: 555, price: 100, discount: 0 }], source: 'notify-flow-test' }); }
+    try { priceResult = await service.handlers['wb:apply-prices']({ items: [{ nmID: 555, price: 920, discount: 0 }], source: 'notify-flow-test' }); }
     finally { global.setTimeout = originalSetTimeout; }
     check('ошибка интеграции Telegram не прерывает отправку цен и обработку результата WB', priceResult && priceResult.uploaded === 1 && brokenTelegramCalls >= 2 && emitted.some((event) => event.payload && event.payload.type === 'sendSuccess'));
 
     const quarantineNotice = makeNotifier('quarantine-event', { events: { quarantine: true, sendSuccess: true }, batchDelayMs: 5000 });
     quarantineNotice.store.saveSettings({ demoMode: false });
     const quarantineService = createService(quarantineNotice.store, () => {}, null, { telegramNotifier: quarantineNotice.notifier });
-    quarantineService.cache.goods = { items: [{ nmID: 556, price: 900, discount: 0 }] };
-    let quarantineMessage = '';
+    quarantineNotice.store.saveCosts({ 556: { costPriceRub: 10 }, 557: { costPriceRub: 100 } });
+    quarantineNotice.store.saveItemConfigs({ 556: { minPrice: 50 }, 557: { minPrice: 300 } });
+    let quarantineMessage = ''; const quarantinePosts = [];
+    const quarantineWb = mockPrices([{ nmID: 556, price: 900, discount: 0 }, { nmID: 557, price: 900, discount: 0 }], quarantinePosts);
     global.fetch = async (url, init) => {
       if (String(url).includes('api.telegram.org')) {
         quarantineMessage = JSON.parse(init.body).text;
         return jsonResponse(200, { ok: true, result: { message_id: 1 } });
       }
-      return jsonResponse(200, { data: {} });
+      return quarantineWb(url, init);
     };
     global.setTimeout = function (fn, ms, ...args) { return originalSetTimeout(fn, Number(ms) === 1500 ? 0 : ms, ...args); };
     let quarantineResult;
-    try { quarantineResult = await quarantineService.handlers['wb:apply-prices']({ items: [{ nmID: 556, price: 100, discount: 0 }] }); }
+    try { quarantineResult = await quarantineService.handlers['wb:apply-prices']({ items: [{ nmID: 556, price: 100, discount: 0 }, { nmID: 557, price: 920, discount: 0 }] }); }
     finally { global.setTimeout = originalSetTimeout; }
     await quarantineNotice.notifier.flushNow();
-    check('карантин цены и успешная отправка доходят до Telegram из service', quarantineResult && quarantineResult.uploaded === 1 && quarantineMessage.includes('Карантин цены: 1 позиция') && quarantineMessage.includes('Отправка цен выполнена: 1 позиция'));
+    check('блокировка карантина не мешает соседу; предупреждение и подтверждённый успех доходят до Telegram', quarantineResult && quarantineResult.uploaded === 1 && quarantinePosts.length === 1 && quarantinePosts[0].nmID === 557 && quarantineMessage.includes('Карантин цены: 1 позиция') && quarantineMessage.includes('Отправка цен выполнена: 1 позиция'));
   } catch (error) {
     fail++;
     failures.push('непредвиденное исключение — ' + (error && error.stack || error));

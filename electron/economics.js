@@ -75,7 +75,7 @@ function resolveTax(settings, mode, nominalOverride) {
   if (taxMode === 'none') nominal = 0;
   const modernVat = taxMode === 'nds22';
   if (modernVat) nominal = 0; // это отдельный НДС, а не процент доходного налога
-  const vatNominal = modernVat ? 22 : Math.max(0, Math.min(100, num(s.taxVatRate)));
+  const vatNominal = taxMode === 'none' ? 0 : (modernVat ? 22 : Math.max(0, Math.min(100, num(s.taxVatRate))));
   const vatEffective = vatNominal > 0 ? vatNominal / (100 + vatNominal) * 100 : 0;
   const incomeEffective = nominal * (1 - vatEffective / 100);
   const ipEnabled = /^usn6/.test(taxMode) && (taxMode === 'usn6_ip' || s.taxInsuranceEnabled === true);
@@ -94,7 +94,7 @@ function resolveTax(settings, mode, nominalOverride) {
   if (modernVat || vatNominal > 0) warnings.push('Входной НДС, налог на прибыль/НДФЛ ОСНО и налоговые льготы здесь не рассчитываются.');
   if (taxMode === 'usn15') warnings.push('Для УСН «Доходы − расходы» задайте расчётную эффективную нагрузку: это не расчёт налоговой базы декларации.');
   if (taxMode === 'nds20') warnings.push('Старый режим 20% сохранён для совместимости. Для текущего НДС выберите 22%.');
-  return { mode: taxMode, nominalRate: modernVat ? 22 : nominal, vatNominal, vatEffective, incomeEffective,
+  return { mode: taxMode, nominalRate: taxMode === 'none' ? 0 : (modernVat ? 22 : nominal), vatNominal, vatEffective, incomeEffective,
     insuranceEffective, deductionEffective, effectiveRate: vatEffective + incomeEffective + insuranceEffective - deductionEffective,
     extraAnnual, fixedAnnual, deductibleAnnual: deductible, annualGross, ipEnabled, warnings };
 }
@@ -164,11 +164,11 @@ function resolveParams(settings, item, overrides, facts) {
    * про логистику, комиссию, хранение, приёмку и эквайринг из финансового отчёта,
    * а СПП приходит из статистики продаж — это другой источник.
    */
-  const factSppPct = Number(f.sppPctAvg) > 0 ? Number(f.sppPctAvg) : undefined;
+  const factSppPct = f.sppPctAvg !== null && f.sppPctAvg !== undefined && f.sppPctAvg !== '' && Number.isFinite(Number(f.sppPctAvg)) && Number(f.sppPctAvg) >= 0 && Number(f.sppPctAvg) <= 100 ? Number(f.sppPctAvg) : undefined;
 
   /**
    * СПП по наблюдению витрины WB (модуль price-watcher): медиана за 7 дней.
-   * Это самая свежая цифра — то, что покупатель реально видит на карточке прямо сейчас,
+   * Это датированное наблюдение, а не гарантия текущей цены для каждого покупателя;
    * поэтому стоит выше среднего по статистике продаж (там окно длиннее и цифра запаздывает).
    * Ноль здесь — осмысленное значение (витрина показывает товар без СПП), поэтому
    * принимаем любое конечное число от 0 до 100, а «нет наблюдений» отличаем по null.
@@ -180,14 +180,18 @@ function resolveParams(settings, item, overrides, facts) {
     return Number.isFinite(n) && n >= 0 && n <= 100 ? n : undefined;
   })();
 
+  const officialSpp = f.sppPctOfficial !== null && f.sppPctOfficial !== undefined && f.sppPctOfficial !== '' && Number.isFinite(Number(f.sppPctOfficial)) && Number(f.sppPctOfficial) >= 0 && Number(f.sppPctOfficial) <= 100 ? Number(f.sppPctOfficial) : undefined;
+  const officialFirst = officialSpp !== undefined && (!watchSppPct && watchSppPct !== 0 || Date.parse(f.sppOfficialAt) >= (Date.parse(f.sppWatchAt) || 0));
   const taxDetails = resolveTax(s, taxMode, o.taxRatePct);
   return {
     categoryName: cat,
     brand: (item && item.brand) || o.brand || '',
     basePrice: pickNum(o.basePrice, item && item.price),
     discountPct: pickNum(o.discountPct, item && item.discount),
-    // приоритет СПП: ручной ввод → наблюдение витрины WB → факт по продажам WB → значение в карточке → общая настройка
-    sppPct: pickNum(o.sppPct, watchSppPct, factSppPct, item && item.sppPct, s.sppDefault),
+    // приоритет СПП: ручной ввод → датированные наблюдения ЛК/витрины → среднее продаж → карточка → настройка
+    sppPct: pickNum(o.sppPct, officialFirst ? officialSpp : undefined, watchSppPct, officialSpp, factSppPct, item && item.sppPct, s.sppDefault),
+    sppOfficialAt: f.sppOfficialAt || '', sppOfficialSource: f.sppOfficialSource || '',
+    otherPct: pickNum(o.otherPct, 0), otherRub: pickNum(o.otherRub, 0),
     // что именно увидели на витрине (null — наблюдений нет) и сколько замеров легло в медиану
     sppPctWatch: watchSppPct === undefined ? null : watchSppPct,
     sppWatchSamples: Number(f.sppWatchSamples || 0),
@@ -239,6 +243,7 @@ function resolveParams(settings, item, overrides, facts) {
       pickSrc('acquiringPct', o.acquiringPct, factAcquiringPct, undefined, s.acquiringPct);
       pickSrc('costPriceRub', o.costPriceRub, undefined, undefined, undefined);
       pickSrc('sppPct', o.sppPct, factSppPct, item && item.sppPct, s.sppDefault, watchSppPct);
+      if ((o.sppPct === undefined || o.sppPct === null || o.sppPct === '') && officialSpp !== undefined && (officialFirst || watchSppPct === undefined)) src.sppPct = 'official';
       return src;
     })()
   };
@@ -296,6 +301,7 @@ function calcUnit(sellerPrice, p) {
   const tax = revenue * (p.taxRatePct / 100);
   const adPctSum = revenue * (p.adPct / 100);
   const ad = adPctSum + p.adRub;
+  const other = revenue * num(p.otherPct) / 100 + num(p.otherRub);
   const logistics = calcLogistics(p);
   const accept = p.acceptRub;
   const storage = p.storageRub;
@@ -303,11 +309,11 @@ function calcUnit(sellerPrice, p) {
   const cogs = p.costPriceRub;
 
   const wbTotal = commission + acquiring + logistics + accept + storage;
-  const fixedCosts = logistics + accept + storage + packaging + cogs + p.adRub;
-  const pctCosts = p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct;
+  const fixedCosts = logistics + accept + storage + packaging + cogs + p.adRub + num(p.otherRub);
+  const pctCosts = p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct + num(p.otherPct);
 
-  const profitGross = revenue - wbTotal - ad - packaging - cogs - tax; // = profit (налог уже внутри)
-  const profitBeforeTax = revenue - wbTotal - ad - packaging - cogs;
+  const profitGross = revenue - wbTotal - ad - packaging - cogs - tax - other; // = profit (налог уже внутри)
+  const profitBeforeTax = revenue - wbTotal - ad - packaging - cogs - other;
   const profit = profitGross;
   const marginPct = revenue > 0 ? (profit / revenue) * 100 : 0;
   const markupPct = cogs > 0 ? (profit / cogs) * 100 : 0;
@@ -324,11 +330,12 @@ function calcUnit(sellerPrice, p) {
     packaging: round(packaging),
     cogs: round(cogs),
     ad: round(ad),
+    other: round(other), otherPct: num(p.otherPct), otherRub: num(p.otherRub),
     adPctSum: round(adPctSum),
     tax: round(tax),
     taxParts: p.taxDetails ? { vat: round(revenue * p.taxDetails.vatEffective / 100), income: round(revenue * p.taxDetails.incomeEffective / 100), insurance: round(revenue * p.taxDetails.insuranceEffective / 100), deduction: round(revenue * p.taxDetails.deductionEffective / 100) } : null,
     wbTotal: round(wbTotal),
-    totalCosts: round(wbTotal + ad + packaging + cogs + tax),
+    totalCosts: round(wbTotal + ad + packaging + cogs + tax + other),
     fixedCosts: round(fixedCosts),
     pctCosts: round(pctCosts),
     profitBeforeTax: round(profitBeforeTax),
@@ -344,25 +351,25 @@ function calcUnit(sellerPrice, p) {
 
 /** Цена безубыточности (прибыль = 0). */
 function calcBreakEvenPrice(p) {
-  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct) / 100;
+  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct + num(p.otherPct)) / 100;
   if (denom <= 0) return null;
-  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub;
+  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub + num(p.otherRub);
   return round(fixed / denom);
 }
 
 /** Цена, при которой маржинальность (прибыль/выручка) равна targetPct. */
 function calcPriceForMarginPct(p, targetPct) {
-  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct + num(targetPct)) / 100;
+  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct + num(p.otherPct) + num(targetPct)) / 100;
   if (denom <= 0) return null;
-  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub;
+  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub + num(p.otherRub);
   return round(fixed / denom);
 }
 
 /** Цена, при которой прибыль на единицу равна targetRub. */
 function calcPriceForProfitRub(p, targetRub) {
-  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct) / 100;
+  const denom = 1 - (p.commissionPct + p.acquiringPct + p.taxRatePct + p.adPct + num(p.otherPct)) / 100;
   if (denom <= 0) return null;
-  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub;
+  const fixed = calcLogistics(p) + p.acceptRub + p.storageRub + p.packagingRub + p.costPriceRub + p.adRub + num(p.otherRub);
   return round((fixed + num(targetRub)) / denom);
 }
 

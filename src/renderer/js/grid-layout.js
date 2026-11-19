@@ -13,7 +13,8 @@ window.GridLayout = (function () {
     return { columnOrder: cleanIds(data.columnOrder), rowOrder: cleanIds(data.rowOrder),
       widths: data.widths && typeof data.widths === 'object' ? data.widths : {},
       heights: data.heights && typeof data.heights === 'object' ? data.heights : {},
-      rowHeight: data.rowHeight > 0 ? clamp(data.rowHeight, 32, 800) : 0 };
+      rowHeight: data.rowHeight > 0 ? clamp(data.rowHeight, 32, 800) : 0,
+      pinCount: Number.isInteger(data.pinCount) && data.pinCount >= 0 ? Math.min(30, data.pinCount) : 1 };
   }
   function persist(key, data) {
     try { localStorage.setItem(key, JSON.stringify(data)); }
@@ -31,7 +32,7 @@ window.GridLayout = (function () {
     const rank = new Map(order.map((nm, i) => [nm, i]));
     return rows.slice().sort((a, b) => (rank.get(String(a.nmID)) ?? 1e9) - (rank.get(String(b.nmID)) ?? 1e9));
   }
-  const DEFAULT_WIDTHS = { item: 360, strategy: 250, offset: 290, competitor: 240, info: 250, stock: 180, plan: 180,
+  const DEFAULT_WIDTHS = { item: 300, priceNow: 250, priceNext: 300, other: 210, abc: 155, strategy: 250, offset: 290, competitor: 240, info: 235, stock: 180, plan: 180,
     floor: 225, cost: 210, sizes: 260, promos: 240, status: 200, restore: 200, why: 110, barcode: 190, costDetail: 210 };
   const defaultWidth = (id) => DEFAULT_WIDTHS[id] || 165;
 
@@ -42,7 +43,7 @@ window.GridLayout = (function () {
     const current = () => !destroyed && API.generation() === epoch && key === keyOf(o.id);
     const store = () => { if (current()) persist(key, data); };
     const notify = () => { if (current() && o.onChange) o.onChange(); };
-    table.classList.add('adjustable-grid');
+    table.classList.add('adjustable-grid', 'grid-dynamic-pin'); table.classList.remove('rp-sticky-first');
     table.style.tableLayout = 'fixed';
     let group = table.querySelector('colgroup');
     if (group) group.remove();
@@ -52,8 +53,39 @@ window.GridLayout = (function () {
     const widths = columns.map((c) => clamp(data.widths[c.colId] || defaultWidth(c.colId), c.colId === 'item' ? 200 : 70, 1400));
     const cols = columns.map((c, i) => { const col = document.createElement('col'); col.dataset.colId = c.colId; col.style.width = widths[i] + 'px'; group.appendChild(col); return col; });
     table.insertBefore(group, table.firstChild);
-    const updateWidth = () => { table.style.width = (widths.reduce((a, b) => a + b, 0) + hasSelect * 42) + 'px'; table.style.minWidth = '100%'; };
-    updateWidth();
+    const updateWidth = () => { table.style.width = (widths.reduce((a, b) => a + b, 0) + hasSelect * 42) + 'px'; table.style.minWidth = '0'; applyPins(); };
+
+    const groupRow = table.querySelector('thead tr.rp-head-groups');
+    const groupTemplates = groupRow ? [...groupRow.children].filter((cell) => !cell.classList.contains('rp-check')).map((cell) => ({ template: cell.cloneNode(true), span: cell.colSpan || 1 })) : [];
+    function splitGroupHeaders(count) {
+      if (!groupRow) return;
+      [...groupRow.children].filter((cell) => !cell.classList.contains('rp-check')).forEach((cell) => cell.remove());
+      let index = 0;
+      for (const { template, span } of groupTemplates) {
+        const pinned = Math.max(0, Math.min(span, count - index));
+        for (const part of pinned && pinned < span ? [pinned, span - pinned] : [span]) {
+          const cell = template.cloneNode(true); cell.colSpan = part; groupRow.appendChild(cell);
+        }
+        index += span;
+      }
+    }
+    function applyPins() {
+      table.querySelectorAll('.grid-pinned').forEach((cell) => { cell.classList.remove('grid-pinned'); cell.style.left = ''; cell.style.position = ''; });
+      table.querySelectorAll('[data-pinned-product]').forEach((cell) => { delete cell.dataset.pinnedProduct; });
+      const count = Math.min(columns.length, data.pinCount);
+      splitGroupHeaders(count);
+      table.querySelectorAll('.grid-pin').forEach((button, index) => button.setAttribute('aria-pressed', String(index < count)));
+      table.querySelectorAll('tbody tr, tfoot tr, thead tr:last-child').forEach((row) => {
+        const selectHere = row.querySelector('.rp-check') || (row.parentElement.tagName !== 'THEAD' && hasSelect);
+        let left = 0;
+        if (selectHere && count) { const cell = row.children[0]; cell.classList.add('grid-pinned'); cell.style.left = '0px'; left = 42; }
+        else if (hasSelect && row.parentElement.tagName === 'THEAD') left = count ? 42 : 0;
+        for (let i = 0; i < count; i++) { const cell = row.children[i + (selectHere ? 1 : 0)]; if (!cell) continue; cell.classList.add('grid-pinned'); cell.style.left = left + 'px'; left += widths[i]; }
+      });
+      const groupRow = table.querySelector('thead tr.rp-head-groups');
+      if (groupRow) { let index = 0, left = 0; for (const cell of groupRow.children) { if (cell.classList.contains('rp-check')) { if (count) { cell.classList.add('grid-pinned'); cell.style.left = '0px'; } left = hasSelect ? 42 : 0; continue; } const span = cell.colSpan || 1; if (index + span <= count) { cell.classList.add('grid-pinned'); cell.style.left = left + 'px'; } left += widths.slice(index, index + span).reduce((a, b) => a + b, 0); index += span; } }
+    }
+    function setPins(count) { data.pinCount = Math.floor(clamp(count, 0, columns.length)); store(); applyPins(); }
 
     function gesture(event, move, done) {
       event.preventDefault(); event.stopPropagation();
@@ -96,7 +128,7 @@ window.GridLayout = (function () {
       const label = document.createElement('span'); label.className = 'grid-column-title';
       while (th.firstChild) label.appendChild(th.firstChild); th.appendChild(label);
       label.draggable = c.colId !== 'item'; label.tabIndex = 0;
-      label.title = c.colId === 'item' ? 'Товар закреплён слева. Ширина меняется за правый край.' : 'Перетащите заголовок для перестановки. Alt + ← / → тоже перемещает колонку.';
+      label.title = c.colId === 'item' ? 'Товар остаётся первым. Закрепление переключается кнопкой ⌖, ширина — за правый край.' : 'Перетащите заголовок для перестановки. Alt + ← / → тоже перемещает колонку.';
       label.ondragstart = (event) => { draggingColumn = c.colId; if (event.dataTransfer) { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', c.colId); } };
       th.ondragover = (event) => { if (draggingColumn) { event.preventDefault(); th.classList.add('grid-drop-target'); } };
       th.ondragleave = () => th.classList.remove('grid-drop-target');
@@ -119,6 +151,8 @@ window.GridLayout = (function () {
       };
       handle.onkeydown = (event) => { if (['ArrowLeft', 'ArrowRight'].includes(event.key)) { event.preventDefault(); setWidth(i, widths[i] + (event.key === 'ArrowLeft' ? -20 : 20)); store(); } };
       th.appendChild(handle);
+      const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'grid-pin'; pin.textContent = '⌖'; pin.title = 'Закрепить до этой колонки / открепить эту и следующие'; pin.setAttribute('aria-label', pin.title + ': ' + (c.title || c.colId));
+      pin.onclick = (event) => { event.stopPropagation(); setPins(data.pinCount > i ? i : i + 1); }; th.appendChild(pin);
     });
 
     table.querySelectorAll('tbody tr').forEach((tr, i) => {
@@ -156,20 +190,22 @@ window.GridLayout = (function () {
       const tooltip = () => { const title = select.options[select.selectedIndex]?.text || ''; if (title) select.title = title; };
       tooltip(); select.addEventListener('change', tooltip);
     });
-    return { destroy() { destroyed = true; if (cleanup) cleanup(); }, moveColumn, moveRow, setWidth: (id, width) => { const i = columns.findIndex((c) => c.colId === id); if (i >= 0) { setWidth(i, width); store(); } }, data };
+    updateWidth();
+    return { setPins, destroy() { destroyed = true; if (cleanup) cleanup(); }, moveColumn, moveRow, setWidth: (id, width) => { const i = columns.findIndex((c) => c.colId === id); if (i >= 0) { setWidth(i, width); store(); } }, data };
   }
 
   function openSettings(id, columns, onChange) {
     const data = load(id), key = keyOf(id), epoch = API.generation();
     const modal = UI.modal({ title: 'Вид таблицы — размеры и порядок', size: 'md',
-      content: `<div class="alert info">Ширина — за правый край заголовка; высота — за нижнюю границу ячейки с галочкой. Заголовки и маркер ⋮⋮ перетаскиваются. Товар закреплён слева. Всё сохраняется отдельно для этого кабинета и не меняет цены.</div>
+      content: `<div class="alert info">Ширина — за правый край заголовка; высота — за нижнюю границу ячейки с галочкой. Заголовки и маркер ⋮⋮ перетаскиваются. Закрепление первых колонок — кнопкой ⌖ в заголовке. Всё сохраняется отдельно для этого кабинета и не меняет цены.</div>
       <div class="grid g2"><label class="field">Колонка<select id="layout-column">${columns.map((c) => `<option value="${U.esc(c.colId)}">${U.esc(c.title || 'Действия')}</option>`).join('')}</select></label><label class="field">Ширина, px<input id="layout-width" type="number" min="70" max="1400" step="10"></label>
-      <label class="field">Общая высота строк, px (0 — авто)<input id="layout-height" type="number" min="0" max="800" value="${data.rowHeight}"></label></div>
+      <label class="field">Закрепить первых колонок<input id="layout-pin" type="number" min="0" max="${columns.length}" value="${data.pinCount}"></label><label class="field">Общая высота строк, px (0 — авто)<input id="layout-height" type="number" min="0" max="800" value="${data.rowHeight}"></label></div>
       <p class="hint">Длинное выбранное значение также видно при наведении на выпадающий список. Порядок строк не влияет на расчёты и отправку в WB.</p>`,
       buttons: [{ label: 'Отмена' }, { label: 'Сбросить вид', class: 'btn-ghost', onClick: () => { if (epoch !== API.generation()) return; try { localStorage.removeItem(key); } catch (_) {} onChange(); } },
         { label: 'Применить', class: 'btn-primary', onClick: () => { if (epoch !== API.generation()) return;
           const id = modal.body.querySelector('#layout-column').value; data.widths[id] = clamp(modal.body.querySelector('#layout-width').value, id === 'item' ? 200 : 70, 1400);
           const h = Number(modal.body.querySelector('#layout-height').value); data.rowHeight = h > 0 ? clamp(h, 32, 800) : 0; data.heights = {};
+          data.pinCount = clamp(modal.body.querySelector('#layout-pin').value, 0, columns.length);
           persist(key, data); onChange(); } }] });
     const col = modal.body.querySelector('#layout-column'), width = modal.body.querySelector('#layout-width');
     col.onchange = () => { width.value = data.widths[col.value] || defaultWidth(col.value); }; col.onchange();

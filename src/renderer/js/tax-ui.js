@@ -32,8 +32,9 @@ window.TaxUI = (function () {
     const update = () => {
       const mode = get('taxmode').value, ip = /^usn6/.test(mode);
       if (mode === 'nds22') get('vat').value = '22';
+      if (mode === 'none') get('vat').value = '0';
       if (mode === 'usn6_ip') get('ip').checked = true;
-      get('vat').disabled = mode === 'nds22'; get('taxrate').disabled = mode === 'nds22' || mode === 'none';
+      get('vat').disabled = mode === 'nds22' || mode === 'none'; get('taxrate').disabled = mode === 'nds22' || mode === 'none';
       get('ip').disabled = !ip || mode === 'usn6_ip';
       for (const id of ['annual', 'fixed', 'ipcap', 'staff', 'deduct']) get(id).disabled = !ip || !get('ip').checked;
       const info = EC.resolveTax({ ...settings, ...read(prefix, root) }, mode);

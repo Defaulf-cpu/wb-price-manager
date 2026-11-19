@@ -105,6 +105,8 @@ const DEFAULT_CONFIG = {
    */
   sizePriceMode: 'none',
 
+  strategyTemplates: {}, // безопасные параметры шаблонов; без исполняемого кода
+
   /** Пресеты стратегий для быстрого назначения. */
   presets: [
     { id: 0, name: 'Без стратегии (только пороги)', strategy: 'default' },
@@ -126,6 +128,7 @@ const STRATEGIES = [
   { id: 'rrp', name: 'Удержание РРЦ', hint: 'Не даёт цене для покупателя (с учётом СПП и кошелька) опуститься ниже рекомендованной розничной цены.' },
   { id: 'ai', name: 'AI-подбор цены', hint: 'Пошаговый поиск цены с максимальной прибылью в месяц: низкоскоростным товарам стимулирует спрос, остальным оптимизирует прибыль без падения темпа.' },
   { id: 'promo', name: 'Только акции', hint: 'Цена = акционная (плановая скидка акции), но не ниже минимального порога.' },
+  { id: 'boost', name: 'Лесенка буста', hint: 'Дневные квоты заказов по возрастающим точным ценам акций. После лимита — следующая ступень; после последней — выход до 00:00 МСК. Не гарантирует точное число заказов из-за задержек WB.' },
   { id: 'hold', name: 'Держать цену', hint: 'Ничего не меняет — только следит за порогами и предупреждает.' }
 ];
 
@@ -331,7 +334,7 @@ function econSummary(e) {
   return {
     cogs: num(e.cogs), commission: num(e.commission), acquiring: num(e.acquiring),
     logistics: num(e.logistics), accept: num(e.accept), storage: num(e.storage),
-    packaging: num(e.packaging), tax: num(e.tax), ad: num(e.ad),
+    packaging: num(e.packaging), tax: num(e.tax), ad: num(e.ad), other: num(e.other), otherPct: num(e.otherPct), otherRub: num(e.otherRub),
     wbTotal: num(e.wbTotal), totalCosts: num(e.totalCosts), pctCosts: num(e.pctCosts),
     fixedCosts: num(e.fixedCosts), markupPct: num(e.markupPct),
     breakEvenPrice: num(e.breakEvenPrice), minPriceForMargin: num(e.minPriceForMargin),
@@ -482,6 +485,11 @@ function planPromos(ctx, cfg, itemCfg, extra) {
 
   const actions = [];
   for (const pr of promos) {
+    if (pr.localUnconfirmed) {
+      actions.push({ promoId: pr.id, promoName: pr.name || ('Акция ' + pr.id), promoType: 'local', action: 'local-unconfirmed', inAction: false, eligible: !!pr.eligible, localUnconfirmed: true,
+        reason: 'Локальный файл акции отсутствует в календаре WB: участие и цены WB не подтверждены, поэтому акция не управляет ценой.' });
+      continue;
+    }
     const required = num(pr.requiredDiscountPct, num(pr.participationPercentage));
     const planPrice = num(pr.planPrice) > 0
       ? num(pr.planPrice)
@@ -788,7 +796,11 @@ function computeItem(ctx, cfg, itemCfg, ec) {
 
   // ценовой коридор: минимальная цена (пол) ↔ базовая цена (потолок).
   // Если минимальная цена не задана — пол определяется минимальной маржинальностью.
-  const corridorMax = Math.max(basePriceTarget, curBase);
+  const boostExitMax = strategy === 'boost' && ctx.boostPlan && ctx.boostPlan.exit && !(num(I.basePriceTarget) > 0) && C.priceEdit.canChangeBasePrice !== 'forbid' ? num(ctx.boostPlan.target) : 0;
+  const hardMax = num(I.maxPrice, 0);
+  const naturalCorridorMax = Math.max(basePriceTarget, curBase, boostExitMax);
+  const corridorMax = hardMax > 0 ? Math.min(naturalCorridorMax, hardMax) : naturalCorridorMax;
+  const searchMax = Math.max(naturalCorridorMax * 2, curBase * 3, corridorMax * 2);
   const corridorMin = Math.max(1, minPrice > 0 ? minPrice : 1);
 
   const notes = [];
@@ -807,7 +819,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
 
   // минимальная цена по марже (точка, где маржа = minMargin);
   // при разрешённой отрицательной марже пол определяется только минимальным порогом
-  const minByMargin = (ctx.econAt && !allowNeg) ? priceForMargin(marginCtx, minMargin, 1, corridorMax * 3) : null;
+  const minByMargin = (ctx.econAt && !allowNeg) ? priceForMargin(marginCtx, minMargin, 1, searchMax) : null;
   const priceFloor = Math.max(corridorMin, minByMargin || 0);
 
   // ── СЛОЙ 1: универсальная стратегия ──
@@ -818,13 +830,18 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const promoPrice = num(ctx.promoPrice, 0) > 0 ? num(ctx.promoPrice) : null;
 
   switch (strategy) {
+    case 'boost':
+      target = ctx.boostPlan && Number(ctx.boostPlan.target) > 0 ? Number(ctx.boostPlan.target) : curSeller;
+      notes.push(ctx.boostPlan ? ctx.boostPlan.reason || 'Лесенка буста' : 'Настройте ступени лесенки буста');
+      break;
+
     case 'hold':
       target = curSeller;
       notes.push('Стратегия «Держать цену»: цена не меняется.');
       break;
 
     case 'margin': {
-      const p = ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, corridorMax * 2) : null;
+      const p = ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null;
       if (p === null) {
         target = Math.min(curSeller, corridorMax);
         notes.push(`Целевая маржа ${targetMargin}% недостижима даже на базовой цене — держим максимум коридора.`);
@@ -847,7 +864,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
             : (num(I.competitorOffsetPct) >= 0 ? '+' : '−') + Math.abs(num(I.competitorOffsetPct)) + '%'
         }).`);
         if (comp.price < priceFloor) { target = priceFloor; notes.push('Цена конкурента ниже минимального порога → применяем порог.'); }
-        if (comp.price > corridorMax) { target = corridorMax; notes.push('Цена конкурента выше базовой → применяем базовую.'); }
+        if (comp.price > corridorMax) { target = corridorMax; notes.push(hardMax > 0 && corridorMax >= hardMax - 0.01 ? 'Цена конкурента выше потолка карточки → применяем потолок maxPrice.' : 'Цена конкурента выше базовой → применяем базовую.'); }
       }
       break;
     }
@@ -975,7 +992,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   // 2.3 Распродажа неликвида (понижающее ДЦО — применяется, только если цена выше цели)
   const liqDays = num(I.liquidationTurnoverDays, C.defaults.liquidationTurnoverDays);
   const liqDisc = num(I.liquidationDiscountPct, C.defaults.liquidationDiscountPct);
-  if (num(ctx.turnoverDays) > liqDays && liqDisc > 0) {
+  if (strategy !== 'boost' && num(ctx.turnoverDays) > liqDays && liqDisc > 0) {
     const price = Math.max(priceFloor, curSeller * (1 - liqDisc / 100));
     dco.push({ layer: 'ДЦО', name: 'Распродажа неликвида', price: r2(price), note: `Оборачиваемость ${Math.round(ctx.turnoverDays)} дн > ${liqDays} дн → −${liqDisc}%.` });
   }
@@ -985,6 +1002,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     dco.push({ layer: 'ДЦО', name: 'Минимальная маржа', price: r2(minByMargin), note: `Целевая цена ниже точки маржи ${minMargin}% (${Math.round(minByMargin)} ₽).` });
   }
 
+  if (strategy === 'boost' && ctx.boostPlan && ['scheduled', 'waiting', 'finished'].includes(ctx.boostPlan.status)) dco.length = 0;
   let finalPrice = target;
   if (dco.length) {
     const raising = dco.filter((d) => d.name !== 'Распродажа неликвида');
@@ -1004,16 +1022,17 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const beforeCorridor = finalPrice;
   finalPrice = Math.min(Math.max(finalPrice, priceFloor > 0 ? priceFloor : 1), corridorMax);
   if (Math.abs(finalPrice - beforeCorridor) > 0.5) {
-    notes.push(`Цена ограничена коридором: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽ (мин ${Math.round(priceFloor)}, базовая ${Math.round(corridorMax)}).`);
+    notes.push(hardMax > 0 && finalPrice >= hardMax - 0.5 ? `Цена ограничена потолком карточки maxPrice: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽.` : `Цена ограничена коридором: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽ (мин ${Math.round(priceFloor)}, базовая ${Math.round(corridorMax)}).`);
   }
 
   // ── АКЦИИ: вход/выход — решение поверх стратегии ──
   // Выход из акции возможен только повышением цены выше плановой (API WB исключать товар не даёт),
   // поэтому такое повышение выполняется сразу, минуя лимит шага: оно не рискует карантином
   // и не скрывает карточку (риск службы безопасности WB связан с резким снижением цены).
-  const promoPlan = planPromos(ctx, C, I, { strategyPrice: finalPrice });
+  const promoPlan = strategy === 'boost' ? { actions: [], chosen: null, discountFloor: 0, sppForecastPct: num(ctx.sppPct) } : planPromos(ctx, C, I, { strategyPrice: finalPrice });
   let promoBypass = false;
   let promoExitPair = null;
+  let promoExitBlockedByMaxPrice = false;
   if (promoPlan.chosen) {
     const ch = promoPlan.chosen;
     if (ch.type === 'exit') {
@@ -1025,6 +1044,16 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       layers.push({ layer: 'Акции', name: 'Выход из акции', price: finalPrice, note: ch.reason });
       notes.push(`Выход из акции (${ch.promoNames.join(', ')}): скидка ${promoExitPair.discount}% вместо порога ${r2(num(ch.requiredDiscountPct))}% → цена ${Math.round(finalPrice)} ₽ выше плановой, WB выведет товар.` +
         ` После фактического выхода${C.promo.restorePriceAfterExit === false ? ' цена НЕ возвращается (возврат выключен)' : ` цена вернётся к ${Math.round(num(ch.restoreSellerPrice))} ₽`}.`);
+      if (hardMax > 0 && finalPrice > hardMax + 0.005) {
+        promoExitBlockedByMaxPrice = true;
+        ch.blockedByMaxPrice = true;
+        warnings.push(`Выход из акции заблокирован потолком карточки maxPrice ${Math.round(hardMax)} ₽: цена выхода ${Math.round(finalPrice)} ₽ выше потолка.`);
+        notes.push(`Выход из акции не выполняется: потолок карточки maxPrice ${Math.round(hardMax)} ₽ ниже цены выхода ${Math.round(finalPrice)} ₽.`);
+        layers.push({ layer: 'Акции', name: 'Выход заблокирован потолком', price: r2(hardMax), note: warnings[warnings.length - 1] });
+        finalPrice = r2(hardMax);
+        promoExitPair = null;
+        promoBypass = false;
+      }
     } else if (ch.type === 'join') {
       finalPrice = Math.min(Math.max(num(ch.price), priceFloor > 0 ? priceFloor : 1), corridorMax);
       promoBypass = !!ch.bypassLimits;
@@ -1041,7 +1070,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   // ── удержание: товар выведен из автоакции и ждёт её окончания ──
   // Если скидка снова станет не ниже порога акции, WB подхватит товар обратно —
   // получится «пинг-понг». Поэтому держим скидку ниже порога, а не просто цену.
-  const hold = ctx.promoHold;
+  const hold = strategy === 'boost' ? null : ctx.promoHold;
   const holdActive = !!(hold && (num(hold.maxDiscountPct) > 0 || num(hold.minPrice) > 0));
   if (holdActive && num(hold.minPrice) > 0 && finalPrice < num(hold.minPrice) - 0.01) {
     finalPrice = r2(num(hold.minPrice));
@@ -1131,6 +1160,19 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     ? { basePrice: promoExitPair.basePrice, discount: promoExitPair.discount, mode: 'promo-exit' }
     : toBaseAndDiscount(finalPrice, { basePrice: curBase, discount: curDisc }, C, I);
 
+  // Акционный exitPair не должен возвращать убыточную цену после уже рассчитанного
+  // безопасного пола. Сохраняем скидку выхода, повышая базу лишь если это разрешено
+  // и целевая цена укладывается в коридор; иначе сервер покажет критическую ошибку.
+  const pairSeller = pair.basePrice * (1 - pair.discount / 100);
+  if (pairSeller < priceFloor - .005 && finalPrice >= priceFloor - .5 && priceFloor <= corridorMax && C.priceEdit.canChangeBasePrice !== 'forbid') {
+    const denominator = 1 - pair.discount / 100;
+    const base = denominator > 0 ? Math.ceil(Math.max(priceFloor, finalPrice) / denominator) : 0;
+    if (base > 0 && base * denominator <= corridorMax + .005) {
+      pair = { basePrice: base, discount: pair.discount, mode: pair.mode + '-safe-floor' };
+      notes.push('Базовая цена скорректирована вверх до минимальной безопасной цены без изменения скидки выхода.');
+    }
+  }
+
   // если товар остаётся в акции (или входит в неё), скидка обязана быть не ниже порога акции,
   // иначе WB выведет товар из акции сам — даже когда мы этого не хотим
   const discFloor = num(promoPlan.discountFloor);
@@ -1165,6 +1207,22 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     notes.push(`Скидка ${refit.discount}% удерживается ниже порога автоакции (${r2(num(hold.maxDiscountPct))}%), чтобы WB не вернул товар в акцию.`);
   }
 
+  // Жёсткий потолок карточки применяется последним: ни скидочный порог акции,
+  // ни красивая цена, ни пересборка пары не вправе поднять цену выше maxPrice.
+  if (hardMax > 0) {
+    let cappedSeller = pair.sellerPrice !== undefined ? num(pair.sellerPrice) : r2(pair.basePrice * (1 - pair.discount / 100));
+    if (cappedSeller > hardMax + 0.005) {
+      pair = pairForSellerPrice(Math.max(curBase, hardMax), hardMax);
+      if (num(pair.sellerPrice) > hardMax + 0.005) {
+        const base = Math.max(1, Math.round(num(pair.basePrice)));
+        const discount = Math.min(95, Math.max(0, Math.ceil((1 - hardMax / base) * 100)));
+        pair = { basePrice: base, discount: r2(discount), sellerPrice: r2(base * (1 - discount / 100)), mode: 'max-price-cap' };
+      }
+      finalPrice = r2(num(pair.sellerPrice));
+      notes.push(`Итоговая цена ограничена потолком карточки maxPrice ${Math.round(hardMax)} ₽.`);
+    }
+  }
+
   const newSeller = pair.sellerPrice !== undefined ? pair.sellerPrice : r2(pair.basePrice * (1 - pair.discount / 100));
 
   const changeAbs = newSeller - curSeller;
@@ -1187,6 +1245,8 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const perDay = num(ctx.salesPerDay);
   const deltaProfitMonth = econAfter.profit * perDay * 30 * upliftFactor - econBefore.profit * perDay * 30;
 
+  if (ctx.statsMissing === true) warnings.push('Нет данных статистики продаж: расчёт продолжен с нулевым спросом, цена не блокируется.');
+  if (C.marginMode === 'forpay' && num(ctx.sales30) > 0 && !(num(ctx.forPayAvg) > 0)) warnings.push('Нет достоверных данных ForPay при наличии продаж: маржа от ForPay считается осторожно по цене со скидкой, цена не блокируется.');
   // себестоимость введена в валюте, курс которой не задан: расчёт без себестоимости
   if (ctx.costError) warnings.push(String(ctx.costError) + ' — себестоимость в расчёте не учтена.');
   if (!allowSend && needSend) warnings.push('Отправка в WB отключена для товара: цена рассчитана, но в кабинет не уйдёт.');
@@ -1226,8 +1286,11 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       breakEvenUpliftPct: promoJoin ? (promoPlan.chosen.breakEvenUpliftPct === undefined ? null : promoPlan.chosen.breakEvenUpliftPct) : null
     },
     corridor: { min: r2(priceFloor), max: r2(corridorMax), minByMargin: minByMargin === null ? null : r2(minByMargin) },
+    maxPrice: hardMax > 0 ? r2(hardMax) : null,
+    promoExitBlockedByMaxPrice,
     needSend: needSend && allowSend,
     allowSend,
+    negativeMarginAllowed: allowNeg,
     tag: ctx.tag ? String(ctx.tag) : '',
     barcode: ctx.barcode ? String(ctx.barcode) : '',
     /**
@@ -1278,7 +1341,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     promoActions: promoPlan.actions,
     promoChosen: promoPlan.chosen,
     context: {
-      stock: num(ctx.stock), salesPerDay: num(ctx.salesPerDay), turnoverDays: num(ctx.turnoverDays),
+      stock: num(ctx.stock), salesPerDay: num(ctx.salesPerDay), turnoverDays: num(ctx.turnoverDays), statsMissing: ctx.statsMissing === true,
       sppForecastPct: promoPlan.sppForecastPct,
       inPromo: !!ctx.inPromo, promoPrice: promoPrice, competitor: comp ? comp.source : null,
       // цена подставлена из sizes[] — товар с поразмерными ценами (WB не отдаёт price целиком)
@@ -1356,19 +1419,22 @@ function summarize(results) {
   };
 }
 
-function mergeConfig(user) {
-  const out = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-  const src = user || {};
-  for (const k of Object.keys(src)) {
-    if (src[k] && typeof src[k] === 'object' && !Array.isArray(src[k]) && out[k] && typeof out[k] === 'object') {
-      Object.assign(out[k], src[k]);
-    } else out[k] = src[k];
+function mergeConfig(user, patch) {
+  function merge(base, source) {
+    const out = { ...base };
+    for (const [k, v] of Object.entries(source || {})) {
+      if (['__proto__', 'constructor', 'prototype'].includes(k)) continue;
+      if (v && typeof v === 'object' && !Array.isArray(v)) out[k] = merge(out[k] && typeof out[k] === 'object' && !Array.isArray(out[k]) ? out[k] : {}, v);
+      else out[k] = Array.isArray(v) ? JSON.parse(JSON.stringify(v)) : v;
+    }
+    return out;
   }
-  return out;
+  return merge(merge(JSON.parse(JSON.stringify(DEFAULT_CONFIG)), user), patch);
 }
 
-function itemConfig(defaults, user) {
-  return Object.assign({}, defaults || {}, user || {});
+function itemConfig(defaults, user, templates) {
+  const strategy = (user && user.strategy) || (defaults && defaults.strategy) || 'default';
+  return Object.assign({}, defaults || {}, (templates || {})[strategy] || {}, user || {});
 }
 
 return {

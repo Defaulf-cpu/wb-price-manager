@@ -30,17 +30,12 @@ Views.repricer = {
         <button type="button" class="tab" data-t="rules">Массовые правила</button>
         <button type="button" class="tab" data-t="costs">Себестоимость</button>
         <button type="button" class="tab" data-t="competitors">Конкуренты</button>
-        <button type="button" class="tab" data-t="promos">Акции</button>
-        <button type="button" class="tab" data-t="promo-analytics">Аналитика акций</button>
         <button type="button" class="tab" data-t="journal-prices">Журнал изменения цен</button>
-        <button type="button" class="tab" data-t="journal-promos">Журнал участия в акциях</button>
-        <button type="button" class="tab" data-t="schedule">Расписание</button>
-        <button type="button" class="tab" data-t="params">Параметры</button>
       </div>
       <div id="rp-host">${UI.loading('Загружаем настройки репрайсера…')}</div>
     `;
     container.querySelectorAll('#rp-tabs .tab').forEach((t) => {
-      t.onclick = () => { this.tab = t.dataset.t; this.paintTabs(); this.draw(); };
+      t.onclick = async () => { this.tab = t.dataset.t; this.paintTabs(); await this.draw(); };
     });
     if (!this._subscribed) {
       this._subscribed = true;
@@ -67,6 +62,8 @@ Views.repricer = {
       } catch (e) { /* приватный режим браузера — остаёмся на обычной плотности */ }
     }
     this.rstate = await API.invoke('repricer:state');
+    this.itemsByNm = new Map((S.state.items || []).map((item) => [String(item.nmID), item]));
+    this.cardsByNm = new Map((S.state.cards || []).map((card) => [String(card.nmID), card]));
     // себестоимость по артикулам: без неё нельзя сказать, выгоден товар или нет
     // (в INDEEPA это «Без индекса»), и такие строки не должны уходить в WB
     this.cogsByNm = {};
@@ -102,7 +99,7 @@ Views.repricer = {
        * самостоятельные пункты цен/экономики/себестоимости удалены из бокового меню.
        * Вложенные панели используют прежние общие модули без потери функций.
        */
-      if (this.tab === 'prices') this.tabPrices(host);
+      if (this.tab === 'prices') await this.tabPrices(host);
       else if (this.tab === 'price-tools') Views.prices.render(host);
       else if (this.tab === 'economics') Views.economics.render(host);
       else if (this.tab === 'rules') await this.tabRules(host);
@@ -132,7 +129,7 @@ Views.repricer = {
         <div class="spread wrap">
           <div class="row wrap">
             <label class="checkline"><input type="checkbox" id="rp-enabled" ${cfg.enabled ? 'checked' : ''} />
-              <b>Автообновление цен включено</b></label>
+              <b>Планировщик РП</b></label>
             <span class="hint">${sched.enabled && sched.nextRunAt ? 'Следующий пересчёт: <b>' + U.date(sched.nextRunAt, true) + '</b>' : 'Планировщик выключен'}</span>
             ${cfg.schedule.autoSend ? UI.badge('автоотправка в WB включена', 'danger') : UI.badge('автоотправка выключена — только расчёт')}
             ${rs.demo ? UI.badge('демо-режим', 'demo') : UI.badge('данные WB API', 'live')}
@@ -210,7 +207,7 @@ Views.repricer = {
             intervalMinutes: U.num($('#rp-interval').value, 60)
           }
         });
-        const res = await API.invoke('repricer:calc', { full: true });
+        const res = await this.calculate({ full: true });
         this.results = res.results || [];
         this.summary = res.summary;
         App.toast(`Пересчитано ${res.summary.total} товаров за ${(res.tookMs / 1000).toFixed(1)} с`, 'ok');
@@ -332,7 +329,7 @@ Views.repricer = {
       host.querySelector('#rp-grid').innerHTML =
         '<div class="card muted">Считаем текущие и предложенные цены…</div>';
       try {
-        const res = await API.invoke('repricer:calc', { full: true });
+        const res = await this.calculate({ full: true });
         this.results = res.results || [];
         this.summary = res.summary;
         this.drawSummary();
@@ -432,15 +429,14 @@ Views.repricer = {
     const rpCount = items.length - manualCount;
     const sendAt = prop.sendAt ? new Date(prop.sendAt) : null;
     const minutesLeft = sendAt ? Math.max(0, Math.round((sendAt - Date.now()) / 60000)) : null;
-    const phaseLabel = prop.phase === 'sent' ? 'отправлено в WB'
-      : (prop.phase === 'stale' ? 'устарело — нужен новый пересчёт' : 'ждёт отправки');
+    const phaseLabel = ({ sent: 'применение подтверждено WB', pending: 'передано, применение ещё не подтверждено', partial: 'частичный результат — проверьте WB', stale: 'устарело — нужен новый пересчёт' })[prop.phase] || 'ждёт отправки';
     const kind = prop.phase === 'sent' ? 'ok' : (prop.phase === 'stale' ? 'danger' : 'warn');
 
     host.innerHTML = `
       <div class="card" style="margin-bottom:12px">
         <div class="row wrap" style="gap:12px">
           <div style="flex:1;min-width:280px">
-            <b>К отправке ${U.fmt(items.length)} цен</b> ${UI.badge(phaseLabel, kind)}
+            <b>Цен в предложении: ${U.fmt(items.length)}</b> ${UI.badge(phaseLabel, kind)}
             ${manualCount ? UI.badge('из них ваших сохранённых: ' + U.fmt(manualCount), 'info') : ''}
             ${rpCount ? '<span class="hint">по расчёту репрайсера: ' + U.fmt(rpCount) + '</span>' : ''}
             <div class="hint" style="margin-top:4px">
@@ -458,7 +454,7 @@ Views.repricer = {
             <button class="btn btn-ghost" id="rp-prop-discard">Отклонить</button>
           </div>
         </div>
-        ${prop.phase === 'stale' && prop.note ? `<div class="alert warn" style="margin-top:10px">${U.esc(prop.note)}</div>` : ''}
+        ${prop.note ? `<div class="alert warn" style="margin-top:10px">${U.esc(prop.note)}</div>` : ''}
         ${lifecycle}${blockedHtml}
       </div>`;
 
@@ -477,7 +473,7 @@ Views.repricer = {
           btn.textContent = 'Отправляем…';
           try {
             const res = await API.invoke('repricer:proposal-send', {});
-            App.toast('Отправлено цен: ' + (res.sent || 0) +
+            App.toast('Передано WB: ' + (res.sent || 0) + ' · подтверждено: ' + (res.confirmed || 0) +
               ((res.stale && res.stale.length) ? ' · пропущено устаревших: ' + res.stale.length : ''), 'ok', 8000);
             await S.loadGoods(true);
             S.invalidate();
@@ -841,6 +837,7 @@ Views.repricer = {
     if (item.inPromo) badges.push(UI.badge('в акции', 'warn'));
     if (item.isBadTurnover) badges.push(UI.badge('плохая оборач.', 'warn'));
     return `<div class="rp-info-block"><div class="tiny rp-wrap">${rows.join(' · ') || 'Категория не указана'}${badges.length ? ' ' + badges.join(' ') : ''}</div>
+      <div class="rp-info-cost" data-field-id="cost"><span class="tiny muted">Себестоимость / единицу</span>${this.costCellHtml(r)}</div>
       <div class="rp-info-stock" data-field-id="stock"><span class="tiny muted">Остаток / оборачиваемость</span><div>${this.stockCellHtml(r)}</div></div>
       <div class="rp-info-plan" data-field-id="plan"><span class="tiny muted">План продаж / месяц</span>${this.planCellHtml(r)}</div></div>`;
   },
@@ -1198,11 +1195,13 @@ Views.repricer = {
         ${mode === 'sync' ? `Все размеры получат цену товара (${U.money(targetPrice)}).` : ''}
         ${mode === 'manual' ? 'Правьте «новую цену» — отправятся только изменившиеся размеры.' : ''}
         Скидка задаётся на товар целиком, а не на отдельный размер.
-        Правки сохраняются кнопкой «Сохранить» внизу таблицы репрайсера.
+        Корректные правки автоматически сохраняются локально. В WB отправляются отдельно.
       </p>`;
 
+    let replacing = false;
     const api = UI.modal({
       title: `Цены по размерам — ${r.title || r.nmID}`,
+      beforeClose: () => replacing || this.commitEdits(null, { quiet: true, noRetry: true }),
       content: body,
       size: 'md',
       buttons: [{ label: 'Закрыть', class: 'btn-primary' }]
@@ -1212,7 +1211,7 @@ Views.repricer = {
       root.querySelectorAll('.rp-size-mode').forEach((sel) => {
         sel.onchange = () => {
           this.stageSizeMode(sel.getAttribute('data-nm'), sel.value);
-          api.close();
+          replacing = true; api.close();
           this.openSizesModal(r); // сразу показать/скрыть поля ручных цен
         };
       });
@@ -1608,7 +1607,7 @@ Views.repricer = {
       this.drawEditBar();
 
       App.toast('Сохранено товаров: ' + edits.length + ' — пересчитываем цены…', 'ok', 4000);
-      const res = await API.invoke('repricer:calc', { full: true });
+      const res = await this.calculate({ full: true });
       this.results = res.results || [];
       this.summary = res.summary;
       await this.loadState();
@@ -1637,7 +1636,7 @@ Views.repricer = {
       await API.invoke('repricer:item-configs:save', { items: { [nm]: empty ? null : cur } });
       this.rstate.itemConfigs = configs;
       App.toast('Параметры товара сохранены — пересчитываем…', 'ok', 3500);
-      const res = await API.invoke('repricer:calc', { full: true });
+      const res = await this.calculate({ full: true });
       this.results = res.results || [];
       this.summary = res.summary;
       this.drawSummary();
@@ -1690,7 +1689,7 @@ Views.repricer = {
               await API.invoke('repricer:competitors:save', { items: { [String(nm)]: list } });
               this.rstate.competitors = items;
               App.toast('Конкурент добавлен — пересчитываем цены', 'ok', 5000);
-              const res = await API.invoke('repricer:calc', { full: true });
+              const res = await this.calculate({ full: true });
               this.results = res.results || [];
               this.summary = res.summary;
               this.drawSummary();
@@ -1825,7 +1824,7 @@ Views.repricer = {
         { colId: 'stock', title: 'Остаток / оборач.', render: (r) => this.stockCellHtml(r) },
         { colId: 'plan', title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
         // ══ блок «Текущая цена» ══
-        { colId: 'priceNow', title: 'Цена на МП', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">скидка ${U.pct(r.current.discount, 0)} · база ${U.money(r.current.basePrice)}</div>${this.sizePriceNote(r)}` },
+        { colId: 'priceNow', title: 'Цена на МП', render: (r) => this.currentPriceBlock(r) },
         { colId: 'myPrice', title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
         { colId: 'buyerNow', title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
             ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП${this.walletNote(r, 'now')}</div>`
@@ -1835,19 +1834,7 @@ Views.repricer = {
             return `${UI.badge(v.label, v.kind)}<div class="tiny muted" title="${U.esc(v.hint)}">${U.esc(v.hint)}</div>`;
           } },
         // ══ блок «Новая цена» ══
-        { colId: 'priceNext', title: 'Новая цена', num: true, render: (r) => {
-            /**
-             * Если по товару сохранена своя цена, в WB уйдёт именно она, а не расчёт
-             * репрайсера. Показываем это прямо в ячейке, иначе цифра в «Новой цене»
-             * и фактически отправленная цена расходятся, и непонятно, какая из них главная.
-             */
-            const d = (S.state.priceDrafts || {})[String(r.nmID)];
-            if (!d) return `<b>${U.money(r.proposed.sellerPrice)}</b><div class="tiny muted">скидка ${U.pct(r.proposed.discount, 0)} · база ${U.money(r.proposed.basePrice)}</div>`;
-            const mine = U.num(d.sellerPrice) || Math.round(U.num(d.basePrice) * (1 - U.num(d.discount) / 100) * 100) / 100;
-            return `<b class="warnc">${U.money(mine)}</b> ${UI.badge('моя цена', 'info')}
-              <div class="tiny muted">скидка ${U.pct(U.num(d.discount), 0)} · база ${U.money(d.basePrice)}</div>
-              <div class="tiny muted">репрайсер предлагал ${U.money(r.proposed.sellerPrice)} — не отправится</div>`;
-          } },
+        { colId: 'priceNext', title: 'Новая цена', render: (r) => this.nextPriceBlock(r) },
         { colId: 'buyerNext', title: 'Цена покупателю станет', num: true, render: (r) => r.proposed.buyerPrice
             ? `<b>${U.money(r.proposed.buyerPrice)}</b><div class="tiny muted">с учётом СПП${this.walletNote(r, 'next')}</div>`
             : '<span class="muted tiny">—</span>' },
@@ -1897,7 +1884,9 @@ Views.repricer = {
         { colId: 'profitMonth', title: 'Δ прибыли/мес', num: true, render: (r) => `<span class="${U.profitClass(r.delta.profitMonth)}">${U.signed(Math.round(r.delta.profitMonth))} ₽</span>` },
         // ══ блок «Конкуренты» ══
         { colId: 'competitor', title: 'Конкурент', num: true, render: (r) => this.competitorCellHtml(r) },
-        { colId: 'offset', title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) }
+        { colId: 'offset', title: 'Отстройка от конкурента', render: (r) => this.offsetCellHtml(r) },
+        { colId: 'other', title: 'Прочие расходы', render: (r) => this.otherCostsBlock(r) },
+        { colId: 'abc', title: 'ABC анализ', render: (r) => this.abcBlock(r) }
       ]),
       // верхний ряд шапки — блоки колонок (задание D)
       groupTitles: this.GROUP_TITLES,
@@ -1948,8 +1937,7 @@ Views.repricer = {
         (this.density === 'compact' ? ' · плотный режим' : '');
     }
 
-    const productGroup = tbl.querySelector('thead tr.rp-head-groups th[data-group="article"]');
-    if (productGroup && productGroup.colSpan === 1) productGroup.dataset.pinnedProduct = 'true';
+    // Закрепление и групповые заголовки управляются только GridLayout.
     host.querySelectorAll('[data-item-card]').forEach((button) => { button.onclick = (event) => { event.stopPropagation(); Views.itemcard.open(Number(button.dataset.itemCard)); }; });
 
     host.querySelectorAll('[data-why]').forEach((b) => {
@@ -2011,7 +1999,9 @@ Views.repricer = {
           const sku = host.querySelector('.rp-off-sku[data-nm="' + nm + '"]');
           patch.competitorId = (inp.classList.contains('rp-use-sku') ? inp.checked : inp.value === 'sku') && sku ? (sku.value || (sku.options[1] && sku.options[1].value)) : null;
         }
+        const previous = patch.strategy ? this.pendingEdits.get(String(nm)) : null;
         this.stageEdit(nm, 'config', patch);
+        if (patch.strategy) this.openStrategyEditor(nm, patch.strategy, { previousPending: previous || null });
         if (Object.prototype.hasOwnProperty.call(patch, 'competitorId')) {
           const tr = inp.closest('tr');
           const cb = tr.querySelector('.rp-use-sku');
@@ -2032,7 +2022,7 @@ Views.repricer = {
       inp.onclick = (e) => e.stopPropagation();
       inp.onchange = () => {
         const patch = {};
-        if (inp.classList.contains('rp-cost')) patch.costPriceRub = Math.max(0, U.num(inp.value));
+        if (inp.classList.contains('rp-cost')) patch.costPriceRub = inp.value === '' ? null : Math.max(0, U.num(inp.value));
         else patch.currency = String(inp.value || 'RUB').toUpperCase();
         this.stageEdit(inp.dataset.nm, 'cost', patch);
         // подпись «= N ₽ по курсу» обновляем сразу, не дожидаясь сохранения и пересчёта:
@@ -2156,7 +2146,7 @@ Views.repricer = {
         this.selection.clear();
         App.toast('Личные настройки сброшены у ' + Object.keys(items).length +
           ' товаров — работают общие правила', 'ok', 6000);
-        const res = await API.invoke('repricer:calc', { full: true });
+        const res = await this.calculate({ full: true });
         this.results = res.results || [];
         this.summary = res.summary;
         this.drawSummary();
@@ -2234,7 +2224,7 @@ Views.repricer = {
     const rs = this.rstate;
     const proposal = await API.invoke('repricer:proposal');
     const byNm = new Map(this.results.map((r) => [String(r.nmID), r]));
-    const list = (proposal.phase === 'proposed' ? proposal.items || [] : []).filter((p) => {
+    const list = (proposal.phase === 'proposed' ? proposal.items || [] : []).filter((p) => !p.sendState || p.sendState === 'ready').filter((p) => {
       const r = byNm.get(String(p.nmID));
       return r && !this.rowErrors(r).length && (!onlySelected || this.selection.has(r.nmID));
     }).map((p) => {
@@ -3498,26 +3488,26 @@ Views.repricer = {
     body.querySelectorAll('input, select').forEach((i) => { i.oninput = U.debounce(preview, 250); i.onchange = preview; });
     preview();
 
-    UI.modal({
-      title: `Настройки артикула — ${r.title}`,
-      content: body, size: '',
+    let resetting = false;
+    const editor = UI.modal({
+      title: `Настройки артикула — ${r.title}`, content: body, size: '',
+      beforeClose: () => resetting || LocalDrafts.captureScope(body, true),
       buttons: [
         { label: 'Сбросить к общим', class: 'btn-ghost', keepOpen: true, onClick: async () => {
-            const patch = {}; patch[String(nmID)] = null;
-            await API.invoke('repricer:item-configs:save', { items: patch });
-            App.toast('Индивидуальные настройки удалены', 'ok');
-            this.rstate = await API.invoke('repricer:state');
-            this.draw();
-          } },
-        { label: 'Отмена' },
-        { label: 'Сохранить', class: 'btn-primary', onClick: async () => {
-            const patch = {}; patch[String(nmID)] = collect();
-            await API.invoke('repricer:item-configs:save', { items: patch });
-            this.rstate = await API.invoke('repricer:state');
-            App.toast('Настройки артикула сохранены', 'ok');
-            if (this.tab === 'strategies') this.renderStrategies();
-          } }
+          LocalDrafts.discard('item-config-' + nmID);
+          await API.invoke('repricer:item-configs:save', { items: { [String(nmID)]: null } });
+          this.pendingEdits.delete(String(nmID));
+          this.rstate = await API.invoke('repricer:state');
+          resetting = true; await editor.close();
+          this.openItemConfig(nmID); App.toast('Индивидуальные настройки удалены', 'ok');
+        } },
+        { label: 'Сохранить', class: 'btn-primary', onClick: async (modal) => { if (await LocalDrafts.commit({ scope: body, report: true })) await modal.close(); } },
+        { label: 'Закрыть без сохранения', class: 'btn-ghost' }
       ]
+    });
+    LocalDrafts.bind(body, 'item-config-' + nmID, () => [{ channel: 'repricer:item-configs:save', payload: { items: { [String(nmID)]: collect() } } }]);
+    body.querySelector('#ic-strategy').addEventListener('change', async (event) => {
+      if (event.target.value === 'boost' && await editor.close()) { this.rstate = await API.invoke('repricer:state'); this.openStrategyEditor(nmID, 'boost'); }
     });
   },
 
@@ -3782,19 +3772,24 @@ Views.repricer = {
       drawList();
     };
 
+    let competitorsSaved = false;
     UI.modal({
-      title: `Конкуренты — ${r ? r.title : nmID}`,
-      content: body, size: 'md',
-      buttons: [
-        { label: 'Отмена' },
-        { label: 'Сохранить', class: 'btn-primary', onClick: async () => {
-            const patch = {}; patch[String(nmID)] = comps;
-            await API.invoke('repricer:competitors:save', { items: patch });
-            this.rstate = await API.invoke('repricer:state');
-            App.toast('Конкуренты сохранены', 'ok');
-            this.draw();
-          } }
-      ]
+      title: `Конкуренты — ${r ? r.title : nmID}`, content: body, size: 'md',
+      beforeClose: async () => {
+        if (competitorsSaved) return true;
+        // Учитываем последнее введённое значение даже без потери фокуса и только записываем его в память.
+        body.querySelectorAll('#cp-list input').forEach((input) => input.onchange && input.onchange());
+        if (comps.some((c) => !(Number(c.price) > 0) || Number(c.stock) < 0)) { App.toast('Цена конкурента должна быть больше 0, остаток — неотрицательным.', 'warn'); return false; }
+        LocalDrafts.stage('competitors-' + nmID, [{ channel: 'repricer:competitors:save', payload: { items: { [String(nmID)]: comps } } }]);
+        return true;
+      },
+      buttons: [{ label: 'Сохранить и закрыть', class: 'btn-primary', onClick: async (modal) => {
+        body.querySelectorAll('#cp-list input').forEach((input) => input.onchange && input.onchange());
+        if (comps.some((c) => !(Number(c.price) > 0) || Number(c.stock) < 0)) { App.toast('Цена конкурента должна быть больше 0, остаток — неотрицательным.', 'warn'); return false; }
+        LocalDrafts.stage('competitors-' + nmID, [{ channel: 'repricer:competitors:save', payload: { items: { [String(nmID)]: comps } } }]);
+        if (!await LocalDrafts.commit({ id: 'competitors-' + nmID })) return false;
+        competitorsSaved = true; this.rstate = await API.invoke('repricer:state'); await modal.close();
+      } }, { label: 'Закрыть без сохранения', class: 'btn-ghost' }]
     });
   },
 
@@ -3819,7 +3814,7 @@ Views.repricer = {
         </div>
         <p class="hint">Расписание применяется ко всем товарам. Параметры маржинальности, лимитов и коридора — на вкладке «Параметры».</p>
         <label class="checkline" style="margin-top:10px"><input type="checkbox" id="ps-enabled" ${c.enabled ? 'checked' : ''} />
-          <b>Автообновление цен включено</b></label>
+          <b>Планировщик РП</b></label>
         <div class="grid g3" style="gap:10px;margin-top:10px">
           <label class="field">Как часто пересчитывать
             <select id="ps-mode">
@@ -4201,7 +4196,7 @@ Views.repricer = {
       let data;
       try {
         data = await API.invoke('repricer:journal', {
-          kinds: mode === 'prices' ? ['price', 'propose'] : ['promo-join', 'promo-exit', 'promo-restore'],
+          kinds: mode === 'prices' ? ['price', 'propose', 'submitted'] : ['promo-join', 'promo-exit', 'promo-restore'],
           q: f.q, dateFrom: f.from, dateTo: f.to, limit: 150000
         });
       } catch (e) {
@@ -4226,7 +4221,8 @@ Views.repricer = {
       const badge = (e) => {
         if (e.ok === false) return UI.badge('ошибка', 'danger');
         if (e.kind === 'propose') return UI.badge('предложено', 'info');
-        if (e.kind === 'price') return UI.badge('отправлено', 'ok');
+        if (e.kind === 'price') return UI.badge('применение подтверждено', 'ok');
+        if (e.kind === 'submitted') return UI.badge('передано, не подтверждено', 'warn');
         if (e.kind === 'promo-join') return UI.badge('вход в акцию', 'ok');
         if (e.kind === 'promo-restore') return UI.badge('цена возвращена', 'info');
         // promo-exit: событие из журнала или незакрытая позиция из очереди возврата

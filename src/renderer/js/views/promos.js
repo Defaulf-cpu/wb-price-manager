@@ -17,6 +17,8 @@ Views.promos = {
     try {
       if (!S.state.promos.length) await S.loadPromos();
       if (ticket !== this.mountTicket || epoch !== API.generation() || this.container !== container) return;
+      this.boardState().status = 'all'; this.boardState().sort = 'current';
+      this.boardState().selectedId = ''; this._centerToday = true;
       this.renderList();
     } catch (error) {
       if (ticket !== this.mountTicket || epoch !== API.generation()) return;
@@ -59,6 +61,7 @@ Views.promos = {
 
   sourceHtml(p) {
     const rec = this.boardIndex && this.boardIndex.get(String(p.id));
+    if (rec && rec.localUnconfirmed) return UI.badge('локальный файл: нет в календаре WB', 'warn');
     if (!rec) return `<span class="muted tiny">${this.boardError ? 'Состав не проверен' : 'Проверяем состав…'}</span>`;
     if (rec.ownership && rec.ownership.status === 'blocked') return UI.badge('Файл: проверка недоступна', 'warn');
     if (rec.source === 'file') return UI.badge('состав из файла: ' + U.fmt(rec.compositionCount), 'ok');
@@ -69,10 +72,17 @@ Views.promos = {
 
   filteredPromos() {
     const state = this.boardState(), q = state.q.trim().toLowerCase();
-    const list = (S.state.promos || []).filter((p) => (!q || [p.id, p.name].join(' ').toLowerCase().includes(q)) &&
+    const calendarIds = new Set((S.state.promos || []).map((p) => String(p.id)));
+    const local = (this.localPromos || []).filter((rec) => !calendarIds.has(String(rec.promoId))).map((rec) => ({ id: rec.promoId, name: rec.promoName, type: 'local', startDateTime: rec.startDateTime, endDateTime: rec.endDateTime, localUnconfirmed: true }));
+    const list = (S.state.promos || []).concat(local).filter((p) => (!q || [p.id, p.name].join(' ').toLowerCase().includes(q)) &&
       (state.status === 'all' || this.periodStatus(p).id === state.status));
     const value = (p) => state.sort === 'name' ? String(p.name || '') : state.sort === 'end' ? Date.parse(p.endDateTime) || Infinity : Date.parse(p.startDateTime) || Infinity;
     return list.slice().sort((a, b) => {
+      if (state.sort === 'current') {
+        const rank = { running: 0, upcoming: 1, ended: 2, unknown: 3 };
+        const diff = rank[this.periodStatus(a).id] - rank[this.periodStatus(b).id];
+        if (diff) return diff;
+      }
       const av = value(a), bv = value(b);
       return (typeof av === 'string' ? av.localeCompare(bv, 'ru') : av === bv ? 0 : av > bv ? 1 : -1) * (state.dir === 'desc' ? -1 : 1) || Number(a.id) - Number(b.id);
     });
@@ -124,6 +134,7 @@ Views.promos = {
         if (epoch !== API.generation() || ticket !== this.boardTicket || this.container !== container || !container.isConnected) return;
         if (!result || !result.ok) throw new Error(result && result.error || 'Не удалось проверить состав акций');
         this.boardIndex = new Map((result.promos || []).map((rec) => [String(rec.promoId), rec]));
+        this.localPromos = (result.promos || []).filter((rec) => rec.localUnconfirmed);
         this.boardError = (result.hardErrors || []).join('; ');
       } catch (error) {
         if (epoch !== API.generation() || ticket !== this.boardTicket || this.container !== container) return;
@@ -156,7 +167,7 @@ Views.promos = {
       button.onclick = () => this.selectPromo(button.dataset.promoSelect);
       button.ondblclick = () => { const p = list.find((row) => String(row.id) === button.dataset.promoSelect); if (p) this.openPromo(p); };
     });
-    container.querySelector('#promo-board-count').textContent = 'Показано ' + list.length + ' из ' + (S.state.promos || []).length;
+    container.querySelector('#promo-board-count').textContent = 'Показано ' + list.length + ' из ' + ((S.state.promos || []).length + (this.localPromos || []).length);
     container.querySelector('#promo-list-count').textContent = '(' + list.length + ')';
     container.querySelector('#promo-board-error').innerHTML = this.boardError ? '<div class="alert warn">Состав не обновлён: ' + U.esc(this.boardError) + '. Сохранённые файлы не изменены.</div>' : '';
     container.querySelectorAll('[data-promo-mode]').forEach((button) => {
@@ -171,7 +182,11 @@ Views.promos = {
     if (state.mode === 'table') this.drawPromotionsTable(main, list);
     else this.drawGantt(main, list);
     const scroller = main.querySelector('.promo-calendar-scroll, .tablewrap');
-    if (scroller) { scroller.scrollLeft = scrollLeft; scroller.scrollTop = scrollTop; }
+    if (scroller) {
+      scroller.scrollLeft = this._centerToday && state.mode === 'gantt' ? Math.max(0, (this._todayX || 0) - 60) : scrollLeft;
+      scroller.scrollTop = scrollTop;
+      if (state.mode === 'gantt') this._centerToday = false;
+    }
     main.querySelectorAll('[data-open]').forEach((button) => { button.onclick = (event) => {
       event.stopPropagation(); const p = list.find((row) => String(row.id) === button.dataset.open);
       if (p) { state.selectedId = String(p.id); this.rememberBoard(); this.openPromo(p); }
@@ -192,11 +207,12 @@ Views.promos = {
         <span>С плановой ценой <b>${count(known ? rec.withPlanPrice : null)}</b></span>
         <span title="Наблюдение всех цен размеров в период акции; не подтверждение состава от WB">Цена ≤ порога <b>${count(known && rec.source === 'file' ? rec.priceControl.matching : null)}</b></span>
       </div>
+      ${rec && rec.localUnconfirmed ? '<div class="alert warn"><b>Локальная акция вне календаря WB.</b> Импорт сохранён отдельным блоком: участие товаров и цены WB не подтверждены, репрайсер не управляет ценой по этой акции.</div>' : ''}
       ${rec && rec.manualFile ? `<div class="hint">Файл: ${U.esc(rec.manualFile)} · ${U.date(rec.manualAt, true)}${rec.ownership && rec.ownership.catalogAt ? ' · каталог проверен ' + U.date(rec.ownership.catalogAt, true) : ''}</div>` : ''}
       ${rec && rec.ownership && rec.ownership.status === 'blocked' ? '<div class="alert warn">' + U.esc(rec.ownership.error) + '</div>' : ''}
       ${rec && rec.ownership && rec.ownership.excludedCount ? '<div class="alert warn">Из сохранённого ранее файла исключено чужих nmID: ' + rec.ownership.excludedCount + '. Они не используются репрайсером. Загрузите актуальный файл этого кабинета.</div>' : ''}
       ${rec && rec.source === 'inferred' ? '<p class="hint">Это оценка по скидке, не подтверждённый состав WB. Для точных условий загрузите файл акции.</p>' : ''}
-      <div class="row wrap promo-selected-actions"><button class="btn btn-sm btn-primary" data-open="${p.id}">Открыть товары</button><button class="btn btn-sm" data-upload="${p.id}">Загрузить товары из файла</button><button class="btn btn-sm btn-ghost" data-link="${p.id}">Перейти к акции ↗</button></div>
+      <div class="row wrap promo-selected-actions"><button class="btn btn-sm btn-primary" data-open="${p.id}">Открыть товары</button><button class="btn btn-sm" data-upload="${p.id}">Загрузить товары из файла</button><button class="btn btn-sm btn-promo-link" data-link="${p.id}">Перейти к акции ↗</button></div>
     </div>`;
     host.querySelector('[data-open]').onclick = () => this.openPromo(p);
     host.querySelector('[data-upload]').onclick = () => this.importNoms(p, () => this.renderList());
@@ -237,14 +253,14 @@ Views.promos = {
     const dayNumber = (value) => { const ms = Date.parse(value); return Number.isFinite(ms) ? Math.floor((ms + 10800000) / day) : null; };
     const dated = list.filter((p) => this.periodStatus(p).id !== 'unknown');
     const today = Math.floor((Date.now() + 10800000) / day);
-    const start = dated.length ? Math.min(...dated.map((p) => dayNumber(p.startDateTime))) - 2 : today - 2;
-    const end = dated.length ? Math.max(...dated.map((p) => dayNumber(p.endDateTime))) + 2 : today + 28;
+    const start = Math.min(today - 2, ...dated.map((p) => dayNumber(p.startDateTime) - 2));
+    const end = Math.max(today + 28, ...dated.map((p) => dayNumber(p.endDateTime) + 2));
     const days = Math.max(1, end - start + 1), px = Math.min(state.zoom === 'week' ? 7 : 24, 12000 / days), width = Math.ceil(days * px);
     const step = Math.max(state.zoom === 'week' ? 7 : 1, Math.ceil(55 / px));
     const label = (d) => new Date(d * day).toISOString().slice(5, 10).split('-').reverse().join('.');
     const ticks = [];
     for (let i = 0; i < days; i += step) ticks.push(`<span class="promo-axis-tick" style="left:${i * px}px;width:${Math.min(step, days - i) * px}px">${label(start + i)}</span>`);
-    const todayX = (today - start) * px;
+    const todayX = (today - start) * px; this._todayX = todayX;
     const marker = today >= start && today <= end ? `<span class="promo-today-line" style="left:${todayX}px" title="Сегодня, ${label(today)} МСК"></span>` : '';
     host.innerHTML = `<div class="promo-gantt-toolbar spread"><span class="hint">${label(start)} — ${label(end)} · даты МСК</span><div class="row"><label class="tiny">Масштаб <select id="promo-gantt-zoom"><option value="day">Дни</option><option value="week">Недели</option></select></label><button class="btn btn-xs" id="promo-gantt-today">Сегодня</button></div></div>
       <div class="promo-calendar-scroll" tabindex="0" aria-label="Гант акций — горизонтальная прокрутка дат"><div class="promo-gantt" style="width:${width + 260}px;--promo-timeline-width:${width}px;--promo-day-width:${px * step}px">

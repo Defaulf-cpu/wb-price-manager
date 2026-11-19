@@ -14,20 +14,20 @@ module.exports = async function ({ check, w, doc, until, modal, closeModals, req
   check('Рабочее место: отправка, метка, фото и коды внутри закреплённого товара', !!item.querySelector('.rp-photo') && /SKU \/ nmID/.test(item.textContent) && !!item.querySelector('.rp-allowsend') && !!item.querySelector('.rp-tag'));
   check('Рабочее место: остаток и план внутри инфо, не в отдельных широких колонках', !!info.querySelector('[data-field-id="stock"]') && !!info.querySelector('.rp-plan') && !row.querySelector('td[data-col-id="stock"], td[data-col-id="plan"], td[data-col-id="tag"], td[data-col-id="allowSend"]'));
   check('Рабочее место: в строке нет дублирующихся редакторов объединённых полей', row.querySelectorAll('.rp-allowsend').length === 1 && row.querySelectorAll('.rp-tag').length === 1 && row.querySelectorAll('.rp-plan').length === 1);
-  check('Рабочее место: товар закреплён после 42px ячейки выбора', w.getComputedStyle(item).position === 'sticky' && w.getComputedStyle(item).left === '42px' && !!doc.querySelector('thead [data-pinned-product="true"]'));
+  check('Рабочее место: товар закреплён после 42px ячейки выбора', w.getComputedStyle(item).position === 'sticky' && w.getComputedStyle(item).left === '42px' && !!doc.querySelector('thead th.grid-pinned[data-col-id="item"]'));
   const send = item.querySelector('.rp-allowsend'); send.checked = false; fire(send);
   check('Рабочее место: переключатель сразу показывает Не отправлять и копит правку', /Не отправлять/.test(send.closest('label').textContent) && rp.pendingEdits.get(send.dataset.nm).config.allowSend === false);
   send.checked = true; fire(send);
   const tag = item.querySelector('.rp-tag'); tag.value = 'единый блок'; fire(tag);
   const plan = info.querySelector('.rp-plan'); plan.value = '120'; fire(plan);
   check('Рабочее место: метка и план сохранили nmID и пакетное редактирование', rp.pendingEdits.get(tag.dataset.nm).config.tag === 'единый блок' && rp.pendingEdits.get(plan.dataset.nm).config.planQtyMonth === 120);
-  rp.pendingEdits.clear(); w.S.state.priceEdits.clear();
+  rp.discardEdits(); w.S.state.priceEdits.clear();
 
   const layout = w.GridLayout.load('repricer-products');
   w.GridLayout.save('repricer-products', { ...layout, columnOrder: ['tag', 'stock', 'item', 'strategy', 'allowSend', 'info', 'plan'], widths: { ...layout.widths, item: 410, tag: 130, stock: 180 } });
   rp.renderResults();
   check('Рабочее место: старый порядок/ширины не ломают объединение, ширина товара сохранена', doc.querySelector('#rp-grid col[data-col-id="item"]').style.width === '410px' && doc.querySelector('#rp-grid thead tr:last-child th').dataset.colId === 'item' && !doc.querySelector('#rp-grid td[data-col-id="tag"]'));
-  check('Рабочее место: явный colId сохраняет соответствие заголовка и редактора после переноса', !!doc.querySelector('#rp-grid td[data-col-id="strategy"] .rp-strategy') && !!doc.querySelector('#rp-grid td[data-col-id="cost"] .rp-cost'));
+  check('Рабочее место: явный colId сохраняет соответствие заголовка и редактора после переноса', !!doc.querySelector('#rp-grid td[data-col-id="priceNext"] .rp-strategy') && !!doc.querySelector('#rp-grid td[data-col-id="info"] .rp-cost'));
   w.GridLayout.save('repricer-products', layout);
   const profileKey = rp.colsStorageKey(), oldProfileCols = w.localStorage.getItem(profileKey), oldGlobalCols = w.localStorage.getItem(rp.COLS_KEY);
   w.localStorage.removeItem(profileKey); w.localStorage.setItem(rp.COLS_KEY, JSON.stringify(['allowSend', 'tag', 'stock', 'plan', 'priceNow']));
@@ -39,12 +39,12 @@ module.exports = async function ({ check, w, doc, until, modal, closeModals, req
   modal().querySelector('#cp-full').click(); modal().querySelector('#cp-compact').click();
   check('Рабочее место: Компактный набор не перезаписывается старыми чекбоксами блоков', ids(modal()) === [...new Set(rp.COMPACT_COLUMNS.concat(allAlways()))].sort().join());
   modal().querySelector('.btn-primary').click();
-  check('Рабочее место: компактный набор действительно уменьшает колонки, настройки товара остаются', doc.querySelectorAll('#rp-grid thead tr:last-child th').length === rp.visibleCols().size && !doc.querySelector('#rp-grid td[data-col-id="info"]') && !!doc.querySelector('#rp-grid td[data-col-id="item"] .rp-tag'));
+  check('Рабочее место: компактный набор действительно уменьшает колонки, настройки товара остаются', doc.querySelectorAll('#rp-grid thead tr:last-child th').length === rp.visibleCols().size && !doc.querySelector('#rp-grid td[data-col-id="promos"]') && !!doc.querySelector('#rp-grid td[data-col-id="item"] .rp-tag'));
   await until(() => !w.API.pending()); await w.App.switchProfile(bid, true);
-  check('Рабочее место: видимость колонок теперь изолирована по кабинету', w.Views.repricer.visibleCols().has('info') && !w.localStorage.getItem(w.Views.repricer.colsStorageKey()));
+  check('Рабочее место: видимость колонок теперь изолирована по кабинету', w.Views.repricer.visibleCols().has('info') && !w.GridLayout.load('repricer-products').widths.item);
   await until(() => !w.API.pending()); await w.App.switchProfile('default', true);
   await until(() => !w.API.pending());
-  check('Рабочее место: возврат восстанавливает компактный набор первого кабинета', !w.Views.repricer.visibleCols().has('info'));
+  check('Рабочее место: возврат восстанавливает компактный набор первого кабинета', !w.Views.repricer.visibleCols().has('promos'));
   w.Views.repricer.openColumnsPicker(); modal().querySelector('#cp-default').click(); modal().querySelector('.btn-primary').click();
   check('Рабочее место: По умолчанию возвращает Инфо с единственным планом продаж', !!doc.querySelector('#rp-grid td[data-col-id="info"] .rp-plan') && doc.querySelector('#rp-grid tbody tr').querySelectorAll('.rp-plan').length === 1);
 
@@ -135,10 +135,9 @@ module.exports = async function ({ check, w, doc, until, modal, closeModals, req
 
   check('Рабочее место: ни один сценарий импорта/выбора не отправлял цены WB', store.loadTasks().length === beforeSends && !requests.some((r) => ['wb:promo-join', 'wb:apply-prices', 'wb:apply-size-prices', 'repricer:send', 'repricer:promo-exit', 'repricer:promo-apply'].includes(channelOf(r))));
   await until(() => !w.API.pending());
-  w.App.go('repricer'); await until(() => doc.querySelector('#rp-tabs [data-t="promos"]'));
-  doc.querySelector('#rp-tabs [data-t="promos"]').click();
+  await w.App.go('promos', { tab: 'calendar' });
   await until(() => doc.querySelector('#promo-board') && w.Views.promos.boardIndex && !w.API.pending());
-  check('Рабочее место: репрайсер использует тот же список/Таблицу акций, не старые карточки', !!doc.querySelector('#rp-tabs .active[data-t="promos"]') && doc.querySelectorAll('#promo-board').length === 1 && !!doc.querySelector('#promo-list') && !!doc.querySelector('.promo-promotions-table'));
+  check('Рабочее место: репрайсер использует тот же список/Таблицу акций, не старые карточки', !!doc.querySelector('[data-promo-tab="calendar"].active') && doc.querySelectorAll('#promo-board').length === 1 && !!doc.querySelector('#promo-list') && !!doc.querySelector('.promo-promotions-table'));
   w.Views.promos.selectPromo(3148);
   check('Рабочее место: состав после смешанного импорта одинаков в разделе и вкладке РП', doc.querySelector('[data-promo-count]').textContent === '1', doc.querySelector('#promo-selected').textContent + ' / ' + JSON.stringify(w.Views.promos.boardIndex.get('3148')));
 };

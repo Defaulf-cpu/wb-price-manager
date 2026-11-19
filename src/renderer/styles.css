@@ -619,3 +619,71 @@ table.grid-table.rp-sticky-first tbody tr.row-dirty td:nth-child(1), table.grid-
 #rp-grid .rp-plan-field { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
 #rp-grid .rp-plan-field > .rp-plan { flex: 0 0 64px; width: 64px !important; margin-right: 0; }
 #rp-grid .rp-plan-field > span { flex: 1 1 110px; min-width: 0; }
+
+
+/* ── Рабочее место v4: компактные ценовые блоки и явное закрепление ── */
+[data-theme-toggle] { min-width: 44px; width: 44px; min-height: 44px; height: 44px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; overflow: visible; text-overflow: clip; }
+.topbar-actions [data-theme-toggle] { padding: 0; font-size: 22px; line-height: 1; }
+.workspace-tabs { flex: 0 0 auto; margin-bottom: 12px; }
+#rp-grid table.adjustable-grid { font-size: 12px; }
+#rp-grid .adjustable-grid td { padding: 8px; }
+#rp-grid .rp-price-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; text-align: left; }
+#rp-grid .rp-price-block > .spread { flex-wrap: wrap; gap: 4px; }
+.rp-price-matrix { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 8px; text-align: left; }
+.rp-metric { min-width: 0; padding: 4px 0; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.rp-metric > span { color: var(--muted); font-size: 10px; line-height: 1.25; }
+.rp-metric b { font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: normal; }
+#rp-grid .rp-strategy-control { display: flex; align-items: center; gap: 5px; min-width: 0; }
+#rp-grid .rp-strategy-control > select { flex: 1 1 0; width: 0 !important; min-width: 0; }
+#rp-grid .rp-strategy-control .rp-strategy-gear { flex: 0 0 30px; min-width: 30px; height: 30px; padding: 2px; font-size: 18px; }
+#rp-grid .rp-spp-source { color: var(--muted); line-height: 1.3; font-size: 10px; }
+#rp-grid .rp-other-costs { display: flex; flex-direction: column; gap: 7px; text-align: left; }
+#rp-grid .rp-other-costs > label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+#rp-grid .rp-other-costs input { width: 100%; }
+#rp-grid .rp-abc { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+#rp-grid .rp-abc > div { display: flex; flex-direction: column; gap: 4px; }
+.abc-letter { display: inline-grid; place-items: center; width: 25px; height: 27px; border-radius: 5px; font-size: 13px; font-weight: 800; margin-right: 3px; border: 1px solid transparent; }
+.abc-A { background: #134a36; color: #7af0b0; border-color: #23734c; }
+.abc-B { background: #4b3916; color: #ffe07b; border-color: #7e5e1c; }
+.abc-C { background: #482531; color: #ffadbb; border-color: #794255; }
+:root[data-theme="light"] .abc-A { background: #dff5e8; color: #14633b; border-color: #b3dfc4; }
+:root[data-theme="light"] .abc-B { background: #fff2c6; color: #715112; border-color: #eddca6; }
+:root[data-theme="light"] .abc-C { background: #ffe4e9; color: #912e48; border-color: #edbfca; }
+#rp-grid table.grid-dynamic-pin .grid-pinned { position: sticky; background: var(--bg-2); z-index: 3; box-shadow: 1px 0 0 var(--grid-line); }
+#rp-grid table.grid-dynamic-pin thead .grid-pinned { background: var(--bg-3); z-index: 8; }
+#rp-grid table.grid-dynamic-pin thead tr.rp-head-groups .grid-pinned { z-index: 9; }
+#rp-grid table.grid-dynamic-pin tfoot .grid-pinned { background: var(--bg-3); z-index: 5; }
+#rp-grid table.grid-dynamic-pin tbody tr:hover .grid-pinned { background: var(--row-hover); }
+#rp-grid table.grid-dynamic-pin tbody tr.selected .grid-pinned { background: var(--row-selected); }
+#rp-grid table.grid-dynamic-pin tbody tr.row-dirty .grid-pinned { background: var(--row-dirty); }
+.grid-pin { position: absolute; right: 8px; top: 3px; border: 0; background: transparent; color: var(--muted); padding: 0 4px; cursor: pointer; font-size: 15px; line-height: 18px; border-radius: 4px; }
+.grid-pin[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.grid-pin:hover, .grid-pin:focus-visible { outline: 1px solid var(--accent); }
+#rp-grid .grid-column-title { padding-right: 27px; }
+.strategy-library { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+.strategy-template { display: flex; flex-direction: column; gap: 10px; }
+.strategy-template h2 { font-size: 16px; margin: 0; }
+.strategy-template > p { flex: 1; margin: 0; color: var(--muted); }
+.strategy-pipeline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px; margin: 8px 0; background: var(--bg-3); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.boost-step-list { max-height: 400px; }
+.boost-step-list input[type="number"] { width: 110px; }
+.health-center { border-left: 3px solid var(--danger); }
+.health-center h2 { margin-top: 0; }
+.health-issues { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+.health-issue { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 7px; padding: 9px 12px; color: var(--text); background: var(--bg-3); text-align: left; cursor: pointer; }
+.health-issue.critical { border-left-color: var(--danger); }
+.health-issue.critical span { color: var(--danger); }
+.health-issue.warning span { color: var(--warn); }
+.health-issue:hover { border-color: var(--accent); }
+.draft-status { color: var(--muted); font-size: 11px; }
+.draft-status.error { color: var(--danger); }
+#rp-grid .adjustable-grid.dense .rp-metric { padding: 2px 0; }
+#rp-grid .adjustable-grid.dense .rp-price-block { gap: 3px; }
+#rp-grid .adjustable-grid.dense .rp-abc { gap: 7px; }
+@media (max-width: 1000px) { .strategy-library { grid-template-columns: minmax(0, 1fr); } [data-theme-toggle] { min-width: 44px; } }
+
+#local-draft-banner { position: fixed; bottom: 10px; left: 250px; right: 20px; z-index: 95; box-shadow: var(--shadow); }
+#local-draft-banner[hidden] { display: none; }
+#local-draft-banner > span { display: block; margin-top: 4px; }
+
+.health-center [data-health-level="warning"] { color: var(--warn); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--bg-2)); }

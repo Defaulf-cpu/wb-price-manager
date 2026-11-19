@@ -50,7 +50,15 @@ window.S = (function () {
   function setEconomics(module) { EC = module; }
 
   async function loadAppState() {
-    state.appState = await API.invoke('app:state');
+    const info = await API.invoke('app:state');
+    const changed = state.dataContext && info.dataContext && state.dataContext !== info.dataContext;
+    if (changed) {
+      API.invalidateProfile();
+      Object.assign(state, { items: [], overrides: {}, stats: [], statsByNm: {}, facts: {}, cards: [], promos: [], costs: {}, priceDrafts: {}, priceEdits: new Map(), selection: new Set() });
+      invalidateProductViews(true);
+    }
+    state.dataContext = info.dataContext || state.dataContext;
+    state.appState = info;
     state.settings = state.appState.settings;
     state.demo = state.appState.demo;
     // когда данные в последний раз выгружались из кабинета WB и какие разделы покрыты ключами
@@ -62,10 +70,22 @@ window.S = (function () {
     return state.appState;
   }
 
+  function invalidateProductViews(clearEdits) {
+    const rp = window.Views && Views.repricer;
+    if (rp) {
+      rp.results = []; rp.summary = null; rp._drawTicket = (rp._drawTicket || 0) + 1;
+      if (clearEdits) { if (rp._autoSaveTimer) clearTimeout(rp._autoSaveTimer); rp.pendingEdits.clear(); rp.selection = new Set(); rp.rstate = null; }
+    }
+    invalidate();
+  }
+
   async function loadGoods(force) {
     state.loading = true;
     try {
       const res = await API.invoke('wb:goods', { force: !!force });
+      if (state.dataContext && res.dataContext && state.dataContext !== res.dataContext) throw new Error('Режим данных изменился — обновите кабинет.');
+      invalidateProductViews(false);
+      state.goodsRevision = (state.goodsRevision || 0) + 1;
       state.items = res.items || [];
       state.overrides = res.overrides || {};
       state.stats = res.stats || [];
@@ -186,7 +206,9 @@ window.S = (function () {
   }
 
   async function saveCosts(items) {
+    const epoch = API.generation();
     await API.invoke('costs:save', { items });
+    if (epoch !== API.generation()) throw new Error('Кабинет изменился во время сохранения.');
     state.costs = (await API.invoke('costs:get')).items || {};
     // себестоимость должна сразу доехать до «Цен и скидок» и до экономики
     await reloadOverrides();

@@ -63,18 +63,37 @@ window.UI = (function () {
     if (foot) {
       (o.buttons || []).forEach((b) => {
         const btn = U.el(`<button class="btn ${b.class || ''}">${esc(b.label)}</button>`);
-        btn.onclick = () => {
-          const r = b.onClick ? b.onClick(api) : true;
-          if (r !== false && !b.keepOpen) close();
+        btn.onclick = async () => {
+          try {
+            btn.disabled = true;
+            const r = b.onClick ? await b.onClick(api) : true;
+            if (r !== false && !b.keepOpen) await close();
+          } catch (error) { toast(error.message || String(error), 'err', 8000); }
+          finally { if (btn.isConnected) btn.disabled = false; }
         };
         if (b.id) btn.dataset.id = b.id;
         foot.appendChild(btn);
       });
     }
 
-    function close() {
-      back.remove();
+    let closed = false, closingPromise = null;
+    function closeNow() {
+      if (closed) return true; closed = true;
+      document.removeEventListener('keydown', onKey); back.remove();
       if (o.onClose) o.onClose();
+      return true;
+    }
+    function close() {
+      if (closed) return true;
+      if (closingPromise) return closingPromise;
+      let result;
+      try { result = o.beforeClose ? o.beforeClose(api) : window.LocalDrafts && LocalDrafts.hasScope(box) ? LocalDrafts.captureScope(box, true) : true; }
+      catch (error) { toast(error.message || String(error), 'err', 8000); return false; }
+      if (result && typeof result.then === 'function') {
+        closingPromise = result.then((ok) => ok === false ? false : closeNow()).catch((error) => { toast(error.message || String(error), 'err', 8000); return false; }).finally(() => { closingPromise = null; });
+        return closingPromise;
+      }
+      return result === false ? false : closeNow();
     }
 
     box.querySelector('.modal-close').onclick = close;
@@ -82,7 +101,7 @@ window.UI = (function () {
     back.appendChild(box);
     root.appendChild(back);
 
-    const onKey = (e) => { if (e.key === 'Escape' && o.dismissable !== false) { close(); document.removeEventListener('keydown', onKey); } };
+    const onKey = (e) => { if (e.key === 'Escape' && o.dismissable !== false && root.lastElementChild === back) { e.preventDefault(); close(); } };
     document.addEventListener('keydown', onKey);
     if (o.onMount) o.onMount(api);
     return api;
@@ -93,7 +112,7 @@ window.UI = (function () {
       title, size: 'sm', content: html,
       buttons: [
         { label: 'Отмена', class: 'btn-ghost' },
-        { label: okLabel || 'Подтвердить', class: 'btn-primary', onClick: () => { onOk(); } }
+        { label: okLabel || 'Подтвердить', class: 'btn-primary', onClick: () => onOk() }
       ]
     });
   }
@@ -118,11 +137,16 @@ window.UI = (function () {
       list.forEach((t) => {
         const b = U.el(`<div class="tab ${t.id === active ? 'active' : ''}">${esc(t.label || t.id)}` +
           (t.badge ? ` <span class="tiny muted">${esc(String(t.badge))}</span>` : '') + `</div>`);
-        b.onclick = () => {
-          if (active === t.id) return;
-          active = t.id;
-          paint();
-          if (o && typeof o.onChange === 'function') o.onChange(t.id);
+        b.onclick = async () => {
+          if (active === t.id || el.inert) return;
+          el.inert = true;
+          try {
+            const allowed = o && o.beforeChange ? await o.beforeChange(t.id) : true;
+            if (allowed === false || !el.isConnected) return;
+            active = t.id; paint();
+            if (o && typeof o.onChange === 'function') await o.onChange(t.id);
+          } catch (error) { toast(error.message || String(error), 'err', 8000); }
+          finally { el.inert = false; }
         };
         el.appendChild(b);
       });

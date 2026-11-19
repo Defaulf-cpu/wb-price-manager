@@ -17,13 +17,23 @@ if errorlevel 1 (
 
 if not exist node_modules (
   echo  Устанавливаю зависимости...
-  call npm install
-  if errorlevel 1 ( echo  [ОШИБКА] npm install не удался & pause & exit /b 1 )
+  call npm ci
+  if errorlevel 1 ( echo  [ОШИБКА] npm ci не удался & pause & exit /b 1 )
 )
 
 for /f "usebackq tokens=*" %%V in (`npm pkg get version`) do set "VERSION=%%~V"
 if not defined VERSION (
   echo  [ОШИБКА] Не удалось прочитать версию из package.json
+  pause
+  exit /b 1
+)
+
+echo.
+echo  Запускаю полный набор проверок перед сборкой...
+call npm test
+if errorlevel 1 (
+  echo.
+  echo  [ОШИБКА] Проверки не пройдены — сборка остановлена.
   pause
   exit /b 1
 )

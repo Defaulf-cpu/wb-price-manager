@@ -143,8 +143,9 @@ async function run() {
   // Общие UI-сценарии не нуждаются в 200 DOM-строках на каждом шаге.
   // Расчёты идут по всем товарам; штатные 100 строк проверяются отдельно ниже.
   const productionRepricerPageSize = window.Views.repricer.PAGE_SIZE;
-  const generalRepricerPageSize = 20; // общий прогон хранит сотни старых DOM-ссылок; штатные 100 проверяются ниже отдельно
+  const generalRepricerPageSize = 10; // общий прогон хранит сотни старых DOM-ссылок; штатные 100 проверяются ниже отдельно
   window.Views.repricer.PAGE_SIZE = generalRepricerPageSize;
+  window.Views.repricer.ST_PAGE_SIZE = 20;
 
   const report = [];
   const check = (name, cond, extra) => {
@@ -163,7 +164,7 @@ async function run() {
   check('акции загружены', window.S.state.promos.length > 0, window.S.state.promos.length + ' шт');
 
   const navCount = doc.querySelectorAll('.nav-item').length;
-  check('навигация построена', navCount === 6, navCount + ' пунктов');
+  check('навигация построена', navCount === 7, navCount + ' пунктов');
   check('модуль репрайсера загружен в интерфейс', !!window.RP && typeof window.RP.computeItem === 'function');
 
   // обход всех разделов
@@ -327,7 +328,8 @@ async function run() {
     check('категория применяет свои базу и тариф за литр', Math.abs(logOf(2) - 90) < 0.01, logOf(2) + ' ₽');
     check('категория применяет свой порог и крупный тариф', Math.abs(logOf(4) - 240) < 0.01, logOf(4) + ' ₽');
     // вернуть «как в общих настройках», чтобы категорийные тарифы не влияли на остальные проверки
-    [tail, tail + 1, tail + 2, tail + 3].forEach((k) => setInp(catIns[k], ''));
+    const liveCatIns = doc.querySelector('#cats-host tbody tr').querySelectorAll('input.num.cellinput');
+    [tail, tail + 1, tail + 2, tail + 3].forEach((k) => setInp(liveCatIns[k], ''));
     doc.getElementById('save-all').click();
     await wait(900);
     const cd2 = catDefOf();
@@ -452,16 +454,15 @@ async function run() {
   window.App.go('repricer');
   await wait(800);
   const rpTabs = doc.querySelectorAll('#rp-tabs .tab').length;
-  check('репрайсер: вкладки построены', rpTabs === 12, rpTabs + ' вкладок');
+  check('репрайсер: вкладки построены', rpTabs === 7, rpTabs + ' вкладок');
   check('репрайсер: есть журнал изменения цен',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал изменения цен/.test(t.textContent)));
-  check('репрайсер: есть журнал участия в акциях',
-    Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал участия в акциях/.test(t.textContent)));
-  check('репрайсер: есть вкладка «Акции»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Акции/.test(t.textContent)));
-  check('репрайсер: есть вкладка «Аналитика акций»', Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Аналитика акций/.test(t.textContent)));
+  check('репрайсер: журнал участия перенесён, но функция сохранена', !doc.querySelector('#rp-tabs [data-t="journal-promos"]') && typeof window.Views.repricer.tabJournal === 'function');
+  check('акции: единый раздел доступен в боковом меню', !!doc.querySelector('#nav [data-id="promos"]'));
+  check('акции: аналитика сохранена без дублирующей вкладки РП', !doc.querySelector('#rp-tabs [data-t="promo-analytics"]') && typeof window.Views.repricer.tabPromoAnalytics === 'function');
   check('репрайсер: состояние загружено', !!window.Views.repricer.rstate && !!window.Views.repricer.rstate.config);
   check('репрайсер: лимит шага по умолчанию 19%', window.Views.repricer.rstate.config.limits.maxChangePerUpdatePct === 19);
-  check('репрайсер: стратегий в движке 9', (window.RP.STRATEGIES || []).length === 9, (window.RP.STRATEGIES || []).length + ' шт');
+  check('репрайсер: десять стратегий, включая лесенку', (window.RP.STRATEGIES || []).length === 10, (window.RP.STRATEGIES || []).length + ' шт');
   check('репрайсер: демо-конкуренты загружены', window.Views.repricer.rstate.competitorCount > 50, window.Views.repricer.rstate.competitorCount + ' товаров');
 
   // пересчёт цен
@@ -544,8 +545,7 @@ async function run() {
   await wait(250);
   check('репрайсер: окно N для аналитики акций настраивается', !!doc.querySelector('#paa-days'));
   check('репрайсер: доступны CSV и XLSX для аналитики акций', !!doc.querySelector('#paa-csv') && !!doc.querySelector('#paa-xlsx'));
-  check('репрайсер: аналитика получила ответ от локального кэша', !!window.Views.repricer.promoAnalyticsData &&
-    window.Views.repricer.promoAnalyticsData.ok === true);
+  check('репрайсер: аналитика получила ответ от локального кэша', window.S.state.view === 'promos' && !!doc.querySelector('[data-promo-tab="analytics"].active') && !/Ошибка|TypeError/.test(doc.querySelector('#promo-section-host').textContent));
 
   // история изменения цен записана
   const hist = await service.handlers['repricer:history']();
@@ -560,9 +560,9 @@ async function run() {
   await window.Views.repricer.draw();
   await wait(900);
   const stRows = doc.querySelectorAll('#st-grid tbody tr').length;
-  check('репрайсер: список товаров со стратегиями', stRows > 50, stRows + ' строк');
+  check('репрайсер: список товаров со стратегиями', stRows === Math.min(window.Views.repricer.ST_PAGE_SIZE, window.Views.repricer.results.length), stRows + ' строк');
   const stSel = doc.querySelector('#st-grid tbody tr select');
-  check('репрайсер: у строки есть выбор стратегии', !!stSel && stSel.options.length === 9, stSel ? stSel.options.length + ' вариантов' : '');
+  check('репрайсер: у строки есть выбор стратегии', !!stSel && stSel.options.length === 10, stSel ? stSel.options.length + ' вариантов' : '');
   if (stSel) {
     stSel.value = 'margin';
     stSel.dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -617,7 +617,7 @@ async function run() {
       im.querySelector('#ic-minPrice').value = '999';
       im.querySelector('#ic-minPrice').dispatchEvent(new window.Event('input', { bubbles: true }));
       await wait(500);
-      const save = Array.from(im.querySelectorAll('.modal-foot .btn')).pop();
+      const save = Array.from(im.querySelectorAll('.modal-foot .btn')).find((b) => b.textContent.trim() === 'Сохранить');
       save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
       await wait(700);
       const cfgs2 = await service.handlers['repricer:item-configs:get']();
@@ -658,7 +658,7 @@ async function run() {
       cpm.querySelector('#cp-price').value = '1234';
       cpm.querySelector('#cp-add').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
       await wait(300);
-      const saveCp = Array.from(cpm.querySelectorAll('.modal-foot .btn')).pop();
+      const saveCp = Array.from(cpm.querySelectorAll('.modal-foot .btn')).find((b) => b.textContent.trim() === 'Сохранить и закрыть');
       saveCp.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
       await wait(800);
       const compsSaved = await service.handlers['repricer:competitors:get']();
@@ -691,9 +691,13 @@ async function run() {
   await wait(900);
   check('репрайсер: автоотправка на вкладке «Расписание»', !!doc.querySelector('#ps-autosend'));
   if (doc.querySelector('#ps-autosend')) {
-    doc.querySelector('#ps-autosend').checked = true;
-    doc.querySelector('#ps-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    await wait(1300);
+    const auto = doc.querySelector('#ps-autosend'); auto.checked = true;
+    auto.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(100);
+    const confirmation = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
+    check('репрайсер: включение автоотправки требует отдельного согласия', !auto.checked && !!confirmation && /Включить автоматическое действие/.test(confirmation.textContent));
+    if (confirmation) await confirmation.querySelector('.modal-foot .btn-primary').onclick();
+    doc.querySelector('#ps-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(700);
     check('репрайсер: автоотправка сохранена', (await service.handlers['repricer:state']()).config.schedule.autoSend === true);
   }
 
@@ -724,8 +728,7 @@ async function run() {
   });
   window.Views.repricer.tab = 'promos';
   window.Views.repricer.promoState = null;
-  window.Views.repricer.container = doc.getElementById('view');
-  await window.Views.repricer.draw();
+  await window.App.go('promos', { tab: 'plan' });
   await wait(400);
   const paCalc = doc.getElementById('pa-calc');
   check('акции: кнопка расчёта на месте', !!paCalc);
@@ -981,7 +984,7 @@ async function run() {
         /"%~dp0\."/.test(txt) && !/"%~dp0"\s*--no-sandbox/.test(txt) && !/electron\.exe" "%~dp0"/.test(txt),
         (txt.match(/start ""[^\r\n]*/) || [''])[0]);
       check('запуск: bat в кодировке CRLF (иначе cmd может споткнуться)', /\r\n/.test(txt));
-      check('запуск: есть --no-sandbox для запуска из-под npm', /--no-sandbox/.test(txt));
+      check('запуск: BAT не отключает песочницу Electron', !/--no-sandbox/.test(txt));
     }
     // скрипт публикации на GitHub: тоже должен быть CRLF и не тащить секреты в репозиторий
     const pub = bat.find((f) => /Опубликовать на GitHub/.test(f));
@@ -1176,7 +1179,7 @@ async function run() {
     check('контракт: allPromo передаётся булевым (по документации WB)', /allPromo:\s*(true|false|allPromo)/.test(cli));
 
     // цены: тело { data: [...] } с nmID/price/discount
-    check('контракт: цены отправляются телом { data: [...] }', /upload\/task', \{ body: \{ data: chunk \} \}/.test(cli));
+    check('контракт: цены отправляются телом { data: [...] }', /upload\/task', \{[\s\S]{0,150}body: \{ data: chunk \}/.test(cli));
 
     // финансовый отчёт: POST sales-reports/detailed с rrdId и period
     check('контракт: финотчёт — POST sales-reports/detailed с rrdId',
@@ -1639,7 +1642,7 @@ async function run() {
     check('витрина: есть ручной ввод цены на полке и цены покупателю',
       !!doc.getElementById('pw-m-shelf') && !!doc.getElementById('pw-m-buyer') && !!doc.getElementById('pw-m-save'));
     check('витрина: показано, какой СПП идёт в расчёты и в каком порядке источников',
-      /Какой СПП идёт в расчёты/.test(wText) && /наблюдение витрины/.test(wText) && /Приоритет/.test(wText));
+      /Какой СПП идёт в расчёты/.test(wText) && /наблюдени[ея].*витрины|наблюдение витрины/.test(wText) && /Приоритет/.test(wText));
     check('витрина: в демо-режиме честно сказано, что запросов к витрине нет',
       /Демо-режим/.test(wText) && doc.getElementById('pw-fetch').disabled === true,
       'кнопка ' + (doc.getElementById('pw-fetch').disabled ? 'выключена' : 'включена'));
@@ -1734,7 +1737,7 @@ async function run() {
   check('репрайсер: цены пересчитаны без нажатия кнопки', (window.Views.repricer.results || []).length > 0,
     'строк ' + (window.Views.repricer.results || []).length);
   check('репрайсер: предложение показано отдельно от установленных цен',
-    /К отправке \d|Репрайсер хочет изменить|Предложение репрайсера пустое/.test(rpText));
+    /Цен в предложении: \d|Репрайсер хочет изменить|Предложение репрайсера пустое/.test(rpText));
   check('репрайсер: объяснено, что пересчёт не меняет цены сразу',
     /установленные цены не меняются|Автоотправка выключена/.test(rpText));
   const prop = await service.handlers['repricer:proposal']();
@@ -1742,8 +1745,7 @@ async function run() {
     'позиций ' + (prop.items || []).length + ', sendAt ' + (prop.sendAt || '—'));
   check('репрайсер: установленные цены не затёрты пересчётом',
     (await service.handlers['tasks:history']()).length === 0 || prop.phase !== 'sent', 'phase=' + prop.phase);
-  const scheduleTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /^Расписание$/.test(t.textContent.trim()));
-  if (scheduleTab) { scheduleTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(1200); }
+  await window.App.go('settings', { tab: 'schedule' }); await wait(1200);
   check('репрайсер: двухфазный цикл настраивается', !!doc.getElementById('ps-twophase') && !!doc.getElementById('ps-senddelay'));
   check('репрайсер: объяснены фазы расчёта и отправки', /Фаза 1|сначала показать предложение/i.test(doc.getElementById('view').textContent));
 
@@ -1876,11 +1878,11 @@ async function run() {
   await wait(2500);
   const rpHtml2 = doc.getElementById('view').innerHTML;
   const rpText2 = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
-  check('INDEEPA: есть колонка «Выгодность»', /Выгодность/.test(rpHtml2));
+  check('INDEEPA: выгодность включена в компактную текущую цену', !!doc.querySelector('#rp-grid [data-col-id="priceNow"] .rp-price-block .badge'));
   check('INDEEPA: статус выгодности показан бейджем',
     /Супер-выгодный|Выгодный|Невыгодный|Без индекса/.test(rpText2));
   check('INDEEPA: есть цена покупателю (СПП) сейчас и станет',
-    /Цена покупателю сейчас/.test(rpHtml2) && /Цена покупателю станет/.test(rpHtml2));
+    /Цена с СПП,/.test(rpHtml2) && /Новая с СПП,/.test(rpHtml2));
   check('INDEEPA: есть колонка «Акции» с решениями', /<th[^>]*>\s*Акции/.test(rpHtml2) || /Акции/.test(rpHtml2));
   check('INDEEPA: есть колонка «План продаж»', /План продаж/.test(rpHtml2));
 
@@ -1894,7 +1896,7 @@ async function run() {
     const draftRow = Array.from(doc.querySelectorAll('#rp-grid tbody tr'))
       .find((tr) => tr.textContent.includes(String(draftNm)));
     check('репрайсер: в «Новой цене» видно, что уйдёт сохранённая цена, а не расчёт',
-      !!draftRow && /моя цена/.test(draftRow.textContent) && /репрайсер предлагал/.test(draftRow.textContent),
+      !!draftRow && /приоритет ручного черновика/.test(draftRow.textContent) && !!draftRow.querySelector('[data-col-id="priceNow"] .rp-draft-summary'),
       draftRow ? draftRow.textContent.replace(/\s+/g, ' ').slice(0, 130) : 'строка не найдена на этой странице');
   }
   check('INDEEPA: незаполненный план подписан как в референсе',
@@ -1992,13 +1994,13 @@ async function run() {
     return rpv.layoutColumns().filter((c) => c.always || vis.has(c.id)).length;
   };
   check('INDEEPA: справочник колонок совпадает с таблицей',
-    rpv.layoutColumns().length === 28 && colTh() === visCount(),
+    rpv.layoutColumns().length >= rpv.DEFAULT_COLUMNS.length && colTh() === visCount(),
     'в справочнике ' + (rpv.COLUMNS || []).length + ', в таблице ' + colTh() + ', видимых ' + visCount());
-  check('INDEEPA: по умолчанию показан полный набор (кроме дубля «Коридор»)',
-    rpv.visibleCols().size >= 18 && !rpv.visibleCols().has('corridor'),
+  check('INDEEPA: основной набор компактный, без дублирующих цен',
+    rpv.visibleCols().size === 12 && !rpv.visibleCols().has('corridor') && !rpv.visibleCols().has('strategy'),
     'видимо ' + rpv.visibleCols().size + ' колонок');
   check('INDEEPA: обязательные колонки нельзя выключить',
-    (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.id).join(',') === 'item,priceNow,myPrice,priceNext,delta,why',
+    (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.id).join(',') === 'item,priceNow,priceNext',
     (rpv.COLUMNS || []).filter((c) => c.always).map((c) => c.title || c.id).join(', '));
   const headersBefore = colTh();
   rpv.saveVisibleCols(rpv.COMPACT_COLUMNS);
@@ -2045,8 +2047,8 @@ async function run() {
       groupNames.includes('Текущая цена') && groupNames.includes('Новая цена'), groupNames);
   check('D: блоки «Мин цена (в акции)» и «Цена (вне акции)»',
     groupNames.includes('Мин цена (в акции)') && groupNames.includes('Цена (вне акции)'), groupNames);
-  check('D: блоки «Себестоимость и экономика» и «Конкуренты»',
-    groupNames.includes('Себестоимость') && groupNames.includes('Конкуренты'), groupNames);
+  check('D: себестоимость в инфо, прочие расходы и конкуренты сохранены',
+    !!doc.querySelector('#rp-grid [data-col-id="info"] .rp-cost') && groupNames.includes('Прочие расходы') && groupNames.includes('Конкуренты'), groupNames);
   check('D: colspan блока равен числу его видимых колонок',
     groupThs.length > 0 && groupThs.every((th) => Number(th.colSpan) === rpD.colsOfGroup(th.getAttribute('data-group'))
       .filter((c) => c.always || rpD.visibleCols().has(c.id)).length),
@@ -2054,7 +2056,7 @@ async function run() {
   check('D: чекбокс «выбрать все» занимает оба ряда шапки',
     (() => { const th = doc.querySelector('#rp-grid thead th.rp-check'); return !!th && th.rowSpan === 2; })());
   check('D: широкая таблица закреплена слева по первым колонкам',
-    !!doc.querySelector('#rp-grid table.rp-sticky-first'));
+    !!doc.querySelector('#rp-grid table .grid-pinned[data-col-id="item"]'));
 
   const dPage = rpD.pageOf(rpD.filteredResults());
   const dRow = dPage.find((r) => !r.error && r.cost && r.cost.next);
@@ -2134,7 +2136,7 @@ async function run() {
     await wait(1500);
     const savedCost = (window.S.state.costs || {})[dNm] || {};
     check('D: «Сохранить» пишет себестоимость и валюту',
-      savedCost.costPriceRub === 40 && savedCost.currency === 'CNY', JSON.stringify(savedCost));
+      savedCost.costEntered === 40 && Math.abs(savedCost.costPriceRub - 40 * rateCny) < 0.01 && savedCost.currency === 'CNY' && savedCost.costVersion === 2, JSON.stringify(savedCost));
     const savedCfg = (rpD.rstate.itemConfigs || {})[dNm] || {};
     check('D: «Сохранить» пишет флаг отправки и метку',
       savedCfg.allowSend === false && savedCfg.tag === 'распродажа', JSON.stringify(savedCfg));
@@ -2262,7 +2264,7 @@ async function run() {
   check('F: индивидуальный none не превращается в наследование общего sync', fView.sizeMode('7007') === 'none');
   fView.stageSizeMode('7007', '');
   check('F: выбор общих параметров возвращает режим sync', fView.sizeMode('7007') === 'sync');
-  if (fModal) fModal.querySelector('.modal-close').click();
+  if (fModal) await fModal.querySelector('.modal-close').onclick();
 
   window.Views.prices.showResult({ sent: 0, details: [{ nmID: 7007, sizeID: 702, status: 6, errorText: 'Ошибка размера' }] }, 2);
   fModal = doc.querySelector('#modal-root .modal:last-child');
@@ -2310,8 +2312,7 @@ async function run() {
       JSON.stringify({ CNY: setD.costRates.CNY, GEL: setD.costRates.GEL, name: setD.shopName }));
     check('D: состояние приложения подхватывает курсы без перезапуска',
       Number((window.S.state.settings.costRates || {}).CNY) === 13);
-    rpD.tab = 'prices';
-    rpD.draw();
+    await window.App.go('repricer');
     await wait(1400);
     check('D: название магазина видно в шапке репрайсера',
       !!doc.querySelector('.rp-shopname') && doc.querySelector('.rp-shopname').textContent.includes('Магазин Тест'),
@@ -2324,9 +2325,8 @@ async function run() {
     });
     if (window.S.state.settings) window.S.state.settings.shopName = '';
   }
-  rpD.tab = 'prices';
-  rpD.discardEdits();
-  await wait(800);
+  await window.App.go('repricer'); await wait(600);
+  rpD.discardEdits(); await wait(800);
 
   // отпускаем DOM прошлых отрисовок и выгружаем мусор до тяжёлых разделов прогона
   headRowsD = null; groupThs = null; dTr = null; cpD = null; cnyInp = null; exD = null;
@@ -2334,6 +2334,9 @@ async function run() {
 
   // ═════════════ ЗАДАНИЕ Е: одно рабочее место — всё внутри репрайсера ═════════════
   const eClick = async (id, ms) => {
+    const moved = { promos: ['promos', 'plan'], 'promo-analytics': ['promos', 'analytics'], 'journal-promos': ['promos', 'journal'], params: ['settings', 'params'], schedule: ['settings', 'schedule'] }[id];
+    if (moved) { await window.App.go(moved[0], { tab: moved[1] }); await wait(ms || 1400); return true; }
+    if (window.S.state.view !== 'repricer') { await window.App.go('repricer'); await wait(500); }
     const t = doc.querySelector(`#rp-tabs [data-t="${id}"]`);
     if (t) { t.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(ms || 1400); }
     return !!t;
@@ -2343,9 +2346,9 @@ async function run() {
   window.App.go('repricer');
   await wait(900);
   const eTabs = Array.from(doc.querySelectorAll('#rp-tabs .tab')).map((t) => t.textContent.trim());
-  check('Е: в репрайсере двенадцать вложенных вкладок', eTabs.length === 12, eTabs.join(' | '));
+  check('Е: семь вкладок РП, акции и настройки объединены в своих разделах', eTabs.length === 7, eTabs.join(' | '));
   check('Е: порядок и названия вкладок как в задании',
-    eTabs.join('|') === 'Товары|Цены и скидки|Экономика|Массовые правила|Себестоимость|Конкуренты|Акции|Аналитика акций|Журнал изменения цен|Журнал участия в акциях|Расписание|Параметры',
+    eTabs.join('|') === 'Товары|Цены и скидки|Экономика|Массовые правила|Себестоимость|Конкуренты|Журнал изменения цен',
     eTabs.join('|'));
   check('Е: отдельных вкладок «Параметры товаров» и «История запусков» больше нет',
     !eTabs.some((t) => /Параметры товаров|История запусков/i.test(t)));
@@ -2407,11 +2410,15 @@ async function run() {
   if (eCostInput) {
     eCostInput.value = '777';
     eCostInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+    await wait(300);
+    check('Е: ввод себестоимости сначала остаётся только в памяти',
+      !Object.values((await service.handlers['costs:get']()).items || {}).some((c) => Number(c.costEntered) === 777));
+    doc.getElementById('c-save').click();
     await wait(1500);
   }
   const eCosts = await service.handlers['costs:get']();
-  check('Е: себестоимость сохраняется каналом costs:save',
-    Object.values(eCosts.items || {}).some((c) => Number(c.costPriceRub) === 777));
+  check('Е: себестоимость сохраняется каналом costs:save только по кнопке',
+    Object.values(eCosts.items || {}).some((c) => Number(c.costEntered) === 777 && Number(c.costPriceRub) === 777));
   check('Е: массовое заполнение доступно', !!doc.getElementById('cb-apply') && !!doc.getElementById('cb-field'));
   check('Е: импорт CSV/XLSX и шаблон доступны', !!doc.getElementById('c-import') && !!doc.getElementById('c-template'));
   const eImportLabel = ((doc.getElementById('c-import') || {}).textContent || '').trim();
@@ -2736,8 +2743,7 @@ async function run() {
     (jData.events || []).filter((e) => e.kind === 'price' || e.kind === 'propose').length === (jData.events || []).length);
 
   // журнал участия в акциях
-  const jp = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Журнал участия в акциях/.test(t.textContent));
-  if (jp) { jp.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(1600); }
+  await window.App.go('promos', { tab: 'journal' }); await wait(1600);
   const jpText = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
   check('журнал акций: вкладка открывается', /Журнал изменения участия в акциях/.test(jpText));
   const jpData = await service.handlers['repricer:journal']({

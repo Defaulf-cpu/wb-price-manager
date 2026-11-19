@@ -167,6 +167,7 @@ function deepMerge(base, src) {
   const out = Array.isArray(base) ? base.slice() : Object.assign({}, base);
   if (!isObject(src)) return out;
   for (const k of Object.keys(src)) {
+    if (['__proto__', 'constructor', 'prototype'].includes(k)) continue;
     const sv = src[k];
     if (isObject(sv) && isObject(out[k])) out[k] = deepMerge(out[k], sv);
     else out[k] = sv;
@@ -300,9 +301,10 @@ function createStore(dir, secretBox) {
       return readJson(repricerPath, {});
     },
 
-    saveRepricer(patch) {
+    saveRepricer(patch, options) {
       const cur = api.loadRepricer();
       const next = deepMerge(cur, patch || {});
+      for (const key of (options && options.replaceKeys) || []) if (!['__proto__', 'constructor', 'prototype'].includes(key) && Object.prototype.hasOwnProperty.call(patch || {}, key)) next[key] = patch[key];
       writeJson(repricerPath, next);
       return next;
     },
@@ -447,6 +449,9 @@ function createStore(dir, secretBox) {
           basePrice: e.basePrice,
           discount: e.discount,
           sellerPrice: e.sellerPrice,
+          ...(e.sizePrices && typeof e.sizePrices === 'object' ? { sizePrices: Object.fromEntries(Object.entries(e.sizePrices)
+            .filter(([sid, price]) => /^[1-9]\d*$/.test(sid) && Number.isSafeInteger(Number(sid)) && Number.isFinite(Number(price)) && Number(price) > 0)
+            .map(([sid, price]) => [sid, Number(price)])) } : {}),
           source: e.source || 'manual'
         });
         items[k] = list.slice(-120);

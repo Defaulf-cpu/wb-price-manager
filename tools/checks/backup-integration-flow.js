@@ -215,7 +215,7 @@ async function main() {
     dialog: { showSaveDialog: async () => saveResult, showOpenDialog: async () => openResult },
     fs, path, crypto, Buffer, MAX_BACKUP_BYTES, win: null, shell: { showItemInFolder: () => {} }
   };
-  vm.runInNewContext(mainSource.slice(mainSource.indexOf('function registerIpc()'), mainSource.indexOf('\napp.setName')) + '\nregisterIpc();', nativeScope);
+  vm.runInNewContext(mainSource.slice(mainSource.indexOf('function assertTrustedSender'), mainSource.indexOf('function createWindow')) + '\n' + mainSource.slice(mainSource.indexOf('function registerIpc()'), mainSource.indexOf('\napp.setName')) + '\nregisterIpc();', nativeScope);
   check('main регистрирует диалог сохранения', handlers.has('ui:save-backup'));
   check('main регистрирует диалог открытия', handlers.has('ui:open-backup'));
   const canceledSave = await handlers.get('ui:save-backup')(null, { content: exported.content });

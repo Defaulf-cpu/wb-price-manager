@@ -314,7 +314,11 @@ Views.prices = {
     inp.value = value;
     inp.step = field === 'discount' ? '1' : '10';
     inp.onclick = (e) => e.stopPropagation();
-    inp.oninput = U.debounce(() => {
+    inp.min = field === 'discount' ? '0' : '1';
+    if (field === 'discount') inp.max = '95';
+    inp.step = '1';
+    inp.oninput = () => {
+      if (!inp.checkValidity() || inp.value === '') return;
       const cur = this.editing.get(r.nmID) || { basePrice: U.num(r.basePrice), discount: U.num(r.discount) };
       cur[field] = U.num(inp.value, cur[field]);
       this.editing.set(r.nmID, cur);
@@ -329,7 +333,7 @@ Views.prices = {
         const seller = base * (1 - disc / 100);
         if (cells[4]) cells[4].innerHTML = `<b>${U.money(seller)}</b> <span class="tiny muted">(было ${U.money(r.sellerPrice)})</span>`;
       }
-    }, 200);
+    };
     function st_touch() {}
     return inp;
   },
@@ -523,7 +527,10 @@ Views.prices = {
   async apply(plan) {
     const st = S.state;
     if (!plan.length) { App.toast('Нечего отправлять', 'warn'); return; }
+    if (window.LocalDrafts && LocalDrafts.hasWork() || this.editing.size) { App.toast('Есть несохранённые цены: сначала нажмите «Сохранить» или отмените правки. Отправка не сохраняет их автоматически.', 'warn', 8000); return false; }
     const items = plan.map((p) => ({ nmID: p.nmID, price: Math.round(p.newBase), discount: Math.round(p.newDisc) }));
+    const expectedItems = {};
+    items.forEach((row) => { const draft = (st.priceDrafts || {})[String(row.nmID)]; if (draft && Number(draft.basePrice) === row.price && Number(draft.discount) === row.discount) expectedItems[String(row.nmID)] = { ...draft }; });
 
     const btn = UI.modal({
       title: 'Отправка цен',
@@ -536,11 +543,20 @@ Views.prices = {
       const res = await API.invoke('wb:apply-prices', { items });
       btn.close();
       this.showResult(res, items.length);
-      // отправленные цены больше не «черновик»: они уже в WB
-      try { await API.invoke('prices:draft-clear', { nmIDs: items.map((x) => x.nmID) }); } catch (e) { /* не критично */ }
+      // Принятие задачи ≠ применение цены. Неподтверждённые и новые правки не удаляем.
+      const confirmed = new Set((res.confirmedItems || []).map((row) => Number(row.nmID)));
+      const clearIDs = [...confirmed].filter((nm) => expectedItems[String(nm)]);
+      if (clearIDs.length) {
+        try { await API.invoke('prices:draft-clear', { nmIDs: clearIDs, expectedItems }); }
+        catch (error) { App.toast('WB подтвердил цены, но локальный черновик не удалён: ' + error.message, 'warn', 9000); }
+      }
       await this.loadDrafts();
-      this.editing.clear();
-      st.selection.clear();
+      for (const row of items) if (confirmed.has(Number(row.nmID))) {
+        const edit = this.editing.get(Number(row.nmID));
+        if (edit && Number(edit.basePrice) === row.price && Number(edit.discount) === row.discount) this.editing.delete(Number(row.nmID));
+        st.selection.delete(Number(row.nmID));
+      }
+      if (confirmed.size < items.length) App.toast('Применение части цен не подтверждено. Их черновики и выбор сохранены; проверьте результат WB перед повторной отправкой.', 'warn', 10000);
       if (st.filters.flag === 'selected') st.filters.flag = 'all';
       await S.loadGoods(true);
       S.invalidate();

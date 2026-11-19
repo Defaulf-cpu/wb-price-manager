@@ -34,6 +34,7 @@ Views.costs = {
     this.container = container;
     this.q = this.q || '';
     this.onlyMissing = this.onlyMissing === undefined ? true : this.onlyMissing;
+    this.stickyRowIds = new Set();
 
     container.innerHTML = `
       <div class="card" style="margin-bottom:12px">
@@ -56,6 +57,7 @@ Views.costs = {
         </div>
       </div>
       <div id="c-grid"></div>
+      <div class="bulkbar" id="c-savebar"><span class="hint">Ввод только записывается в память и ничего не применяет. Строка после сохранения останется на экране до повторного применения фильтра — можно заполнить остальные поля.</span><div class="grow"></div><button class="btn btn-ghost" id="c-discard">Отменить изменения</button><button class="btn btn-primary" id="c-save">Сохранить</button></div>
       <div class="bulkbar" id="c-bulk"></div>
     `;
 
@@ -67,9 +69,9 @@ Views.costs = {
       catSel.appendChild(o);
     });
 
-    container.querySelector('#c-q').oninput = U.debounce((e) => { this.q = e.target.value; this.refresh(); }, 220);
-    catSel.onchange = (e) => { this.cat = e.target.value; this.refresh(); };
-    container.querySelector('#c-missing').onchange = (e) => { this.onlyMissing = e.target.checked; this.refresh(); };
+    container.querySelector('#c-q').oninput = U.debounce((e) => { this.q = e.target.value; this.stickyRowIds = new Set(); this.refresh(); }, 220);
+    catSel.onchange = (e) => { this.cat = e.target.value; this.stickyRowIds = new Set(); this.refresh(); };
+    container.querySelector('#c-missing').onchange = (e) => { this.onlyMissing = e.target.checked; this.stickyRowIds = new Set(); this.refresh(); };
     container.querySelector('#c-import').onclick = () => this.importCsv();
     container.querySelector('#c-template').onclick = () => this.downloadTemplate();
     container.querySelector('#c-export').onclick = () => this.exportCsv();
@@ -81,11 +83,17 @@ Views.costs = {
     let rows = S.getRows();
     if (this.cat) rows = rows.filter((r) => r.category === this.cat);    const q = (this.q || '').toLowerCase();
     if (q) rows = rows.filter((r) => String(r.nmID).includes(q) || String(r.vendorCode).toLowerCase().includes(q) || String(r.title).toLowerCase().includes(q));
-    if (this.onlyMissing) rows = rows.filter((r) => !r.costPrice || r.cogsSource !== 'user');
+    if (this.onlyMissing) {
+      const sticky = this.stickyRowIds || new Set();
+      rows = rows.filter((r) => !r.costPrice || r.cogsSource !== 'user' || sticky.has(String(r.nmID)));
+      this.stickyRowIds = new Set(rows.map((r) => String(r.nmID)));
+    } else this.stickyRowIds = new Set(rows.map((r) => String(r.nmID)));
     return rows;
   },
 
-  refresh() {
+  async refresh() {
+    const epoch = API.generation();
+    if (epoch !== API.generation()) return;
     const st = S.state;
     // container задаёт вызвавший экран: раздел «Себестоимость» или вкладка репрайсера
     const root = this.container || document.getElementById('view');
@@ -99,24 +107,21 @@ Views.costs = {
       const i = document.createElement('input');
       i.type = 'number';
       i.className = 'num cellinput';
-      i.step = step || 'any';
+      i.step = 'any'; // сохранённые точные значения не обязаны попадать на условный шаг формы
       i.value = value === undefined || value === null || value === '' ? '' : value;
       i.placeholder = '—';
       i.onclick = (e) => e.stopPropagation();
-      i.onchange = async () => {
-        const key = String(r.nmID);
-        const patch = {};
-        patch[key] = Object.assign({}, costs[key] || {}, { [field]: i.value === '' ? null : U.num(i.value) });
-        await S.saveCosts(patch);
-        S.invalidate();
-        App.toast('Сохранено: ' + r.vendorCode, 'ok', 1500);
-        if (this.onlyMissing) this.refresh();
-      };
+      i.dataset.costField = field; i.dataset.nm = String(r.nmID); i.min = '0';
+      if (/Pct$/.test(field)) i.max = '100';
+      i.onchange = null; // общая очередь ниже собирает и сохраняет только затронутые поля
       return i;
     };
 
+    const draftCosts = window.LocalDrafts ? LocalDrafts.draftItems('costs-grid', 'costs:save') : {};
     const val = (r, f) => {
-      const c = costs[String(r.nmID)] || {};
+      const c = costs[String(r.nmID)] || {}, draft = draftCosts[String(r.nmID)] || {};
+      if (Object.prototype.hasOwnProperty.call(draft, f)) return draft[f];
+      if (f === 'costEntered') return c.costEntered !== undefined ? c.costEntered : (c.costPriceRub !== undefined ? c.costPriceRub : '');
       return c[f] !== undefined ? c[f] : '';
     };
 
@@ -124,7 +129,13 @@ Views.costs = {
       columns: [
         { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)} · ${U.esc(r.category)}</span></div>` },
         { title: 'Цена WB', num: true, render: (r) => U.money(r.sellerPrice) },
-        { title: 'Себестоимость ₽', num: true, render: (r) => input(r, 'costPriceRub', val(r, 'costPriceRub')) },
+        { title: 'Себестоимость / валюта', num: true, render: (r) => {
+          const box = document.createElement('div'); box.appendChild(input(r, 'costEntered', val(r, 'costEntered')));
+          const currency = val(r, 'currency') || 'RUB', select = document.createElement('select');
+          select.dataset.costField = 'currency'; select.dataset.nm = String(r.nmID); select.setAttribute('aria-label', 'Валюта себестоимости ' + r.nmID);
+          [...new Set(['RUB', ...Object.keys(st.settings.costRates || {}), currency])].forEach((code) => { const o = document.createElement('option'); o.value = code; o.textContent = code; o.selected = code === currency; select.appendChild(o); });
+          select.onclick = (e) => e.stopPropagation(); box.appendChild(select); box.appendChild(U.el('<div class="tiny muted">В расчёте ' + U.money(r.costPrice) + ' ₽</div>')); return box;
+        } },
         { title: 'Упаковка ₽', num: true, render: (r) => input(r, 'packagingRub', val(r, 'packagingRub')) },
         { title: 'Комиссия %', num: true, render: (r) => input(r, 'commissionPct', val(r, 'commissionPct'), '0.5') },
         { title: 'Логистика ₽', num: true, render: (r) => input(r, 'logisticsRub', val(r, 'logisticsRub')) },
@@ -145,11 +156,13 @@ Views.costs = {
             // Показываем, что именно подставилось, чтобы пустая клетка не выглядела ошибкой.
             const f = (st.facts && st.facts[String(r.nmID)]) || null;
             const srcSpp = (r.costSources || {}).sppPct;
-            const hint = f && f.sppPctWatch !== undefined && f.sppPctWatch !== null
-              ? 'витрина ' + U.pct(U.num(f.sppPctWatch), 1)
-              : (f && Number(f.sppPctAvg) > 0 ? 'продажи ' + U.pct(Number(f.sppPctAvg), 1) : '');
-            return input(r, 'sppPct', val(r, 'sppPct'), '1') +
-              (hint ? '<div class="tiny muted">' + hint + ((srcSpp === 'watch' || srcSpp === 'fact') ? ' · учтён' : '') + '</div>' : '');
+            const has = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+            const hint = f && has(f.sppPctOfficial) ? 'ЛК: ' + U.pct(f.sppPctOfficial) + ' · ' + U.date(f.sppOfficialAt, true) + ' · не live'
+              : f && has(f.sppPctWatch) ? 'наблюдение ' + U.pct(f.sppPctWatch) + ' · ' + U.date(f.sppWatchAt, true)
+              : f && has(f.sppPctAvg) ? 'среднее продаж ' + U.pct(f.sppPctAvg) : 'общая настройка';
+            const cell = document.createElement('div'); cell.appendChild(input(r, 'sppPct', val(r, 'sppPct'), '1'));
+            cell.appendChild(U.el('<div class="tiny muted">' + U.esc(hint) + ' · источник расчёта: ' + U.esc(srcSpp || 'настройки') + '</div>'));
+            return cell;
           } },
         { title: 'Объём, л', num: true, render: (r) => input(r, 'volumeLiters', val(r, 'volumeLiters') || r.volume, '0.1') },
         { title: 'Прибыль/шт', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b>` },
@@ -162,16 +175,27 @@ Views.costs = {
       onRowClick: (r) => this.openItemEditor(r.nmID)
     });
     host.appendChild(grid.el);
+    LocalDrafts.bind(host, 'costs-grid', () => {
+      const items = {};
+      host.querySelectorAll('[data-cost-field]').forEach((input) => {
+        const row = items[input.dataset.nm] || (items[input.dataset.nm] = {});
+        row[input.dataset.costField] = input.dataset.costField === 'currency' ? input.value : input.value === '' ? null : Number(input.value);
+      });
+      return [{ channel: 'costs:save', payload: { items } }];
+    }, '[data-cost-field]');
     host.querySelectorAll('[data-open]').forEach((b) => {
       b.onclick = (e) => { e.stopPropagation(); this.openItemEditor(Number(b.dataset.open)); };
     });
+    const saveBtn = root.querySelector('#c-save'), discardBtn = root.querySelector('#c-discard');
+    if (saveBtn) saveBtn.onclick = async () => { saveBtn.disabled = true; try { if (await LocalDrafts.commit({ scope: host, report: true })) { App.toast('Себестоимость и расходы сохранены локально. В WB ничего не отправлено.', 'ok'); this.refresh(); } } finally { saveBtn.disabled = false; } };
+    if (discardBtn) discardBtn.onclick = () => { LocalDrafts.discard('costs-grid'); this.refresh(); };
 
     // массовое заполнение
     const bulk = this.container.querySelector('#c-bulk');
     bulk.innerHTML = `
       <div class="fld"><span>Заполнить для ${rows.length} товаров</span>
         <select id="cb-field" style="width:220px">
-          <option value="costPriceRub">Себестоимость, ₽</option>
+          <option value="costPriceRub">Себестоимость, ₽ (валюта → RUB)</option>
           <option value="packagingRub">Упаковка, ₽</option>
           <option value="commissionPct">Комиссия, %</option>
           <option value="logisticsRub">Логистика, ₽</option>
@@ -202,8 +226,8 @@ Views.costs = {
         const cur = st.costs[key] || {};
         let value = v;
         if (mode === 'ratio') value = Math.round(r.sellerPrice * (v / 100) * 100) / 100;
-        if (mode === 'add') value = U.num(cur[field], field === 'costPriceRub' ? r.costPrice : 0) + v;
-        patch[key] = Object.assign({}, cur, { [field]: Math.round(value * 100) / 100 });
+        if (mode === 'add') value = (field === 'costPriceRub' ? U.num(r.costPrice) : U.num(cur[field])) + v;
+        patch[key] = { [field]: Math.round(value * 100) / 100, ...(field === 'costPriceRub' ? { currency: 'RUB' } : {}) };
       });
       await S.saveCosts(patch);
       S.invalidate();
@@ -225,16 +249,21 @@ Views.costs = {
     const st = S.state;
     const r = S.getRows().find((x) => x.nmID === nmID);
     if (!r) return;
-    const c = st.costs[String(nmID)] || {};
+    const savedCost = st.costs[String(nmID)] || {};
+    const draftCost = window.LocalDrafts ? (LocalDrafts.draftItems('costs-grid', 'costs:save')[String(nmID)] || {}) : {};
+    const c = { ...savedCost, ...draftCost };
+    if (c.costEntered === undefined && draftCost.costPriceRub !== undefined) c.costEntered = draftCost.costPriceRub;
+    const shownCost = c.costEntered !== undefined && c.costEntered !== null && c.costEntered !== '' ? c.costEntered : c.costPriceRub;
     const body = U.el('div');
     const fld = (key, label, hint, step) => `
       <label class="field">${label}
-        <input type="number" step="${step || 'any'}" class="num" id="ce-${key}" value="${c[key] === undefined || c[key] === null ? '' : c[key]}" placeholder="${hint || ''}" />
+        <input type="number" step="${step || 'any'}" class="num" id="ce-${key}" value="${(key === 'costPriceRub' ? shownCost : c[key]) === undefined || (key === 'costPriceRub' ? shownCost : c[key]) === null ? '' : (key === 'costPriceRub' ? shownCost : c[key])}" placeholder="${hint || ''}" />
       </label>`;
     body.innerHTML = `
       <div class="row wrap" style="margin-bottom:12px">${UI.badge('нм-код ' + nmID)} ${UI.badge(r.vendorCode)} ${UI.badge(r.category)}</div>
       <div class="grid g2" style="gap:10px">
-        ${fld('costPriceRub', 'Себестоимость (закупка), ₽', 'например 620')}
+        ${fld('costPriceRub', 'Себестоимость (закупка) в выбранной валюте', 'например 620')}
+        <label class="field">Валюта закупки<select id="ce-currency">${[...new Set(['RUB', ...Object.keys(st.settings.costRates || {}), c.currency || 'RUB'])].map((code) => `<option value="${U.esc(code)}" ${code === (c.currency || 'RUB') ? 'selected' : ''}>${U.esc(code)}</option>`).join('')}</select></label>
         ${fld('packagingRub', 'Упаковка, ₽', 'например 15')}
         ${fld('commissionPct', 'Комиссия WB, %', 'пусто = из настроек', '0.5')}
         ${fld('logisticsRub', 'Логистика, ₽/шт', 'пусто = по объёму')}
@@ -242,6 +271,8 @@ Views.costs = {
         ${fld('acceptRub', 'Приёмка, ₽/шт', 'пусто = из настроек')}
         ${fld('adPct', 'Реклама, % от цены', 'пусто = из настроек', '0.5')}
         ${fld('adRub', 'Реклама, ₽/шт (фикс)', 'например 40')}
+        ${fld('otherPct', 'Прочие расходы, % до СПП', '0', '0.01')}
+        ${fld('otherRub', 'Прочие расходы, ₽/шт', '0', '0.01')}
         ${fld('sppPct', 'СПП покупателя, %', 'пусто = из настроек')}
         ${fld('taxRatePct', 'Налог, % (если особый)', 'пусто = из настроек', '0.5')}
       </div>
@@ -260,18 +291,24 @@ Views.costs = {
         acceptRub: body.querySelector('#ce-acceptRub').value === '' ? undefined : U.num(body.querySelector('#ce-acceptRub').value),
         adPct: body.querySelector('#ce-adPct').value === '' ? undefined : U.num(body.querySelector('#ce-adPct').value),
         adRub: U.num(body.querySelector('#ce-adRub').value),
+        otherPct: U.num(body.querySelector('#ce-otherPct').value),
+        otherRub: U.num(body.querySelector('#ce-otherRub').value),
         sppPct: body.querySelector('#ce-sppPct').value === '' ? undefined : U.num(body.querySelector('#ce-sppPct').value),
         taxRatePct: body.querySelector('#ce-taxRatePct').value === '' ? undefined : U.num(body.querySelector('#ce-taxRatePct').value)
       };
       Object.keys(ov).forEach((k) => { if (ov[k] === undefined || ov[k] === '') delete ov[k]; });
+      const currency = body.querySelector('#ce-currency').value;
+      const rate = currency === 'RUB' ? 1 : Number((st.settings.costRates || {})[currency]);
+      if (!(rate > 0)) { body.querySelector('#ce-out').innerHTML = '<div class="alert warn">Не задан курс ' + U.esc(currency) + '. Укажите его в «Настройки → Параметры РП»; до этого расчёт и отправка товара заблокированы.</div>'; return; }
+      ov.costPriceRub = Math.round(ov.costPriceRub * rate * 100) / 100;
       const merged = Object.assign({}, st.overrides[String(nmID)] || {}, ov);
-      const a = EC.analyze(st.settings, r.item, merged);
+      const a = EC.analyze(st.settings, r.item, merged, undefined, (st.facts || {})[String(nmID)]);
       body.querySelector('#ce-out').innerHTML = `
         <div class="card" style="background:var(--bg-3)">
           <div class="calc-lines">
             <div class="calc-line"><span class="k">Цена для WB</span><span>${U.money(a.current.revenue)}</span></div>
             <div class="calc-line"><span class="k">Комиссия + логистика + хранение</span><span>${U.money(a.current.commission + a.current.logistics + a.current.storage)}</span></div>
-            <div class="calc-line"><span class="k">Реклама и налог</span><span>${U.money(a.current.ad + a.current.tax)}</span></div>
+            <div class="calc-line"><span class="k">Реклама, налог и прочие расходы</span><span>${U.money(a.current.ad + a.current.tax + a.current.other)}</span></div>
             <div class="calc-line"><span class="k">Себестоимость и упаковка</span><span>${U.money(a.current.cogs + a.current.packaging)}</span></div>
             <div class="calc-line total"><span class="k">Прибыль / маржа</span><span class="${U.profitClass(a.current.profit)}">${U.money(a.current.profit)} · ${U.pct(a.current.marginPct)}</span></div>
             <div class="calc-line"><span class="k">Цена под цель ${U.pct(a.params.targetMarginPct, 0)}</span><span>${a.current.minPriceForMargin === null ? '—' : U.money(a.current.minPriceForMargin)}</span></div>
@@ -279,39 +316,25 @@ Views.costs = {
         </div>`;
     };
 
-    body.querySelectorAll('input').forEach((i) => { i.oninput = recalc; });
+    body.querySelectorAll('input, select').forEach((i) => { i.oninput = recalc; i.onchange = recalc; });
     recalc();
 
+    const collect = () => {
+      const costs = {};
+      for (const input of body.querySelectorAll('input[id^="ce-"], select[id^="ce-"]')) {
+        const key = input.id.slice(3);
+        if (key === 'out') continue;
+        costs[key === 'costPriceRub' ? 'costEntered' : key] = input.type === 'number' ? input.value === '' ? null : Number(input.value) : input.value;
+      }
+      return [{ channel: 'costs:save', payload: { items: { [String(nmID)]: costs } } }];
+    };
+    body.querySelectorAll('input[type="number"]').forEach((input) => { input.min = '0'; if (/Pct$/.test(input.id)) input.max = '100'; });
     UI.modal({
-      title: `Себестоимость — ${r.title}`,
-      content: body,
-      size: 'md',
-      buttons: [
-        { label: 'Отмена', class: 'btn-ghost' },
-        {
-          label: 'Сохранить', class: 'btn-primary', onClick: async () => {
-            const patch = {};
-            patch[String(nmID)] = {
-              costPriceRub: body.querySelector('#ce-costPriceRub').value === '' ? null : U.num(body.querySelector('#ce-costPriceRub').value),
-              packagingRub: body.querySelector('#ce-packagingRub').value === '' ? null : U.num(body.querySelector('#ce-packagingRub').value),
-              commissionPct: body.querySelector('#ce-commissionPct').value === '' ? null : U.num(body.querySelector('#ce-commissionPct').value),
-              logisticsRub: body.querySelector('#ce-logisticsRub').value === '' ? null : U.num(body.querySelector('#ce-logisticsRub').value),
-              storageRub: body.querySelector('#ce-storageRub').value === '' ? null : U.num(body.querySelector('#ce-storageRub').value),
-              acceptRub: body.querySelector('#ce-acceptRub').value === '' ? null : U.num(body.querySelector('#ce-acceptRub').value),
-              adPct: body.querySelector('#ce-adPct').value === '' ? null : U.num(body.querySelector('#ce-adPct').value),
-              adRub: body.querySelector('#ce-adRub').value === '' ? null : U.num(body.querySelector('#ce-adRub').value),
-              sppPct: body.querySelector('#ce-sppPct').value === '' ? null : U.num(body.querySelector('#ce-sppPct').value),
-              taxRatePct: body.querySelector('#ce-taxRatePct').value === '' ? null : U.num(body.querySelector('#ce-taxRatePct').value),
-              note: body.querySelector('#ce-note').value
-            };
-            await S.saveCosts(patch);
-            S.invalidate();
-            App.toast('Значения сохранены', 'ok');
-            if (Views.costs.container) Views.costs.refresh();
-          }
-        }
-      ]
+      title: `Себестоимость — ${r.title}`, content: body, size: 'md',
+      beforeClose: () => LocalDrafts.captureScope(body, true),
+      buttons: [{ label: 'Закрыть без сохранения', class: 'btn-ghost' }, { label: 'Сохранить', class: 'btn-primary', onClick: async (modal) => { if (await LocalDrafts.commit({ scope: body, report: true })) await modal.close(); } }]
     });
+    LocalDrafts.bind(body, 'cost-editor-' + nmID, collect, 'input[id^="ce-"], select[id^="ce-"]');
   },
 
   downloadTemplate() {
@@ -319,7 +342,7 @@ Views.costs = {
       'нм-код': r.nmID,
       'Артикул': r.vendorCode,
       'Название': r.title,
-      'Себестоимость': '',
+      'Себестоимость': '', 'Валюта': 'RUB', 'Прочие расходы %': '', 'Прочие расходы ₽': '',
       'Упаковка ₽': '',
       'Комиссия %': '',
       'Логистика ₽': '',
@@ -381,6 +404,8 @@ Views.costs = {
         nmID: get('нм-код', 'nmid', 'nmId', 'Артикул WB', 'wbarticle'),
         vendorCode: get('Артикул', 'vendorcode', 'Артикул поставщика'),
         costPriceRub: get('Себестоимость', 'costpricerub', 'Закупка'),
+        currency: get('Валюта', 'currency', 'Валюта закупки'),
+        otherPct: get('Прочие расходы %', 'otherPct'), otherRub: get('Прочие расходы ₽', 'otherRub'),
         packagingRub: get('Упаковка ₽', 'Упаковка', 'packagingrub'),
         commissionPct: get('Комиссия %', 'Комиссия', 'commissionpct'),
         logisticsRub: get('Логистика ₽', 'Логистика', 'logisticsrub'),

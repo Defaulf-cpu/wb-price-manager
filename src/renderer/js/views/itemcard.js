@@ -428,14 +428,8 @@ Views.itemcard = {
    * с СПП = цена / (1 − СПП/100), с кошельком = дополнительно / (1 − кошелёк/100).
    */
   sppPctNow() {
-    const ov = this.data.overrides || {};
-    const f = this.data.facts || {};
-    if (U.num(ov.sppPct) > 0) return U.num(ov.sppPct);
-    // наблюдение витрины WB — самая свежая цифра; за ней среднее по продажам WB
-    if (f.sppPctWatch !== undefined && f.sppPctWatch !== null && U.num(f.sppPctWatch, -1) >= 0) return U.num(f.sppPctWatch);
-    if (U.num(f.sppPctAvg) > 0) return U.num(f.sppPctAvg);
-    if (U.num(this.data.item && this.data.item.sppPct) > 0) return U.num(this.data.item.sppPct);
-    return U.num((this.data.settings || {}).sppDefault);
+    // Тот же приоритет и осмысленный ноль, что в экономике/репрайсере.
+    return U.num(this.econ().params.sppPct);
   },
 
   walletPctNow() {
@@ -454,7 +448,8 @@ Views.itemcard = {
   },
 
   tabCompetitors(host) {
-    const list = (this.data.competitors || []).slice();
+    const draftList = window.LocalDrafts ? LocalDrafts.draftItems('card-competitors-' + this.nmID, 'repricer:competitors:save')[String(this.nmID)] : undefined;
+    const list = (Array.isArray(draftList) ? draftList : (this.data.competitors || [])).slice();
 
     host.innerHTML = `
       <div class="card">
@@ -486,33 +481,32 @@ Views.itemcard = {
         ${list.map((c, i) => `<tr>
           <td><input class="ic-c-edit" data-i="${i}" data-f="name" value="${U.esc(c.name || '')}" style="width:160px" /></td>
           <td><input class="ic-c-edit mono" data-i="${i}" data-f="sku" value="${U.esc(c.sku || '')}" placeholder="нм-код" style="width:104px" /></td>
-          <td class="num"><input type="number" step="10" class="num ic-c-edit" data-i="${i}" data-f="price" value="${U.num(c.price)}" style="width:92px" /></td>
+          <td class="num"><input type="number" step="0.01" min="0.01" class="num ic-c-edit" data-i="${i}" data-f="price" value="${U.num(c.price)}" style="width:92px" /></td>
           <td class="num tiny muted">${U.money(this.sppPrice(U.num(c.price)))}<div>кошелёк ${U.money(this.walletPrice(U.num(c.price)))}</div></td>
-          <td class="num"><input type="number" step="1" class="num ic-c-edit" data-i="${i}" data-f="stock" value="${U.num(c.stock, 1)}" style="width:90px" /></td>
+          <td class="num"><input type="number" step="1" min="0" class="num ic-c-edit" data-i="${i}" data-f="stock" value="${U.num(c.stock, 1)}" style="width:90px" /></td>
           <td><input type="checkbox" class="ic-c-edit" data-i="${i}" data-f="enabled" ${c.enabled === false ? '' : 'checked'} /></td>
           <td class="tiny muted">${c.updatedAt ? U.date(c.updatedAt, true) : '—'}</td>
           <td><button class="btn btn-xs btn-ghost ic-c-del" data-i="${i}">удалить</button></td>
         </tr>`).join('')}</tbody></table>`;
 
       listHost.querySelectorAll('.ic-c-edit').forEach((inp) => {
-        inp.onchange = () => {
+        inp.oninput = inp.onchange = () => {
           const i = Number(inp.dataset.i);
           const f = inp.dataset.f;
-          list[i][f] = f === 'enabled' ? inp.checked : (f === 'name' ? String(inp.value) : U.num(inp.value));
+          list[i][f] = f === 'enabled' ? inp.checked : (['name', 'sku'].includes(f) ? String(inp.value) : U.num(inp.value));
+          list[i].updatedAt = new Date().toISOString();
         };
       });
       listHost.querySelectorAll('.ic-c-del').forEach((b) => {
         b.onclick = async () => {
           list.splice(Number(b.dataset.i), 1);
-          await save();
+          stage();
           paintList();
         };
       });
     };
 
-    const save = async () => {
-      const items = {};
-      items[String(this.nmID)] = list.map((c, i) => ({
+    const normalized = () => list.map((c, i) => ({
         id: c.id || (this.nmID + '-c' + (i + 1)),
         name: String(c.name || 'Конкурент'),
         // SKU конкурента храним отдельно: по нему наблюдатель цен сможет сам
@@ -521,10 +515,17 @@ Views.itemcard = {
         price: Number(c.price) || 0,
         stock: c.stock === undefined ? 1 : Number(c.stock),
         enabled: c.enabled !== false,
-        updatedAt: new Date().toISOString()
+        updatedAt: c.updatedAt || new Date().toISOString()
       }));
-      await API.invoke('repricer:competitors:save', { items });
-      this.data.competitors = items[String(this.nmID)];
+    const stage = () => {
+      const items = { [String(this.nmID)]: normalized() };
+      LocalDrafts.stage('card-competitors-' + this.nmID, [{ channel: 'repricer:competitors:save', payload: { items } }]);
+    };
+    const save = async () => {
+      stage();
+      if (!await LocalDrafts.commit({ id: 'card-competitors-' + this.nmID })) return false;
+      this.data.competitors = normalized();
+      return true;
     };
 
     host.querySelector('#ic-c-add').onclick = async () => {
@@ -539,10 +540,10 @@ Views.itemcard = {
         enabled: true
       });
       host.querySelector('#ic-c-sku').value = '';
-      await save();
+      stage();
       host.querySelector('#ic-c-name').value = '';
       host.querySelector('#ic-c-price').value = '';
-      App.toast('Конкурент добавлен', 'ok');
+      App.toast('Конкурент добавлен в черновик — нажмите «Сохранить изменения»', 'ok');
       paintList();
     };
 
@@ -550,12 +551,12 @@ Views.itemcard = {
     host.querySelector('#ic-c-add').parentElement.insertAdjacentHTML('beforeend',
       '<button class="btn" id="ic-c-save">Сохранить изменения</button>');
     host.querySelector('#ic-c-save').onclick = async () => {
-      await save();
-      App.toast('Конкуренты сохранены', 'ok');
-      paintList();
+      if (await save()) { App.toast('Конкуренты сохранены', 'ok'); paintList(); }
     };
 
     paintList();
+    const nmID = this.nmID;
+    LocalDrafts.bind(host, 'card-competitors-' + nmID, () => [{ channel: 'repricer:competitors:save', payload: { items: { [String(nmID)]: normalized() } } }], '.ic-c-edit', () => this.nmID === nmID && this.reloadCard());
   },
 
   // ───────────────────────── Цены на площадке ─────────────────────────
@@ -650,7 +651,7 @@ Views.itemcard = {
               : U.pct(sppWatch) + (U.num(f.sppWatchSamples) ? ' · ' + U.num(f.sppWatchSamples) + ' замеров, последний ' + (f.sppWatchAt ? U.date(f.sppWatchAt, true) : '—') : '')],
             ['Среднее по продажам WB', U.num(f.sppPctAvg) > 0 ? U.pct(f.sppPctAvg) + ' · ' + U.num(f.sppSalesQty).toFixed(0) + ' продаж' : 'нет данных']
           ])}
-          <p class="hint" style="margin-top:8px">Приоритет: ваш ручной ввод → наблюдение витрины → среднее по продажам WB →
+          <p class="hint" style="margin-top:8px">Приоритет: ваш ручной ввод → последнее датированное наблюдение ЛК/витрины → среднее продаж WB →
             значение в карточке → общая настройка. Своё значение СПП задаётся в разделе «Себестоимость».</p>
         </div>
       </div>
@@ -832,7 +833,7 @@ Views.itemcard = {
 
   tabCommissions(host) {
     const d = this.data;
-    const ov = d.overrides || {};
+    const ov = d.enteredCosts || d.overrides || {};
     const cfg = d.itemConfig || {};
     const cat = (d.settings.categoryDefaults || {})[d.item.categoryName || d.item.subjectName] || {};
 
@@ -849,7 +850,10 @@ Views.itemcard = {
           комиссия ${U.pct(U.num(cat.commissionPct, U.num(d.settings.commissionDefault)))},
           реклама ${U.pct(U.num(cat.adPct, U.num(d.settings.adPctDefault)))}.</p>
         <div class="grid g3" style="gap:10px;margin-top:10px">
-          ${fld('costPriceRub', 'Себестоимость, ₽', ov.costPriceRub, 'закупка/производство')}
+          ${fld('costPriceRub', 'Себестоимость в выбранной валюте', ov.costEntered !== undefined && ov.costEntered !== null && ov.costEntered !== '' ? ov.costEntered : ov.costPriceRub, 'закупка/производство')}
+          <label class="field">Валюта себестоимости<select id="ic-p-currency">${[...new Set(['RUB', ...Object.keys(d.settings.costRates || {}), ov.currency || 'RUB'])].map((currency) => `<option value="${U.esc(currency)}" ${currency === (ov.currency || 'RUB') ? 'selected' : ''}>${U.esc(currency)}</option>`).join('')}</select></label>
+          ${fld('otherPct', 'Прочие расходы, % до СПП', ov.otherPct, 'пусто = 0', '0.01')}
+          ${fld('otherRub', 'Прочие расходы, ₽/шт', ov.otherRub, 'прибавляется к проценту', '0.01')}
           ${fld('packagingRub', 'Упаковка, ₽', ov.packagingRub, 'коробка, пупырка, этикетка')}
           ${fld('commissionPct', 'Комиссия WB, %', ov.commissionPct, 'из отчёта или справочника', '0.1')}
           ${fld('logisticsRub', 'Логистика, ₽', ov.logisticsRub, 'за одну продажу', '0.01')}
@@ -862,23 +866,21 @@ Views.itemcard = {
       </div>
 
       <div class="card" style="margin-top:12px">
-        <h3>СПП по цене на витрине</h3>
-        <p class="hint">СПП — скидка, которую WB даёт покупателю за свой счёт. По API продавца витринной цены нет,
-          поэтому приложение берёт её двумя путями: <b>наблюдатель цен</b> читает карточку на витрине WB
-          (вкладка «Цены на площадке», медиана за 7 дней) и <b>реальный СПП есть в статистике продаж WB</b> —
-          в каждой строке продажи указано поле <span class="mono">spp</span>, и приложение берёт среднее по вашим продажам.</p>
+        <h3>СПП из ЛК и наблюдений</h3>
+        ${d.facts?.sppPctOfficial !== null && d.facts?.sppPctOfficial !== undefined ? `<div class="alert info">Последнее наблюдение ЛК: ${U.pct(d.facts.sppPctOfficial)} · ${U.esc(d.facts.sppOfficialSource === 'orders' ? 'заказ' : 'продажа')} ${U.date(d.facts.sppOfficialAt, true)}. Не live-витрина. Получено ${U.date(d.facts.sppOfficialReceivedAt, true)}.</div>` : ''}
+        <p class="hint">СПП — скидка, которую WB даёт покупателю за свой счёт. В официальных заказах и продажах есть <span class="mono">spp</span>: используем последнее известное наблюдение с датой.
+          Это не гарантирует цену витрины сейчас. Если WB блокирует витрину, запросы прекращаются; ручной ввод и официальная статистика продолжают работать.</p>
         ${(d.facts && d.facts.sppPctWatch !== undefined && d.facts.sppPctWatch !== null) ? `<div class="alert ok" style="margin-bottom:10px">
             <b>По наблюдению витрины: СПП ${U.pct(U.num(d.facts.sppPctWatch), 2)}</b>
             <span class="hint">(медиана за 7 дней по ${U.fmt(d.facts.sppWatchSamples || 0)} замерам${d.facts.sppWatchAt ? ', последний ' + U.date(d.facts.sppWatchAt, true) : ''}).
-            Это значение уже используется в расчёте — источник помечен как «витрина WB».</span>
+            Использование зависит от ручного ввода и даты более свежего официального наблюдения; источник расчёта указан отдельно.</span>
           </div>` : ''}
-        ${(d.facts && d.facts.sppPctAvg) ? `<div class="alert ok" style="margin-bottom:10px">
+        ${(d.facts && d.facts.sppPctAvg !== null && d.facts.sppPctAvg !== undefined) ? `<div class="alert ok" style="margin-bottom:10px">
             <b>По факту продаж WB: СПП ${U.pct(U.num(d.facts.sppPctAvg), 2)}</b>
             <span class="hint">(по ${U.fmt(d.facts.sppSalesQty || 0)} продажам за окно статистики).
-            Это значение уже используется в расчёте — источник помечен как «факт WB».</span>
+            Это среднее за период, а не обещание текущей скидки каждому покупателю.</span>
           </div>`
-        : `<div class="alert info" style="margin-bottom:10px">По этому товару ещё нет продаж в загруженной статистике,
-            поэтому СПП берётся из настройки кабинета (${U.pct(U.num(d.settings.sppDefault))}).
+        : `<div class="alert info" style="margin-bottom:10px">Нет среднего по загруженным продажам. В расчёте используется последний доступный источник; общая настройка кабинета (${U.pct(U.num(d.settings.sppDefault))}).
             Загрузите статистику или введите СПП вручную по витрине — калькулятор ниже.</div>`}
         <p class="hint">Калькулятор ниже — для случая, когда нужно уточнить СПП глазами с витрины
           (например, для нового товара без продаж).</p>
@@ -967,7 +969,7 @@ Views.itemcard = {
       const field = host.querySelector('#ic-p-sppPct');
       if (field) {
         field.value = spp;
-        App.toast('СПП ' + U.pct(spp, 2) + ' подставлен — нажмите «Сохранить параметры»', 'ok', 6000);
+        App.toast('СПП ' + U.pct(spp, 2) + ' подставлен и будет сохранён локально', 'ok', 6000);
       }
     };
 
@@ -1019,7 +1021,7 @@ Views.itemcard = {
       try {
         const costs = {};
         ['costPriceRub', 'packagingRub', 'commissionPct', 'logisticsRub', 'storageRub', 'adPct', 'sppPct', 'stock', 'salesPerDay']
-          .forEach((k) => { costs[k] = num(k); });
+          .forEach((k) => { costs[k === 'costPriceRub' ? 'costEntered' : k] = num(k); });
         await S.saveCosts({ [String(this.nmID)]: costs });
 
         const strategy = host.querySelector('#ic-p-strategy').value;

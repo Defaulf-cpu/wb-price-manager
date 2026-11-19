@@ -488,25 +488,27 @@ async function tSizePriceSafety() {
         const good = goods.find((g) => g.nmID === row.nmID);
         const size = good && good.sizes.find((s) => s.sizeID === row.sizeID);
         if (!sizeError && size) { size.price = row.price; recalcDiscounts(good); }
-        return Object.assign({}, row, { status: sizeError ? 6 : 3, errorText: sizeError ? 'WB отклонил размер' : '' });
+        return Object.assign({}, row, { status: sizeError ? 3 : 2, errorText: sizeError ? 'WB отклонил размер' : '' });
       });
       return res(200, { data: { taskId: ++taskId } });
     },
     '/api/v2/upload/task': (url, init) => {
       const body = JSON.parse(init.body).data;
       commonPosts.push(body);
-      history = body.map((row) => {
+      history = body.flatMap((row) => {
         const good = goods.find((g) => g.nmID === row.nmID);
         if (good) {
           if (row.price !== undefined) good.sizes.forEach((size) => { size.price = row.price; });
           if (row.discount !== undefined) good.discount = row.discount;
           recalcDiscounts(good);
+          // Официальная история общего обновления возвращает строки размеров.
+          return good.sizes.map((size) => ({ ...row, sizeID: size.sizeID, price: size.price, status: 2, errorText: '' }));
         }
-        return Object.assign({}, row, { status: 3, errorText: '' });
+        return [{ ...row, status: 2, errorText: '' }];
       });
       return res(200, { data: { taskId: ++taskId } });
     },
-    '/api/v2/history/goods/task': () => res(200, { data: { goods: history } })
+    '/api/v2/history/goods/task': () => res(200, { data: { historyGoods: history } })
   };
   await st.service.handlers['wb:goods']({ force: true });
   await st.service.handlers['costs:save']({ items: { 7007: { costPriceRub: 200 }, 8008: { costPriceRub: 200 } } });
@@ -600,9 +602,8 @@ async function tSizePriceSafety() {
   await st.service.handlers['prices:draft-save']({ items: { 7007: { basePrice: 950, discount: 20 } } });
   await st.service.handlers['repricer:calc']({ full: true });
   const beforeAuto = sizePosts.length + commonPosts.length;
-  let autoBlocked = false;
-  try { await st.service.handlers['repricer:proposal-send']({ source: 'repricer-auto', nmIDs: [7007] }); }
-  catch (e) { autoBlocked = e.code === 'SIZE_EQUALIZE_CONFIRM'; }
+  const skippedAuto = await st.service.handlers['repricer:proposal-send']({ source: 'repricer-auto', nmIDs: [7007] });
+  const autoBlocked = skippedAuto.sent === 0 && (skippedAuto.warnings || []).some((w) => w.nmID === 7007 && w.type === 'size-equalize-blocked');
   check('F: автоотправка не выравнивает разные размеры в режиме none без ручного подтверждения',
     autoBlocked && sizePosts.length + commonPosts.length === beforeAuto);
 }
@@ -636,7 +637,7 @@ async function tStaleProposal() {
   }
   const after = await st.service.handlers['repricer:proposal']();
   check('устаревшее предложение: состояние видно в интерфейсе',
-    after.phase === 'stale' || after.phase === 'sent', 'phase=' + after.phase);
+    after.phase === 'stale' || after.phase === 'sent' || after.phase === 'partial' && after.items.some((x) => x.sendState === 'stale'), 'phase=' + after.phase);
   void calc;
 }
 
@@ -1160,8 +1161,8 @@ async function tSingleScreen() {
     ov.overrides[nm].costPriceRub === 300 && ov.overrides[nm].costRate === 12 && ov.overrides[nm].costEntered === 25,
     ov.overrides[nm].costPriceRub + ' ₽ из 25 CNY');
   const savedCosts = await st.service.handlers['costs:get']();
-  check('D: сохранённое значение остаётся в валюте ввода',
-    savedCosts.items[nm].costPriceRub === 25 && savedCosts.items[nm].currency === 'CNY');
+  check('D: сохранённое значение разделяет введённую валюту и рубли',
+    savedCosts.items[nm].costEntered === 25 && savedCosts.items[nm].costPriceRub === 300 && savedCosts.items[nm].currency === 'CNY' && savedCosts.items[nm].costVersion === 2);
 
   calc = await st.service.handlers['repricer:calc']({ full: true });
   r = row(calc);
@@ -1172,21 +1173,22 @@ async function tSingleScreen() {
     !!r.cost.next && r.cost.next.cogs === 300, r.cost.next && String(r.cost.next.cogs));
 
   // ── курс не задан: явная ошибка вместо тихого расчёта 1:1 ──
-  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 25, currency: 'GEL' } } });
+  await st.service.handlers['settings:save']({ costRates: { PLN: 0 } });
+  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 25, currency: 'PLN' } } });
   calc = await st.service.handlers['repricer:calc']({ full: true });
   r = row(calc);
   check('D: без курса валюта даёт явную ошибку',
-    !!r.cost.error && /не задан курс GEL/.test(r.cost.error) && r.cost.rub === 0, String(r.cost.error));
+    !!r.cost.error && /не задан курс PLN/.test(r.cost.error) && r.cost.rub === 0, String(r.cost.error));
   check('D: ошибка видна в предупреждениях строки',
-    (r.warnings || []).some((w) => /не задан курс GEL/.test(w)));
+    (r.warnings || []).some((w) => /не задан курс PLN/.test(w)));
   let prop = await st.service.handlers['repricer:proposal']();
   let blocked = (prop.blocked || []).find((b) => String(b.nmID) === nm);
   check('D: строка без курса не попадает в предложение',
-    !!blocked && blocked.reasons.some((x) => /не задан курс GEL/.test(x)),
+    !!blocked && blocked.reasons.some((x) => /не задан курс PLN/.test(x)),
     blocked && blocked.reasons.join('; '));
 
   // курс задали — ошибка ушла, строка снова в предложении
-  await st.service.handlers['settings:save']({ costRates: { CNY: 12, GEL: 40 } });
+  await st.service.handlers['settings:save']({ costRates: { CNY: 12, PLN: 40 } });
   calc = await st.service.handlers['repricer:calc']({ full: true });
   r = row(calc);
   check('D: после указания курса ошибка снимается', !r.cost.error && r.cost.rub === 1000, r.cost.rub + ' ₽');

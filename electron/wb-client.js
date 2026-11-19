@@ -1,5 +1,7 @@
 'use strict';
 
+const StatMath = require('./workspace-analytics');
+
 const { WB_HOSTS, RATE_LIMITS, MAX_ITEMS_PER_PRICE_TASK, MAX_SIZE_ITEMS_PER_PRICE_TASK } = require('./config');
 
 /** Ошибка WB API с понятным текстом для интерфейса. */
@@ -281,6 +283,7 @@ class WBClient {
     const { query, body, retries = 2, maxWaitMs } = opts || {};
     const limiter = this.limiters[category];
     await limiter.acquire(maxWaitMs);
+    if (opts && typeof opts.beforeSend === 'function') await opts.beforeSend();
     const key = this.keyFor(category);
     const host = this.hosts[category === 'calendar' ? 'calendar' : category];
     const url = new URL(host + urlPath);
@@ -745,10 +748,10 @@ class WBClient {
    * Автоматически режет на пачки по 1000 товаров и собирает ошибки из состояний загрузки.
    */
   async applyPrices(items, opts) {
-    const { waitDetails = true } = opts || {};
+    const { waitDetails = true, beforeSend } = opts || {};
     if (!Array.isArray(items) || !items.length) throw new WBError('Нет товаров для обновления цен.', { category: 'prices', code: 'EMPTY' });
 
-    const batches = [];
+    const batches = []; let partialError = null;
     for (let i = 0; i < items.length; i += MAX_ITEMS_PER_PRICE_TASK) {
       const chunk = items.slice(i, i + MAX_ITEMS_PER_PRICE_TASK).map((it) => {
         const row = { nmID: Number(it.nmID) };
@@ -757,14 +760,21 @@ class WBClient {
         if (it.discount !== undefined) row.discount = Math.round(Number(it.discount));
         return row;
       });
-      const response = await this.request('prices', 'POST', '/api/v2/upload/task', { body: { data: chunk } });
+      try {
+      const response = await this.request('prices', 'POST', '/api/v2/upload/task', { body: { data: chunk }, beforeSend: beforeSend ? () => beforeSend(chunk) : undefined });
       batches.push({ batch: i / MAX_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
+      } catch (error) {
+        if (!batches.length) throw error;
+        partialError = { message: error.message || String(error), code: error.code || 'UPLOAD_INTERRUPTED' };
+        break;
+      }
     }
 
-    if (!waitDetails) return { uploaded: items.length, batches, details: [] };
+    const uploaded = batches.reduce((n, b) => n + b.count, 0);
+    if (!waitDetails) return { uploaded, batches, details: [], partialError };
 
     const details = await this._collectUploadDetails(batches);
-    return { uploaded: items.length, batches, details };
+    return { uploaded, batches, details, partialError };
   }
 
   /**
@@ -773,10 +783,10 @@ class WBClient {
    * Автоматически режет на пачки по 1000 размеров и собирает ошибки из состояний загрузки.
    */
   async applySizePrices(items, opts) {
-    const { waitDetails = true } = opts || {};
+    const { waitDetails = true, beforeSend } = opts || {};
     if (!Array.isArray(items) || !items.length) throw new WBError('Нет размеров для обновления цен.', { category: 'prices', code: 'EMPTY' });
 
-    const batches = [];
+    const batches = []; let partialError = null;
     for (let i = 0; i < items.length; i += MAX_SIZE_ITEMS_PER_PRICE_TASK) {
       const chunk = items.slice(i, i + MAX_SIZE_ITEMS_PER_PRICE_TASK).map((it) => ({
         nmID: Number(it.nmID),
@@ -784,44 +794,69 @@ class WBClient {
         // У size-метода нет поля discount: скидка задаётся на товар целиком.
         price: Math.round(Number(it.price))
       }));
-      const response = await this.request('prices', 'POST', '/api/v2/upload/task/size', { body: { data: chunk } });
+      try {
+      const response = await this.request('prices', 'POST', '/api/v2/upload/task/size', { body: { data: chunk }, beforeSend: beforeSend ? () => beforeSend(chunk) : undefined });
       batches.push({ batch: i / MAX_SIZE_ITEMS_PER_PRICE_TASK + 1, count: chunk.length, response, items: chunk });
+      } catch (error) {
+        if (!batches.length) throw error;
+        partialError = { message: error.message || String(error), code: error.code || 'UPLOAD_INTERRUPTED' };
+        break;
+      }
     }
 
-    if (!waitDetails) return { uploaded: items.length, batches, details: [] };
+    const uploaded = batches.reduce((n, b) => n + b.count, 0);
+    if (!waitDetails) return { uploaded, batches, details: [], partialError };
 
     const details = await this._collectUploadDetails(batches);
-    return { uploaded: items.length, batches, details };
+    return { uploaded, batches, details, partialError };
   }
 
   /**
-   * Детали обработанной загрузки (ошибки по товарам/размерам, в т.ч. карантин цен).
-   * Общая логика для цен товара (`upload/task`) и цен по размерам (`upload/task/size`):
-   * опрос истории по taskId и разбор `goods[]` с состояниями.
+   * Детали обработанной загрузки: uploadID / limit / offset → historyGoods[].
+   * Успех строки ещё не означает полноту ответа: при ошибке любой страницы все
+   * строки этой задачи остаются неподтверждёнными. Результаты других задач не теряем.
    */
   async _collectUploadDetails(batches) {
     await sleep(1500);
     const details = [];
     for (const b of batches) {
-      const taskId = pick(b.response && b.response.data, ['taskId', 'id']);
-      if (taskId === undefined || taskId === null) continue;
-      try {
-        const json = await this.request('prices', 'GET', '/api/v2/history/goods/task', { query: { taskId } });
-        const goods = pick(json && json.data, ['goods', 'listGoods'], []) || [];
-        goods.forEach((g) => details.push({
-          taskId,
-          nmID: Number(g.nmID),
-          ...(g.sizeID !== undefined ? { sizeID: Number(g.sizeID) } : {}),
-          vendorCode: g.vendorCode || '',
-          price: Number(g.price || 0),
-          discount: Number(g.discount || 0),
-          status: Number(g.status || 0),
-          statusText: WBClient.uploadStatusText(g.status),
-          errorText: g.errorText || ''
-        }));
-      } catch (e) {
-        details.push({ taskId, error: e.message });
+      const taskId = pick(b.response && b.response.data, ['id', 'uploadID', 'taskId']);
+      if (!Number.isSafeInteger(Number(taskId)) || Number(taskId) <= 0) {
+        details.push({ pending: true, historyComplete: false, error: 'WB принял запрос без известного uploadID. Проверьте результат в кабинете; автоматического повтора нет.' });
+        continue;
       }
+      const taskRows = [];
+      try {
+        const seen = new Set(); let complete = false;
+        for (let offset = 0; offset < 100000; offset += 1000) {
+          // Официальный контракт: uploadID + limit + offset; historyGoods, НЕ taskId/goods.
+          const json = await this.request('prices', 'GET', '/api/v2/history/goods/task', { query: { uploadID: taskId, limit: 1000, offset } });
+          const data = json && json.data;
+          if (!data || !Array.isArray(data.historyGoods)) throw new Error('WB вернул неизвестную структуру истории загрузки.');
+          if (data.uploadID !== undefined && Number(data.uploadID) !== Number(taskId)) throw new Error('WB вернул историю другой загрузки.');
+          const goods = data.historyGoods;
+          for (const g of goods) {
+            if (!g || !Number.isSafeInteger(Number(g.nmID)) || Number(g.nmID) <= 0 ||
+                g.sizeID !== undefined && (!Number.isSafeInteger(Number(g.sizeID)) || Number(g.sizeID) <= 0)) throw new Error('В истории WB отсутствует корректный nmID/sizeID.');
+            const key = Number(g.nmID) + ':' + String(g.sizeID ?? '');
+            if (seen.has(key)) throw new Error('WB повторяет товар/размер в истории загрузки. Полнота результата не подтверждена.');
+            seen.add(key);
+            // GoodStatus: 2 — применено, 3 — ОШИБКА. TaskStatus=3 имеет другое значение.
+            // Внутренний status совместим с демо/UI, исходный — rawGoodStatus.
+            const rawGoodStatus = Number(g.status), errorText = String(g.errorText || '');
+            const status = rawGoodStatus === 2 && !errorText ? 3 : rawGoodStatus === 3 || errorText ? 6 : rawGoodStatus === 1 ? 1 : 0;
+            taskRows.push({ taskId, historyComplete: false, nmID: Number(g.nmID), ...(g.sizeID !== undefined ? { sizeID: Number(g.sizeID) } : {}),
+              vendorCode: g.vendorCode || '', price: Number(g.price || 0), discount: Number(g.discount || 0),
+              rawGoodStatus, applied: status === 3, status, statusText: status === 6 ? 'Цена товара не применена' : WBClient.uploadStatusText(status), errorText });
+          }
+          if (goods.length < 1000) { complete = true; break; }
+        }
+        if (!complete) throw new Error('История загрузки превышает безопасный размер. Проверьте результат в кабинете.');
+        taskRows.forEach((row) => { row.historyComplete = true; });
+      } catch (e) {
+        details.push({ taskId, pending: true, historyComplete: false, error: e.message });
+      }
+      details.push(...taskRows);
     }
     return details;
   }
@@ -839,21 +874,19 @@ class WBClient {
   }
 
   /** GET /api/v2/history/tasks — состояния обработанных загрузок цен. */
-  async uploadStates() {
-    const json = await this.request('prices', 'GET', '/api/v2/history/tasks');
-    const list = pick(json && json.data, ['uploads', 'tasks', 'history'], []) || [];
-    return list.map((t) => ({
-      taskId: Number(pick(t, ['id', 'taskId'])),
-      status: Number(pick(t, ['status'], 0)),
-      statusText: WBClient.uploadStatusText(pick(t, ['status'], 0)),
-      createdAt: pick(t, ['createdAt', 'date', 'uploadDate'], ''),
-      changedAt: pick(t, ['changedAt', 'updateDate'], ''),
-      goodsCount: Number(pick(t, ['goodsCount', 'count'], 0) || 0),
-      raw: t
-    }));
+  async uploadStates(uploadIDs = []) {
+    const out = [];
+    for (const uploadID of [...new Set(uploadIDs.map(Number))].filter((n) => Number.isSafeInteger(n) && n > 0).slice(0, 30)) {
+      try {
+        const json = await this.request('prices', 'GET', '/api/v2/history/tasks', { query: { uploadID } });
+        const t = json && json.data;
+        if (!t || typeof t !== 'object') continue;
+        out.push({ taskId: Number(t.uploadID || uploadID), status: Number(t.status) || 0, statusText: WBClient.uploadStatusText(t.status),
+          createdAt: t.uploadDate || '', changedAt: t.activationDate || '', goodsCount: Number(t.overAllGoodsNumber) || 0, raw: t });
+      } catch (error) { out.push({ taskId: uploadID, status: 0, statusText: 'Не удалось проверить', error: error.message }); }
+    }
+    return out;
   }
-
-  // ───────────────────────── Календарь акций ─────────────────────────
 
   /** GET /api/v1/calendar/promotions — список акций за период. */
   async getPromotions(opts) {
@@ -981,6 +1014,7 @@ class WBClient {
     }
     const uploadNow = !(opts && opts.uploadNow === false);
     const json = await this.request('calendar', 'POST', '/api/v1/calendar/promotions/upload', {
+      beforeSend: opts && opts.beforeSend,
       body: { data: { promotionID: Number(promotionID), uploadNow, nomenclatures: nmIDs } }
     });
     const d = (json && json.data) || {};
@@ -1042,12 +1076,13 @@ class WBClient {
         partialError = e;
         break;
       }
-      const arr = Array.isArray(json) ? json : [];
+      if (!Array.isArray(json)) throw new WBError('WB вернул неверную структуру статистики: ожидался массив строк. Пустой период не подтверждён.', { category: 'statistics', code: 'BAD_STAT_SCHEMA' });
+      const arr = json;
       if (!arr.length) break;
       for (const r of arr) rows.push(r);
       if (typeof onProgress === 'function') onProgress({ path, pages, rows: rows.length });
       // неполная страница = WB отдал всё, что есть; лишний запрос стоил бы минуты
-      if (arr.length < Math.floor(rowCap * 0.9)) break;
+      if (arr.length < rowCap) break;
       const last = arr[arr.length - 1];
       const next = String(last.lastChangeDate || last.date || '');
       if (!next || next === cursor) { truncated = true; break; }
@@ -1093,19 +1128,19 @@ class WBClient {
     const winFrom = String(options.windowFrom || dateFrom || '').slice(0, 10);
     let sales = [];
     let orders = [];
-    const meta = { salesPages: 0, ordersPages: 0, truncated: false };
+    const meta = { salesPages: 0, ordersPages: 0, truncated: false, salesTruncated: false, ordersTruncated: false };
     // Ошибку не глотаем молча: иначе при ключе без категории «Статистика»
     // полное обновление показывало бы «✓ 0 товаров» вместо честной ошибки.
-    const report = (e, source) => { if (typeof options.onError === 'function') options.onError(e, source); };
+    const report = (e, source) => { meta[source + 'Error'] = true; if (typeof options.onError === 'function') options.onError(e, source); };
     try {
       const res = await this.getStatRows('/api/v1/supplier/sales', dateFrom, pageOpts);
-      sales = res.rows; meta.salesPages = res.pages; meta.truncated = meta.truncated || res.truncated;
+      sales = res.rows; meta.salesPages = res.pages; meta.salesTruncated = !!res.truncated; meta.truncated = meta.truncated || res.truncated;
       if (res.error) report(res.error, 'sales');   // часть строк получена, загрузка оборвалась
     } catch (e) { sales = []; report(e, 'sales'); }
     if (withOrders) {
       try {
         const res = await this.getStatRows('/api/v1/supplier/orders', dateFrom, pageOpts);
-        orders = res.rows; meta.ordersPages = res.pages; meta.truncated = meta.truncated || res.truncated;
+        orders = res.rows; meta.ordersPages = res.pages; meta.ordersTruncated = !!res.truncated; meta.truncated = meta.truncated || res.truncated;
         if (res.error) report(res.error, 'orders');
       } catch (e) { orders = []; report(e, 'orders'); }
     }
@@ -1116,9 +1151,10 @@ class WBClient {
       const d = String(r.date || '').slice(0, 10);
       return !winFrom || !d || d >= winFrom;
     };
-    sales = sales.filter(inWindow);
-    orders = orders.filter(inWindow);
+    sales = StatMath.dedupe(sales.filter(inWindow), 'sales');
+    orders = StatMath.dedupe(orders.filter(inWindow), 'orders');
 
+    if (typeof options.onRows === 'function') options.onRows({ sales, orders, from: winFrom, salesComplete: !meta.salesTruncated && !meta.salesError, ordersComplete: withOrders && !meta.ordersTruncated && !meta.ordersError });
     const agg = {};
     const ensure = (nm) => (agg[nm] = agg[nm] || {
       nmID: nm, salesQty: 0, salesSum: 0, salesForPay: 0, ordersQty: 0, ordersSum: 0,
@@ -1129,26 +1165,27 @@ class WBClient {
       const nm = Number(s.nmId || s.nmID || 0);
       if (!nm) continue;
       const a = ensure(nm);
-      const isReturn = String(s.subjectName || '').length >= 0 && (s.isReturn || s.return || false);
-      const price = Number(s.price || 0);
-      const forPay = Number(s.ppvz_for_pay || s.ppvzForPay || 0);
+      const isReturn = StatMath.returned(s);
+      const price = StatMath.sellerPrice(s) || 0;
+      const forPay = Number(s.forPay !== undefined ? s.forPay : s.ppvz_for_pay !== undefined ? s.ppvz_for_pay : s.ppvzForPay || 0);
       const spp = Number(s.spp || 0);
       const day = String(s.date || '').slice(0, 10);
       if (isReturn) { a.returnsQty++; continue; }
       a.salesQty++;
       a.salesSum += price;
       a.salesForPay += forPay;
-      if (spp > 0) { a.sppSum += spp; a.sppCount++; }
+      if (StatMath.finite(s.spp) && spp >= 0 && spp <= 100) { a.sppSum += spp; a.sppCount++; }
       if (s.warehouseName) a.warehouses[s.warehouseName] = (a.warehouses[s.warehouseName] || 0) + 1;
       if (day) a.days[day] = (a.days[day] || 0) + 1;
     }
 
     for (const o of orders) {
+      if (StatMath.canceled(o)) continue;
       const nm = Number(o.nmId || o.nmID || 0);
       if (!nm) continue;
       const a = ensure(nm);
       a.ordersQty++;
-      a.ordersSum += Number(o.price || 0);
+      a.ordersSum += StatMath.sellerPrice(o) || 0;
     }
 
     return Object.values(agg).map((a) => ({
@@ -1158,7 +1195,7 @@ class WBClient {
       salesForPay: r2(a.salesForPay),
       avgPrice: a.salesQty ? r2(a.salesSum / a.salesQty) : 0,
       avgForPay: a.salesQty ? r2(a.salesForPay / a.salesQty) : 0,
-      avgSppPct: a.sppCount ? r2(a.sppSum / a.sppCount) : 0,
+      avgSppPct: a.sppCount ? r2(a.sppSum / a.sppCount) : 0, sppSamples: a.sppCount,
       ordersQty: a.ordersQty,
       returnsQty: a.returnsQty,
       days: a.days,
@@ -1406,10 +1443,11 @@ class WBClient {
       const nm = Number(r && (r.nmID !== undefined ? r.nmID : (r.nmId || r.nm_id || 0)));
       if (!(nm > 0)) continue;
       const qty = Number(r.stock);
-      if (!(qty > 0)) continue;
-      const a = out[nm] || (out[nm] = { nmID: nm, total: 0, byWarehouse: {}, byRegion: {}, sizeRows: 0 });
+      if (!Number.isFinite(qty) || qty < 0) continue;
+      const a = out[nm] || (out[nm] = { nmID: nm, total: 0, byWarehouse: {}, byRegion: {}, sizeRows: 0, observed: true });
+      a.observed = true;
       a.total += qty;
-      a.sizeRows++;
+      if (qty > 0) a.sizeRows++;
       const wh = String(r.warehouseName || ('склад ' + (r.warehouseId || '?')));
       a.byWarehouse[wh] = (a.byWarehouse[wh] || 0) + qty;
       const region = String(r.region || 'неизвестный');

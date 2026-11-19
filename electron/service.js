@@ -1,10 +1,15 @@
 'use strict';
 
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+const WorkspaceConfig = require('./workspace-config');
+const PriceSafety = require('./price-safety');
 const { DEMO_KEY, TOKEN_SCOPES, RATE_FALLBACK_MS } = require('./config');
 const { WBClient, WBError } = require('./wb-client');
 const { createDemoApi } = require('./demo');
 const RP = require('./repricer-engine');
+const StatMath = require('./workspace-analytics');
+const Boost = require('./boost-ladder');
 const { createPriceWatcher } = require('./price-watcher');
 const EC = require('./economics');
 const PromoAnalytics = require('./promo-analytics');
@@ -70,6 +75,9 @@ function createService(store, emit, electron, integrations) {
     onCompetitorPriceChange: (entry) => notify('app-event', Object.assign({ type: 'competitorPrice' }, entry))
   });
 
+  let officialSpp = {}, officialSppContext = '', boostOrders = null, boostOrdersPending = null;
+  const priceJobContext = new AsyncLocalStorage();
+  let priceJobRunning = null;
   let demoApi = null;
   let client = null;
   let clientSignature = '';
@@ -79,6 +87,19 @@ function createService(store, emit, electron, integrations) {
   let promoLifecycleReady = false;
   let promoLifecycle = new Map();
   let lowStockNotified = new Set();
+
+  async function priceJob(work) {
+    const owner = priceJobContext.getStore();
+    if (owner && owner === priceJobRunning) return work(owner);
+    if (priceJobRunning) throw new WBError('Другая отправка уже выполняется. Дождитесь её результата.', { code: 'PRICE_BUSY' });
+    const job = { context: businessContext() }; priceJobRunning = job;
+    try { return await priceJobContext.run(job, () => work(job)); }
+    finally { if (priceJobRunning === job) priceJobRunning = null; }
+  }
+
+  function assertPriceContext(context) {
+    if (disposed || context !== businessContext()) throw new WBError('Кабинет, ключ или режим изменился. Отправка остановлена, выполните новый расчёт.', { code: 'PRICE_CONTEXT_CHANGED' });
+  }
 
   function getSettings() {
     const settings = store.loadSettings();
@@ -126,6 +147,12 @@ function createService(store, emit, electron, integrations) {
       demo: isDemo(), sandbox: !!settings.sandbox,
       keys: WB_SECRET_NAMES.map((name) => [name, String(secrets[name] || '')])
     })).digest('hex');
+  }
+
+  /** Стабильный после перезапуска, но разный для ключа/профиля/demo/sandbox. */
+  function businessContext() {
+    const settings = getSettings(), secrets = store.loadSecrets();
+    return crypto.createHash('sha256').update(JSON.stringify({ profile: hooks.profileId || store.dir || 'single', demo: isDemo(), sandbox: !!settings.sandbox, keys: WB_SECRET_NAMES.map((name) => [name, String(secrets[name] || '')]) })).digest('hex');
   }
 
   function assertCatalogContext(context) {
@@ -204,6 +231,7 @@ function createService(store, emit, electron, integrations) {
 
   /** Валюты, для которых можно задать курс себестоимости (список для интерфейса). */
   const COST_CURRENCIES = ['RUB', 'CNY', 'USD', 'EUR', 'TRY', 'KZT', 'BYN', 'UZS', 'AED', 'PLN'];
+  const isCostCurrency = (currency) => /^[A-Z]{3}$/.test(String(currency || '').trim().toUpperCase());
 
   /**
    * Курс валюты себестоимости (задание D): сколько ₽ стоит 1 единица валюты.
@@ -219,6 +247,52 @@ function createService(store, emit, electron, integrations) {
     return Number.isFinite(r) && r > 0 ? r : 0;
   }
 
+  /**
+   * costEntered — введённая сумма в валюте закупки; costPriceRub — только
+   * пересчитанная рублёвая сумма. Старые записи без costEntered мигрируют
+   * в памяти/при следующем сохранении: их costPriceRub один раз считается
+   * введённым значением, а не уже пересчитанными рублями.
+   */
+  function normalizeCostRecord(existing, patchInput) {
+    const patch = WorkspaceConfig.costPatch(patchInput || {});
+    const out = { ...patch };
+    const old = existing || {};
+    if (out.currency !== undefined && out.currency !== null && String(out.currency).trim()) {
+      out.currency = String(out.currency).trim().toUpperCase();
+      if (!isCostCurrency(out.currency)) throw new WBError('Неизвестная валюта закупки «' + out.currency + '».', { code: 'BAD_CURRENCY' });
+    }
+    const currency = String(out.currency || old.currency || 'RUB').trim().toUpperCase() || 'RUB';
+    const has = (key) => Object.prototype.hasOwnProperty.call(out, key);
+    let entered;
+    if (has('costEntered')) entered = out.costEntered;
+    else if (has('costPriceRub')) {
+      entered = out.costPriceRub;
+      // Защита от «кривого»/старого клиента: если прислали уже пересчитанные
+      // рубли с той же валютой, это не новое введённое значение.
+      if (currency !== 'RUB' && entered !== null && entered !== undefined && entered !== '') {
+        const rate = costRateOf(currency);
+        const oldCurrency = String(old.currency || 'RUB').trim().toUpperCase() || 'RUB';
+        const oldEntered = old.costEntered !== undefined && old.costEntered !== null && old.costEntered !== '' ? old.costEntered : (oldCurrency === currency ? old.costPriceRub : undefined);
+        const oldRub = oldEntered !== undefined && oldEntered !== null && oldEntered !== '' && rate > 0 ? Math.round(Number(oldEntered) * rate * 100) / 100 : null;
+        if (oldRub !== null && Math.abs(Number(entered) - oldRub) < 0.005) entered = oldEntered;
+      }
+    } else if (has('currency')) {
+      entered = old.costEntered !== undefined && old.costEntered !== null && old.costEntered !== '' ? old.costEntered : old.costPriceRub;
+    }
+    if (entered !== undefined) {
+      if (entered === '') entered = null;
+      if (entered !== null && (!Number.isFinite(Number(entered)) || Number(entered) < 0)) throw new WBError('Себестоимость должна быть неотрицательным числом в валюте закупки.', { code: 'BAD_COST' });
+      out.costEntered = entered === null ? null : Number(entered);
+      if (entered === null) out.costPriceRub = null;
+      else {
+        const rate = currency === 'RUB' ? 1 : costRateOf(currency);
+        out.costPriceRub = rate > 0 ? Math.round(Number(entered) * rate * 100) / 100 : 0;
+      }
+      out.costVersion = 2;
+    }
+    return out;
+  }
+
   function overridesFor(goods) {
     const costs = costsMap();
     const out = {};
@@ -227,6 +301,9 @@ function createService(store, emit, electron, integrations) {
       const c = costs[key] || {};
       out[key] = {
         costPriceRub: c.costPriceRub,
+        costEntered: c.costEntered,
+        stock: c.stock,
+        salesPerDay: c.salesPerDay,
         // валюта, в которой введена себестоимость (задание D): ₽ — по умолчанию
         currency: c.currency ? String(c.currency).trim().toUpperCase() : undefined,
         commissionPct: c.commissionPct,
@@ -235,7 +312,7 @@ function createService(store, emit, electron, integrations) {
         storageRub: c.storageRub,
         packagingRub: c.packagingRub,
         adPct: c.adPct,
-        adRub: c.adRub,
+        adRub: c.adRub, otherPct: c.otherPct, otherRub: c.otherRub,
         taxMode: c.taxMode,
         taxRatePct: c.taxRatePct,
         acquiringPct: c.acquiringPct,
@@ -246,7 +323,7 @@ function createService(store, emit, electron, integrations) {
         model: c.model,
         note: c.note,
         updatedAt: c.updatedAt,
-        source: c.costPriceRub !== undefined && c.costPriceRub !== null && c.costPriceRub !== '' ? 'user' : 'none'
+        source: (c.costEntered !== undefined && c.costEntered !== null && c.costEntered !== '') || (c.costPriceRub !== undefined && c.costPriceRub !== null && c.costPriceRub !== '') ? 'user' : 'none'
       };
       /**
        * Себестоимость в валюте закупки пересчитываем в рубли: в расчёты и в WB
@@ -257,18 +334,21 @@ function createService(store, emit, electron, integrations) {
        */
       const o = out[key];
       const cur = o.currency;
+      const entered = o.costEntered !== undefined && o.costEntered !== null && o.costEntered !== '' ? o.costEntered : o.costPriceRub;
+      o.costEntered = entered;
       if (cur && cur !== 'RUB') {
         const rate = costRateOf(cur);
         o.costCurrency = cur;
         o.costRate = rate;
-        o.costEntered = o.costPriceRub;
-        if (o.costPriceRub !== undefined && o.costPriceRub !== null && o.costPriceRub !== '') {
-          if (rate > 0) o.costPriceRub = Math.round(Number(o.costPriceRub) * rate * 100) / 100;
+        if (entered !== undefined && entered !== null && entered !== '') {
+          if (rate > 0) o.costPriceRub = Math.round(Number(entered) * rate * 100) / 100;
           else {
             o.costPriceRub = 0;
             o.costError = 'не задан курс ' + cur + ' — укажите его на вкладке «Параметры»';
           }
         }
+      } else if (entered !== undefined) {
+        o.costPriceRub = entered;
       }
     }
     return out;
@@ -284,8 +364,6 @@ function createService(store, emit, electron, integrations) {
         if (o[k] === undefined || o[k] === null || o[k] === '') o[k] = v;
       }
       o.source = o.source === 'user' ? 'user' : 'demo';
-      o.stock = d.stock;
-      o.salesPerDay = d.salesPerDay;
     }
     return overrides;
   }
@@ -311,11 +389,16 @@ function createService(store, emit, electron, integrations) {
     for (const st of stats) {
       const nm = String(st.nmID);
       const spp = Number(st.avgSppPct || 0);
-      if (!(spp > 0)) continue;
+      if (!(spp > 0) && !(st.sppSamples > 0 && spp === 0)) continue;
       const rec = items[nm] || (items[nm] = { nmID: st.nmID, salesQty: 0 });
       rec.sppPctAvg = spp;
       // сколько продаж легло в среднее — видно в интерфейсе как достоверность цифры
       rec.sppSalesQty = Number(st.salesQty || 0);
+    }
+    restoreOfficialSpp();
+    for (const [nm, sample] of Object.entries(officialSpp)) {
+      const rec = items[nm] || (items[nm] = { nmID: Number(nm), salesQty: 0 });
+      rec.sppPctOfficial = sample.pct; rec.sppOfficialAt = sample.at; rec.sppOfficialReceivedAt = sample.receivedAt || ''; rec.sppOfficialSource = sample.source;
     }
     // Наблюдение витрины WB (модуль price-watcher): медиана СПП за 7 дней.
     // Товар может не иметь продаж в окне статистики, но наблюдение у него есть —
@@ -385,7 +468,7 @@ function createService(store, emit, electron, integrations) {
       if (!nm) continue;
       const a = agg[nm] || (agg[nm] = {
         nmID: nm, salesQty: 0, returnsQty: 0, logisticsQty: 0,
-        logisticsTotal: 0, returnLogisticsTotal: 0, commissionTotal: 0, revenueTotal: 0,
+        logisticsTotal: 0, returnLogisticsTotal: 0, commissionTotal: 0, revenueTotal: 0, forPayKnown: true,
         storageTotal: 0, acceptanceTotal: 0, acquiringTotal: 0, penaltyTotal: 0, deductionTotal: 0,
         forPayTotal: 0, firstDate: '', lastDate: ''
       });
@@ -402,13 +485,24 @@ function createService(store, emit, electron, integrations) {
         const returnLogistics = n2(r.returnLogistics) || logistics;
         a.returnsQty += qty;
         a.returnLogisticsTotal += returnLogistics;
+        const rev = n2(r.retailAmount) || n2(r.retailPriceWithDisc) * qty || n2(r.retailPrice) * qty;
+        const commission = n2(r.commission) || rev * n2(r.commissionPercent) / 100;
+        a.revenueTotal -= Math.abs(rev);
+        a.commissionTotal -= Math.abs(commission);
+        a.acquiringTotal -= Math.abs(n2(r.acquiring));
+        a.forPayTotal -= Math.abs(n2(r.forPay));
+        if (r.forPayKnown === false || !Object.prototype.hasOwnProperty.call(r, 'forPay')) a.forPayKnown = false;
         if (d) {
           const day = byDay[d] || (byDay[d] = {
             date: d, salesQty: 0, returnsQty: 0, revenueTotal: 0, commissionTotal: 0,
             logisticsTotal: 0, storageTotal: 0, acquiringTotal: 0, forPayTotal: 0
           });
           day.returnsQty += qty;
-          day.logisticsTotal += n2(r.returnLogistics) || logistics;
+          day.logisticsTotal += returnLogistics;
+          day.revenueTotal -= Math.abs(rev);
+          day.commissionTotal -= Math.abs(commission);
+          day.acquiringTotal -= Math.abs(n2(r.acquiring));
+          day.forPayTotal -= Math.abs(n2(r.forPay));
         }
         continue;
       }
@@ -427,6 +521,7 @@ function createService(store, emit, electron, integrations) {
       a.penaltyTotal += n2(r.penalty);
       a.deductionTotal += n2(r.deduction);
       a.forPayTotal += n2(r.forPay);
+      if (r.forPayKnown === false || !Object.prototype.hasOwnProperty.call(r, 'forPay')) a.forPayKnown = false;
       const commission = n2(r.commission) || (revenue * n2(r.commissionPercent) / 100);
       a.commissionTotal += commission;
       // разбивка по дням — для динамики в отчёте P&L
@@ -474,6 +569,7 @@ function createService(store, emit, electron, integrations) {
         penaltyTotal: r2(a.penaltyTotal),
         deductionTotal: r2(a.deductionTotal),
         forPayTotal: r2(a.forPayTotal),
+        forPayKnown: a.forPayKnown !== false,
         windowDays: Number(windowDays) || 0,
         firstDate: a.firstDate,
         lastDate: a.lastDate,
@@ -760,6 +856,33 @@ function createService(store, emit, electron, integrations) {
         auto: isAutoPromo(p), observations, managedIds
       };
     }
+    // Импортированные акции, которых нет в календаре WB, не выбрасываем:
+    // показываем их отдельным локальным блоком. Участие и цены WB при этом
+    // не подтверждены, поэтому inAction не выставляем и ценой не управляем.
+    const localPromos = [];
+    for (const [pid, rec] of Object.entries(uploadedNoms || {})) {
+      if (index[pid]) continue;
+      const matched = catalog ? matchPromoOwnership(rec.items || [], catalog).matched : [];
+      const eligible = new Set(matched.map((x) => Number(x.nmID)).filter((x) => x > 0));
+      const plan = new Map();
+      matched.forEach((x) => { const price = Number(x.planPrice || x.plannedPrice || 0); if (price > 0) plan.set(Number(x.nmID), price); });
+      index[pid] = {
+        inAction: new Set(), eligible, plan,
+        manualCount: matched.length, manualItems: matched,
+        storedCount: (rec.items || []).length,
+        ownership: { status: catalog ? 'verified' : 'blocked', error: ownershipError,
+          catalogAt: catalog ? new Date(catalog.at).toISOString() : '',
+          matchedCount: matched.length, excludedCount: catalog ? (rec.items || []).length - matched.length : null,
+          excludedItems: [] },
+        manualFile: rec.fileName || '', manualAt: rec.at || '',
+        inferred: 0, source: 'local-file', localUnconfirmed: true, calendarKnown: false,
+        apiItems: [], apiUsed: false, apiError: '', apiConfirmed: new Set(), fileSnapshotCount: 0,
+        noApi: 'Акции нет в календаре WB — локальный импорт, участие и цены WB не подтверждены', auto: false,
+        observations: new Map(), managedIds: rec.selectedOnly === true ? new Set((rec.selectedIds || []).map(Number).filter((nm) => eligible.has(nm))) : null
+      };
+      localPromos.push({ id: Number(pid), name: 'Локальная акция ' + pid + ' (нет в календаре WB)', type: 'local',
+        startDateTime: '', endDateTime: '', requiredDiscountPct: 0, localUnconfirmed: true, calendarKnown: false });
+    }
     assertCatalogContext(context);
     if (catalog) assertCatalogCurrent(catalog);
     if (revision !== promoRevision) return promoIndex(false);
@@ -777,7 +900,7 @@ function createService(store, emit, electron, integrations) {
     promoCache.at = Date.now(); promoCache.context = context; promoCache.catalogRequest = catalogRequest;
     promoCache.ownershipExpiresAt = Object.keys(uploadedNoms).length ? (catalog ? catalog.at : promoCache.at) + CACHE_TTL_MS : Infinity;
     promoCache.index = index;
-    promoCache.promos = promos;
+    promoCache.promos = promos.concat(localPromos);
     promoCache.noApi = noApi;
     promoCache.hardErrors = hardErrors;
     promoCache.noApiCount = Object.keys(noApi).length;
@@ -854,7 +977,7 @@ function createService(store, emit, electron, integrations) {
       out.push({
         id: p.id,
         name: p.name,
-        type: p.type,
+        type: p.type, startDateTime: p.startDateTime, endDateTime: p.endDateTime,
         requiredDiscountPct: Number(p.requiredDiscountPct || p.participationPercentage || 0),
         planPrice: idx.plan.get(nm) || 0,
         absolutePlan: !!(uploaded[String(p.id)] && uploaded[String(p.id)].absolutePrices && source === 'file'),
@@ -864,6 +987,8 @@ function createService(store, emit, electron, integrations) {
         daysToStart: Number.isFinite(start) && start > now ? Math.round((start - now) / 86400000) : 0,
         source,
         auto: isAutoPromo(p),
+        localUnconfirmed: !!(p.localUnconfirmed || idx.localUnconfirmed),
+        calendarKnown: !(p.localUnconfirmed || idx.localUnconfirmed),
         noApi: idx.noApi || ''
       });
     }
@@ -1200,7 +1325,7 @@ function createService(store, emit, electron, integrations) {
       const secrets = store.loadSecrets();
       const demo = isDemo();
       return {
-        demo,
+        demo, dataContext: businessContext(),
         settings: s,
         keys: {
           single: maskKey(secrets.single || secrets.universal || secrets.all),
@@ -1391,7 +1516,7 @@ function createService(store, emit, electron, integrations) {
           source: cache.goods.source,
           fromCache: true,
           cachedAt: new Date(cache.goodsAt).toISOString(),
-          demo: isDemo(),
+          demo: isDemo(), dataContext: businessContext(),
           settings: s
         };
       }
@@ -1462,7 +1587,7 @@ function createService(store, emit, electron, integrations) {
         facts: factsMap(),
         source: cache.goods.source,
         fromCache: false,
-        demo: isDemo(),
+        demo: isDemo(), dataContext: businessContext(),
         settings: getSettings()
       };
     },
@@ -1470,76 +1595,13 @@ function createService(store, emit, electron, integrations) {
     'wb:sizes': async (nmID) => (isDemo() ? getDemo().getSizes(nmID) : getClient().getSizes(nmID)),
 
     /** Массовая установка цен и скидок. */
-    'wb:apply-prices': async (payload) => {
-      const items = (payload && payload.items) || [];
-      if (!items.length) throw new WBError('Выберите товары для изменения цены.', { code: 'EMPTY' });
-
-      const s = getSettings();
-      const current = new Map(((cache.goods && cache.goods.items) || []).map((g) => [Number(g.nmID), g]));
-
-      // Защита от случайной массовой ошибки и от карантина цен WB
-      const warnings = [];
-      for (const it of items) {
-        const old = current.get(Number(it.nmID));
-        if (!old) continue;
-        const oldSeller = old.price * (1 - old.discount / 100);
-        const base = it.price === undefined ? Number(old.price) : Number(it.price);
-        const discount = it.discount === undefined ? Number(old.discount) : Number(it.discount);
-        const newSeller = base * (1 - discount / 100);
-        if (oldSeller > 0 && newSeller < oldSeller / 3) {
-          warnings.push({ nmID: it.nmID, type: 'quarantine', message: `Цена упадёт более чем в 3 раза (${Math.round(oldSeller)} → ${Math.round(newSeller)}) — WB отправит товар в карантин.` });
-        }
-        const changePct = oldSeller > 0 ? Math.abs((newSeller - oldSeller) / oldSeller) * 100 : 0;
-        if (s.maxPriceChangePct && changePct > Number(s.maxPriceChangePct)) {
-          warnings.push({ nmID: it.nmID, type: 'big-change', message: `Изменение цены на ${changePct.toFixed(0)}% превышает порог ${s.maxPriceChangePct}%.` });
-        }
-        if (newSeller <= 0) warnings.push({ nmID: it.nmID, type: 'zero', message: 'Итоговая цена равна нулю.' });
-      }
-      const quarantine = warnings.filter((warning) => warning.type === 'quarantine');
-      if (!isDemo() && quarantine.length) notify('app-event', { type: 'quarantine', count: quarantine.length, warnings: quarantine });
-
-      if (isDemo()) {
-        const res = await getDemo().applyPrices(items);
-        invalidateGoodsCache();
-        return Object.assign({ demo: true, warnings }, res);
-      }
-
-      let res;
-      try {
-        res = await getClient().applyPrices(items);
-      } catch (error) {
-        notify('app-event', { type: 'sendError', failed: items.length, message: error && error.message || String(error), source: payload && payload.source || '' });
-        throw error;
-      }
-      invalidateGoodsCache();
-      cache.goodsAt = 0;
-
-      // сохраним задачу в историю
-      const tasks = store.loadTasks();
-      tasks.unshift({
-        taskId: Date.now(),
-        createdAt: new Date().toISOString(),
-        total: items.length,
-        ok: (res.details || []).filter((d) => d.status === 3).length,
-        failed: (res.details || []).filter((d) => d.status !== 3 && !d.error).length,
-        details: res.details || [],
-        warnings
-      });
-      store.saveTasks(tasks);
-      const details = Array.isArray(res.details) ? res.details : [];
-      const failed = details.filter((detail) => detail && ((detail.status && detail.status !== 3) || detail.error));
-      const succeeded = details.filter((detail) => detail && detail.status === 3);
-      if (failed.length) notify('app-event', { type: 'sendError', failed: failed.length, message: failed[0].error || failed[0].errorText || 'WB сообщил об ошибках части позиций.', source: payload && payload.source || '' });
-      if (succeeded.length || !failed.length) notify('app-event', { type: 'sendSuccess', count: succeeded.length || items.length, source: payload && payload.source || '' });
-
-      return Object.assign({ demo: false, warnings }, res);
-    },
+    'wb:apply-prices': async (payload) => applyPricesWithSafety(payload),
 
     'wb:apply-size-prices': async (payload) => applySizePrices(payload),
 
     'wb:upload-states': async () => {
       if (isDemo()) return getDemo().uploadStates();
-      return getClient().uploadStates();
+      return getClient().uploadStates(store.loadTasks().flatMap((task) => task.uploadIDs || []));
     },
 
     'tasks:history': async () => store.loadTasks(),
@@ -1684,13 +1746,21 @@ function createService(store, emit, electron, integrations) {
     },
 
     'wb:promo-join': async (payload) => {
+      const safety = await mutationSnapshot();
+      for (const value of (payload && payload.nomenclatures) || []) {
+        const good = safety.byNm.get(Number(value.nmID));
+        const check = checkCandidate(safety, value.nmID, value.price === undefined ? good && good.price : value.price, value.discount === undefined ? good && good.discount : value.discount);
+        if (!check.ok) throw new WBError('Вход в акцию заблокирован для ' + value.nmID + ': ' + check.issues.map((i) => i.message).join('; '), { code: 'ITEM_CRITICAL' });
+      }
+      mutationPreflight(safety, (payload && payload.nomenclatures) || []);
       const p = payload || {};
       const promotionID = Number(p.promotionID);
       const nomenclatures = p.nomenclatures || [];
       if (!nomenclatures.length) throw new WBError('Выберите товары для входа в акцию.', { code: 'EMPTY' });
       const res = isDemo()
         ? await getDemo().joinPromotion(promotionID, nomenclatures)
-        : await getClient().joinPromotion(promotionID, nomenclatures);
+        : await getClient().joinPromotion(promotionID, nomenclatures, { beforeSend: () => mutationPreflight(safety, nomenclatures) });
+      assertPriceContext(safety.context);
       if (p._journal !== false) {
         const goodsByNm = new Map((((cache.goods && cache.goods.items) || [])).map((g) => [String(g.nmID), g]));
         const resultByNm = new Map(((res && res.results) || []).map((r) => [String(r.nmID), r]));
@@ -1831,7 +1901,7 @@ function createService(store, emit, electron, integrations) {
         return {
           promoId: p.id, promoName: p.name, type: p.type,
           startDateTime: p.startDateTime || '', endDateTime: p.endDateTime || '',
-          source: composition.source, compositionKnown, inferredCount: composition.inferredCount, apiCount: composition.apiCount, apiPartial: composition.apiPartial,
+          source: composition.source, compositionKnown: idx.localUnconfirmed ? false : compositionKnown, localUnconfirmed: !!idx.localUnconfirmed, calendarKnown: !idx.localUnconfirmed, inferredCount: composition.inferredCount, apiCount: composition.apiCount, apiPartial: composition.apiPartial,
           compositionCount: compositionKnown ? composition.entries.length : null,
           selectedCount: compositionKnown ? selectedCount : null,
           apiConfirmedCount: idx.apiConfirmed ? idx.apiConfirmed.size : 0,
@@ -1948,7 +2018,7 @@ function createService(store, emit, electron, integrations) {
       const patch = (payload && payload.items) || {};
       for (const [k, v] of Object.entries(patch)) {
         if (v === null || v === undefined) { delete items[k]; continue; }
-        items[k] = Object.assign({}, items[k], v, { updatedAt: new Date().toISOString() });
+        items[k] = Object.assign({}, items[k], normalizeCostRecord(items[k], v), { updatedAt: new Date().toISOString() });
       }
       store.saveCosts(items);
       return { ok: true, count: Object.keys(items).length };
@@ -1984,20 +2054,31 @@ function createService(store, emit, electron, integrations) {
           const n = Number(String(val).replace(',', '.'));
           if (Number.isFinite(n)) next[field] = n;
         };
-        setIf('costPriceRub', r.costPriceRub !== undefined ? r.costPriceRub : r['Себестоимость']);
+        const rawCost = r.costEntered !== undefined ? r.costEntered : (r.costPriceRub !== undefined ? r.costPriceRub : r['Себестоимость']);
+        if (rawCost !== undefined && rawCost !== null && rawCost !== '') { const n = Number(String(rawCost).replace(',', '.')); if (Number.isFinite(n)) next.costEntered = n; }
+        const rawCurrency = r.currency !== undefined ? r.currency : r['Валюта'];
+        if (rawCurrency !== undefined && rawCurrency !== null && String(rawCurrency).trim()) {
+          const currency = String(rawCurrency).trim().toUpperCase();
+          if (!isCostCurrency(currency)) throw new WBError('Некорректный код валюты закупки «' + currency + '» у товара ' + nm + ': нужен трёхбуквенный код.', { code: 'BAD_CURRENCY' });
+          next.currency = currency;
+        }
         setIf('commissionPct', r.commissionPct !== undefined ? r.commissionPct : r['Комиссия %']);
         setIf('logisticsRub', r.logisticsRub !== undefined ? r.logisticsRub : r['Логистика ₽']);
         setIf('storageRub', r.storageRub !== undefined ? r.storageRub : r['Хранение ₽']);
         setIf('packagingRub', r.packagingRub !== undefined ? r.packagingRub : r['Упаковка ₽']);
         setIf('adPct', r.adPct !== undefined ? r.adPct : r['Реклама %']);
         setIf('adRub', r.adRub !== undefined ? r.adRub : r['Реклама ₽']);
+        setIf('otherPct', r.otherPct !== undefined ? r.otherPct : r['Прочие расходы %']);
+        setIf('otherRub', r.otherRub !== undefined ? r.otherRub : r['Прочие расходы ₽']);
+        WorkspaceConfig.costPatch(next);
         setIf('acceptRub', r.acceptRub !== undefined ? r.acceptRub : r['Приёмка ₽']);
         setIf('sppPct', r.sppPct !== undefined ? r.sppPct : r['СПП %']);
         setIf('volumeLiters', r.volumeLiters !== undefined ? r.volumeLiters : r['Объём л']);
         if (r.taxMode || r['Налог']) next.taxMode = String(r.taxMode || r['Налог']);
         if (r.note || r['Комментарий']) next.note = String(r.note || r['Комментарий']);
-        next.updatedAt = new Date().toISOString();
-        items[nm] = next;
+        const normalizedImport = normalizeCostRecord(cur, next);
+        normalizedImport.updatedAt = new Date().toISOString();
+        items[nm] = normalizedImport;
         updated++;
       }
       store.saveCosts(items);
@@ -2029,7 +2110,7 @@ function createService(store, emit, electron, integrations) {
         defaults: cfg.defaults,
         presets: cfg.presets,
         strategies: RP.STRATEGIES,
-        itemConfigs: store.loadItemConfigs(),
+        itemConfigs: publicItemConfigs(),
         competitors: await competitorsMap(),
         competitorCount: Object.keys(await competitorsMap()).length,
         scheduler: {
@@ -2047,7 +2128,10 @@ function createService(store, emit, electron, integrations) {
       const cur = repricerCfg();
       // принимаем и «плоский» патч ({limits: …}), и обёрнутый ({config: {limits: …}})
       const p = patch && patch.config && typeof patch.config === 'object' ? patch.config : (patch || {});
-      const next = RP.mergeConfig(Object.assign({}, cur, p));
+      WorkspaceConfig.assertTree(p);
+      if (['analyticsArchive', 'officialSpp'].some((k) => Object.prototype.hasOwnProperty.call(p, k))) throw new WBError('Историю/источники статистики нельзя изменять через настройки репрайсера.', { code: 'BAD_CONFIG' });
+      if (p.strategyTemplates) Object.values(p.strategyTemplates).forEach(WorkspaceConfig.template);
+      const next = RP.mergeConfig(cur, p);
 
       // суточный лимит не может быть меньше лимита за одно обновление
       const perUpdate = Number(next.limits.maxChangePerUpdatePct) || 0;
@@ -2066,20 +2150,51 @@ function createService(store, emit, electron, integrations) {
      */
     'costs:rates': async () => {
       const s = getSettings();
-      return { rates: s.costRates || {}, currencies: COST_CURRENCIES, currency: s.currency || 'RUB' };
+      const currencies = [...new Set([...COST_CURRENCIES, ...Object.keys(s.costRates || {}).map((code) => String(code).trim().toUpperCase()).filter(isCostCurrency)])];
+      return { rates: s.costRates || {}, currencies, currency: s.currency || 'RUB' };
     },
 
-    'repricer:item-configs:get': async () => store.loadItemConfigs(),
+    'repricer:item-configs:get': async () => publicItemConfigs(),
 
     'repricer:item-configs:save': async (payload) => {
-      const items = Object.assign({}, store.loadItemConfigs());
-      const patch = (payload && payload.items) || {};
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null) { delete items[k]; continue; }
-        items[k] = Object.assign({}, items[k], v, { updatedAt: new Date().toISOString() });
+      const items = { ...store.loadItemConfigs() }, patches = payload && payload.items || {};
+      WorkspaceConfig.assertTree(patches, 300000, 12);
+      for (const [nm, value] of Object.entries(patches)) {
+        if (!/^[1-9]\d*$/.test(nm) || !Number.isSafeInteger(Number(nm))) throw new WBError('Некорректный nmID настройки товара.', { code: 'BAD_NMID' });
+        if (value === null) { delete items[nm]; continue; }
+        if (!WorkspaceConfig.plain(value)) throw new WBError('Некорректные настройки товара.', { code: 'BAD_CONFIG' });
+        const clean = { ...value }, restart = clean.restartBoost === true;
+        delete clean.boostRuntime; delete clean.safetyLock; delete clean.restartBoost;
+        if (clean.strategy && !RP.STRATEGIES.some((s) => s.id === clean.strategy)) throw new WBError('Неизвестная стратегия.', { code: 'BAD_CONFIG' });
+        for (const key of ['targetMarginPct', 'minMarginPct', 'planSensitivityPct', 'targetTurnoverDays', 'competitorOffsetPct', 'elasticityPct']) {
+          if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '') WorkspaceConfig.template({ [key]: clean[key] });
+        }
+        if (Object.prototype.hasOwnProperty.call(clean, 'boost') && clean.boost !== null) {
+          const validated = Boost.validate(clean.boost), old = items[nm] && items[nm].boost;
+          let same = false;
+          try { same = !restart && old && !old.requiresRestart && Boost.signature(Boost.validate(old)) === Boost.signature(validated); } catch (_) {}
+          clean.boost = { ...validated, runId: same && old.runId || crypto.randomUUID(), startedAt: same && old.startedAt || new Date().toISOString() };
+        }
+        const next = { ...(items[nm] || {}) };
+        for (const [key, v] of Object.entries(clean)) {
+          if (v === null || v === '' || v === undefined) delete next[key];
+          else if (WorkspaceConfig.plain(v) && WorkspaceConfig.plain(next[key]) && key !== 'boost') next[key] = { ...next[key], ...v };
+          else next[key] = v;
+        }
+        if (restart || clean.boost && (!items[nm] || !items[nm].boost || clean.boost.runId !== items[nm].boost.runId)) delete next.boostRuntime;
+        next.updatedAt = new Date().toISOString(); items[nm] = next;
       }
       store.saveItemConfigs(items);
       return { ok: true, count: Object.keys(items).length };
+    },
+
+    'strategies:template': async (payload) => {
+      const id = String(payload && payload.strategy || '');
+      if (!RP.STRATEGIES.some((s) => s.id === id)) throw new WBError('Неизвестный шаблон стратегии.', { code: 'BAD_CONFIG' });
+      const values = WorkspaceConfig.template(payload.values), templates = { ...repricerCfg().strategyTemplates };
+      if (values === null) delete templates[id]; else templates[id] = values;
+      store.saveRepricer({ strategyTemplates: templates }, { replaceKeys: ['strategyTemplates'] });
+      return { ok: true, templates };
     },
 
     'repricer:competitors:get': async () => competitorsMap(),
@@ -2150,6 +2265,32 @@ function createService(store, emit, electron, integrations) {
 
     'repricer:calc': async (opts) => calcRepricer(opts || {}),
 
+    'repricer:boost-options': async (payload) => {
+      const rows = await buildContexts({ promos: true, noBoostOrders: true });
+      const row = rows.find((r) => String(r.ctx.nmID) === String(payload && payload.nmID));
+      if (!row) throw new WBError('Товар не найден в текущем кабинете.', { code: 'UNKNOWN_ITEM' });
+      return { ok: true, nmID: row.ctx.nmID, day: StatMath.dayKey(), config: row.itemCfg.boost || null,
+        promos: (row.ctx.promos || []).filter((p) => Number(p.planPrice) > 0 && (p.absolutePlan || p.source === 'api')).map((p) => ({ ...p, economy: row.ctx.econAt(Number(p.planPrice)) })).sort((a, b) => b.planPrice - a.planPrice) };
+    },
+    'analytics:load': async () => {
+      if (isDemo()) { await ensureDemoAnalytics(); return { ok: true, demo: true, note: 'ABC: сгенерированная демо-история, не данные реального кабинета.' }; }
+      const context = catalogContext(), from = StatMath.dayKey(Date.now() - 90 * StatMath.DAY);
+      const res = await getClient().getStatRows('/api/v1/supplier/sales', from + 'T00:00:00', { flag: 0, maxPages: Number(getSettings().statsMaxPages || 3), maxWaitMs: 200000 });
+      assertCatalogContext(context);
+      captureStats({ sales: res.rows || [], from, salesComplete: !res.truncated && !res.error });
+      return { ok: !res.truncated && !res.error, rows: (res.rows || []).length, truncated: !!res.truncated, note: 'Доступные 90 дней; 6 месяцев только при накопленной полной истории. Прибыль ABC — оценка по текущей себестоимости.' };
+    },
+    'spp:refresh': async () => {
+      if (isDemo()) return { ok: true, demo: true, count: 0, note: 'Демо: показываем демонстрационную СПП, официальных запросов не было.' };
+      const result = await loadOrdersIntoStats(30, true);
+      return { ...result, ok: result.ok !== false, count: Object.keys(officialSpp).length, note: 'СПП последних известных заказов WB, не гарантированная цена витрины сейчас.' };
+    },
+    'repricer:health': async () => {
+      const data = await calcRepricer({ full: true, previewOnly: true, noBoostOrders: true });
+      const issues = data.results.flatMap((r) => (r.issues || []).map((i) => ({ ...i, nmID: r.nmID, vendorCode: r.vendorCode, title: r.title })));
+      return { ok: true, issues, critical: issues.filter((i) => i.level === 'critical').length, warning: issues.filter((i) => i.level === 'warning').length, blockedItems: data.results.filter((r) => r.autoBlocked).length };
+    },
+
     // ─────────── Предложение репрайсера: фаза «показать» и фаза «отправить» ───────────
 
     /**
@@ -2219,7 +2360,14 @@ function createService(store, emit, electron, integrations) {
       const items = store.loadPriceDrafts();
       const only = (payload && payload.nmIDs) || null;
       if (Array.isArray(only) && only.length) {
-        only.forEach((nm) => delete items[String(Number(nm))] );
+        only.forEach((nm) => {
+          const key = String(Number(nm)), expected = payload && payload.expectedItems;
+          if (expected) {
+            const was = expected[key], now = items[key];
+            if (!was || !now || Number(was.basePrice) !== Number(now.basePrice) || Number(was.discount) !== Number(now.discount) || was.savedAt && was.savedAt !== now.savedAt || String(was.note || '') !== String(now.note || '')) return;
+          }
+          delete items[key];
+        });
         store.savePriceDrafts(items);
         return { ok: true, count: Object.keys(items).length, items };
       }
@@ -2249,11 +2397,13 @@ function createService(store, emit, electron, integrations) {
       const priceHist = (store.loadPriceHistory()[String(nmID)] || []).slice(-40).reverse();
       const competitors = (await competitorsMap())[String(nmID)] || [];
       const itemConfig = (store.loadItemConfigs() || {})[String(nmID)] || null;
+      const enteredCosts = (store.loadCosts().items || {})[String(nmID)] || {};
       const promos = item ? promosForItem(item, pi) : [];
       // остатки по складам WB: сумма + разбивка по складам и регионам (из кэша)
       const stocks = stocksMap()[String(nmID)] || null;
-      const wbStock = stocks && stocks.total > 0;
-      const stockValue = wbStock ? Number(stocks.total) : Number(overrides.stock || 0);
+      const wbStock = !!stocks;
+      const manualStock = enteredCosts.stock !== undefined && enteredCosts.stock !== null && enteredCosts.stock !== '';
+      const stockValue = wbStock ? Number(stocks.total || 0) : Number(overrides.stock || 0);
       return {
         ok: !!item,
         demo: isDemo(),
@@ -2265,11 +2415,11 @@ function createService(store, emit, electron, integrations) {
         card,
         stocks,
         stock: stockValue,
-        stockSource: wbStock ? 'wb' : (String(overrides.source || '') === 'user' ? 'manual' : 'demo'),
+        stockSource: wbStock ? 'wb' : (manualStock ? 'manual' : (isDemo() ? 'demo' : 'unknown')),
         promos,
         promosNoApi: pi ? Object.keys(pi.noApi || {}).length : 0,
         competitors,
-        itemConfig,
+        itemConfig, enteredCosts,
         drafts,
         proposal,
         recalcHistory: recalc,
@@ -2353,7 +2503,7 @@ function createService(store, emit, electron, integrations) {
       for (const [nm, list] of Object.entries(recalc)) {
         (Array.isArray(list) ? list : []).forEach((h) => {
           events.push({
-            kind: h.phase === 'send' ? 'price' : 'propose',
+            kind: h.phase === 'send' ? 'price' : h.phase === 'submitted' ? 'submitted' : 'propose',
             at: h.at, nmID: Number(nm),
             vendorCode: vendorOf(nm), title: titleOf(nm),
             basePrice: Number(h.basePrice) || 0, discount: Number(h.discount) || 0,
@@ -2518,93 +2668,43 @@ function createService(store, emit, electron, integrations) {
       return Object.assign({ demo: isDemo() }, result);
     },
 
-    'repricer:promo-apply': async (payload) => applyPromoActions((payload && payload.results) || null, payload || {}),
+    'repricer:promo-apply': async (payload) => {
+      const fresh = await calcRepricer({ full: true, promos: true });
+      const requested = payload && Array.isArray(payload.results) ? new Map(payload.results.map((r) => [String(r.nmID), (r.promoChosen || r.chosen || {}).type])) : null;
+      const rows = requested ? fresh.results.filter((r) => requested.has(String(r.nmID)) && (!requested.get(String(r.nmID)) || requested.get(String(r.nmID)) === (r.promoChosen || {}).type)) : fresh.results;
+      return applyPromoActions(rows, payload || {});
+    },
 
     /**
      * Точечный выход из акции: поднять цену выше плановой (API WB исключить товар не даёт)
      * и поставить товар в очередь возврата прежней цены.
      */
     'repricer:promo-exit': async (payload) => {
-      const list = (payload && payload.items) || [];
+      const list = payload && payload.items || [];
       if (!list.length) return { ok: true, exited: 0, message: 'Нет товаров для выхода' };
-      const g = await handlers['wb:goods']({});
-      const byNm = {};
-      (g.items || []).forEach((it) => { byNm[String(it.nmID)] = it; });
-
-      // собираем «результаты» в том же виде, в каком их ждёт sendPrices
-      const results = [];
-      const exits = {};
-      const now = new Date().toISOString();
-      list.forEach((l) => {
-        const key = String(l.nmID);
-        const it = byNm[key];
-        if (!it) return;
-        const curBase = num(it.price);
-        const curDisc = num(it.discount);
-        const curSeller = curBase * (1 - curDisc / 100);
-        const raiseTo = num(l.raiseTo, curSeller * 1.05);
-        const pair = RP.toBaseAndDiscount(raiseTo, curDisc);
-        const restorePair = { basePrice: Math.round(curBase), discount: Math.round(curDisc), sellerPrice: round2(curSeller), mode: 'restore-promo-exit' };
-
-        results.push({
-          nmID: Number(l.nmID),
-          vendorCode: it.vendorCode,
-          title: it.title || '',
-          needSend: true,
-          promoChosen: { type: 'exit', price: round2(raiseTo), promoIds: [l.promoId].filter(Boolean), promoNames: [l.promoName].filter(Boolean), reason: l.reason || 'Ручной выход из акции: цена поднята выше плановой', restoreSellerPrice: round2(curSeller), restorePair },
-          current: { basePrice: curBase, discount: curDisc, sellerPrice: round2(curSeller) },
-          proposed: Object.assign({ basePrice: pair.basePrice, discount: pair.discount, sellerPrice: round2(pair.sellerPrice), priceMode: 'promo-exit' }, {}),
-          delta: { abs: round2(pair.sellerPrice - curSeller), pct: curSeller ? round2((pair.sellerPrice - curSeller) / curSeller * 100) : 0, profitPerUnit: 0, profitMonth: 0 }
-        });
-
-        exits[key] = {
-          nmID: Number(l.nmID),
-          vendorCode: it.vendorCode,
-          title: it.title || '',
-          promoIds: [l.promoId].filter(Boolean),
-          promoNames: [l.promoName].filter(Boolean),
-          raisedTo: round2(pair.sellerPrice),
-          raisedBase: Math.round(pair.basePrice),
-          raisedDiscount: Math.round(pair.discount),
-          restoreSellerPrice: round2(curSeller),
-          restorePair,
-          at: now,
-          status: 'waiting'
-        };
-      });
-
-      if (!results.length) return { ok: false, exited: 0, message: 'Не найдено товаров для выхода' };
-
-      const res = await sendPrices(results, 'promo-exit');
-      // в очередь возврата — только то, что WB принял
-      const accepted = (res.details || []).filter((d) => !d.error && d.status !== 4).map((d) => String(d.nmID));
-      const patch = {};
-      const acceptedNms = accepted.length ? accepted : results.map((r) => String(r.nmID));
-      acceptedNms.forEach((k) => { if (exits[k]) patch[k] = exits[k]; });
-      if (Object.keys(patch).length) store.savePromoExits(patch);
-      store.appendPromoJournal(results.filter((r) => Object.prototype.hasOwnProperty.call(patch, String(r.nmID))).map((r) => ({
-        at: now,
-        nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
-        action: 'exit',
-        promoId: (r.promoChosen && r.promoChosen.promoIds || [])[0] || null,
-        promoName: ((r.promoChosen && r.promoChosen.promoNames) || []).join(', '),
-        priceBefore: U2(r.current && r.current.sellerPrice),
-        priceAfter: U2(r.proposed && r.proposed.sellerPrice),
-        reason: (r.promoChosen && r.promoChosen.reason) || 'Ручной выход из акции',
-        source: 'promo-calendar-exit',
-        ok: true
-      })));
-
-      invalidateGoodsCache();
-      promoCache.at = 0;
-      return {
-        ok: true,
-        exited: Object.keys(patch).length,
-        sent: res.sent,
-        demo: isDemo(),
-        failed: (res.details || []).filter((d) => d.error || d.status === 4),
-        exitResult: { sent: res.sent, details: res.details }
-      };
+      const context = businessContext();
+      await handlers['wb:goods']({ force: true });
+      const rows = await buildContexts({ promos: true, noBoostOrders: true }), byNm = new Map(rows.map((r) => [Number(r.ctx.nmID), r]));
+      assertPriceContext(context);
+      const results = [], records = {}, now = new Date().toISOString();
+      for (const l of list) {
+        const row = byNm.get(Number(l.nmID)); if (!row) continue;
+        const promo = row.ctx.promos.find((p) => String(p.id) === String(l.promoId));
+        if (!promo) throw new WBError('Акция/товар не найдены в проверенном составе текущего кабинета.', { code: 'NO_PROMO' });
+        const { ctx, cfg, itemCfg } = row, threshold = Number(promo.planPrice), absolute = promo.absolutePlan || promo.source === 'api';
+        if (!(threshold > 0)) throw new WBError('Нет проверенного порога акции. Обновите состав.', { code: 'PROMO_NO_THRESHOLD' });
+        const safe = RP.computeItem(ctx, cfg, itemCfg), wanted = Math.max(threshold * 1.02 + 1, Number(safe.corridor.min), Number(l.raiseTo) || 0);
+        const pair = absolute ? RP.toBaseAndDiscount(wanted, { basePrice: ctx.basePrice, discount: ctx.discount }, cfg, itemCfg) : RP.exitPairForPromo(ctx.basePrice, Number(promo.requiredDiscountPct), wanted, { canChangeBasePrice: cfg.priceEdit.canChangeBasePrice, canCancelDiscount: cfg.priceEdit.canCancelDiscount, curSeller: ctx.sellerPrice, stepLimitPct: 0 });
+        const price = U2(pair.basePrice * (1 - pair.discount / 100));
+        if (absolute ? price <= threshold + .005 : !(Number(promo.requiredDiscountPct) > Number(pair.discount))) throw new WBError('При заданных ограничениях безопасный выход не достигнут.', { code: 'PROMO_EXIT_THRESHOLD' });
+        const restorePair = { basePrice: ctx.basePrice, discount: ctx.discount, sellerPrice: ctx.sellerPrice, mode: 'restore-promo-exit' };
+        results.push({ nmID: ctx.nmID, vendorCode: ctx.vendorCode, title: ctx.title, needSend: true, current: { basePrice: ctx.basePrice, discount: ctx.discount, sellerPrice: ctx.sellerPrice }, proposed: { basePrice: pair.basePrice, discount: pair.discount, sellerPrice: price }, sizePriceMode: ctx.sizePriceMode });
+        records[ctx.nmID] = { nmID: ctx.nmID, vendorCode: ctx.vendorCode, title: ctx.title, promoIds: [promo.id], promoNames: [promo.name], raisedTo: price, raisedBase: pair.basePrice, raisedDiscount: pair.discount, restoreSellerPrice: ctx.sellerPrice, restorePair, at: now, status: 'waiting-exit' };
+      }
+      const sent = await sendPrices(results, 'promo-exit'), accepted = new Set((sent.confirmedIDs || []).map(String)), pending = store.loadPromoExits();
+      for (const nm of accepted) pending[nm] = records[nm];
+      if (accepted.size) { store.savePromoExits(pending); store.appendPromoJournal([...accepted].map((nm) => ({ at: now, nmID: Number(nm), vendorCode: records[nm].vendorCode, title: records[nm].title, action: 'exit', promoId: records[nm].promoIds[0], promoName: records[nm].promoNames[0], priceBefore: records[nm].restoreSellerPrice, priceAfter: records[nm].raisedTo, reason: 'Отправлена и подтверждена WB цена для выхода; членство акции ещё проверяется отдельно.', source: 'promo-calendar-exit', ok: true }))); }
+      return { ...sent, ok: true, exited: accepted.size, pendingWb: (sent.sent || 0) - accepted.size, demo: isDemo() };
     },
 
     'repricer:promo-restore': async (payload) => restorePromoExits(null, payload || {}),
@@ -2751,7 +2851,7 @@ function createService(store, emit, electron, integrations) {
       const T = {
         salesQty: 0, returnsQty: 0, revenue: 0, commission: 0, logistics: 0, storage: 0,
         acceptance: 0, acquiring: 0, penalties: 0, forPay: 0, wbAfterLogistics: 0,
-        cogs: 0, packaging: 0, ad: 0, tax: 0, profit: 0, forPayFromWb: 0
+        cogs: 0, returnedCogs: 0, cogsWithReturnWriteoff: 0, packaging: 0, ad: 0, other: 0, tax: 0, profit: 0, profitWithReturnCogs: 0, forPayFromWb: 0
       };
       const byCat = {};
       const byDay = {};
@@ -2779,16 +2879,23 @@ function createService(store, emit, electron, integrations) {
         // поэтому в forPay их нет и вычитать их нужно следующим шагом.
         // Раньше я вычитал их только в сверке — прибыль оказывалась завышенной
         // ровно на сумму логистики и хранения.
-        const hasForPay = Number(f.forPayTotal) > 0;
+        const hasForPay = f.forPayKnown === true;
         const forPay = hasForPay ? Number(f.forPayTotal) : (revenue - commission - acquiring);
 
-        const cogs = qty * (Number(p.costPriceRub) || 0);
+        const unitCost = Number(p.costPriceRub) || 0;
+        const returnedCogs = ret * unitCost;
+        const cogsWithReturnWriteoff = qty * unitCost;
+        // Основная прибыль не списывает себестоимость возвращённой единицы
+        // (товар вернулся на склад); рядом отдаём справочный вариант со списанием.
+        const cogs = (qty - ret) * unitCost;
         const packaging = qty * (Number(p.packagingRub) || 0);
         const ad = revenue * (Number(p.adPct) || 0) / 100 + qty * (Number(p.adRub) || 0);
+        const other = revenue * (Number(p.otherPct) || 0) / 100 + qty * (Number(p.otherRub) || 0);
         const tax = revenue * (Number(p.taxRatePct) || 0) / 100;
         // после «к перечислению» отдельно снимаем логистику, хранение, приёмку и штрафы
         const wbAfterLogistics = forPay - logistics - storage - acceptance - penalties;
-        const profit = wbAfterLogistics - cogs - packaging - ad - tax;
+        const profit = wbAfterLogistics - cogs - packaging - ad - other - tax;
+        const profitWithReturnCogs = wbAfterLogistics - cogsWithReturnWriteoff - packaging - ad - other - tax;
 
         if (!(Number(p.costPriceRub) > 0)) missingCost.push({ nmID: item.nmID, vendorCode: item.vendorCode || '', title: item.title || '' });
 
@@ -2796,14 +2903,14 @@ function createService(store, emit, electron, integrations) {
         T.revenue += revenue; T.commission += commission; T.logistics += logistics;
         T.storage += storage; T.acceptance += acceptance; T.acquiring += acquiring;
         T.penalties += penalties; T.forPay += forPay; T.wbAfterLogistics += wbAfterLogistics;
-        T.cogs += cogs; T.packaging += packaging; T.ad += ad; T.tax += tax; T.profit += profit;
+        T.cogs += cogs; T.returnedCogs += returnedCogs; T.cogsWithReturnWriteoff += cogsWithReturnWriteoff; T.packaging += packaging; T.ad += ad; T.other += other; T.tax += tax; T.profit += profit; T.profitWithReturnCogs += profitWithReturnCogs;
         if (hasForPay) T.forPayFromWb++;
 
         const cat = item.categoryName || 'Без категории';
-        const c = byCat[cat] || (byCat[cat] = { category: cat, salesQty: 0, revenue: 0, commission: 0, logistics: 0, forPay: 0, wbAfterLogistics: 0, cogs: 0, ad: 0, tax: 0, profit: 0, items: 0 });
+        const c = byCat[cat] || (byCat[cat] = { category: cat, salesQty: 0, revenue: 0, commission: 0, logistics: 0, forPay: 0, wbAfterLogistics: 0, cogs: 0, returnedCogs: 0, cogsWithReturnWriteoff: 0, ad: 0, other: 0, tax: 0, profit: 0, profitWithReturnCogs: 0, items: 0 });
         c.salesQty += qty; c.revenue += revenue; c.commission += commission; c.logistics += logistics;
         c.forPay += forPay; c.wbAfterLogistics += wbAfterLogistics;
-        c.cogs += cogs; c.ad += ad; c.tax += tax; c.profit += profit; c.items++;
+        c.cogs += cogs; c.returnedCogs += returnedCogs; c.cogsWithReturnWriteoff += cogsWithReturnWriteoff; c.ad += ad; c.other += other; c.tax += tax; c.profit += profit; c.profitWithReturnCogs += profitWithReturnCogs; c.items++;
 
         items.push({
           nmID: item.nmID, vendorCode: item.vendorCode || '', title: item.title || '', category: cat,
@@ -2811,8 +2918,8 @@ function createService(store, emit, electron, integrations) {
           revenue: r2(revenue), commission: r2(commission), logistics: r2(logistics),
           storage: r2(storage), acquiring: r2(acquiring), forPay: r2(forPay),
           wbAfterLogistics: r2(wbAfterLogistics),
-          cogs: r2(cogs), packaging: r2(packaging), ad: r2(ad), tax: r2(tax),
-          profit: r2(profit),
+          cogs: r2(cogs), returnedCogs: r2(returnedCogs), cogsWithReturnWriteoff: r2(cogsWithReturnWriteoff), packaging: r2(packaging), ad: r2(ad), other: r2(other), tax: r2(tax),
+          profit: r2(profit), profitWithReturnCogs: r2(profitWithReturnCogs), marginWithReturnCogsPct: revenue > 0 ? r2(profitWithReturnCogs / revenue * 100) : 0,
           marginPct: revenue > 0 ? r2(profit / revenue * 100) : 0,
           commissionPct: Number(f.commissionPctAvg) || 0,
           logisticsAvg: Number(f.logisticsAvg) || 0,
@@ -2834,13 +2941,15 @@ function createService(store, emit, electron, integrations) {
       const cats = Object.values(byCat).map((c) => Object.assign(c, {
         revenue: r2(c.revenue), commission: r2(c.commission), logistics: r2(c.logistics),
         forPay: r2(c.forPay), wbAfterLogistics: r2(c.wbAfterLogistics),
-        cogs: r2(c.cogs), ad: r2(c.ad), tax: r2(c.tax), profit: r2(c.profit),
+        cogs: r2(c.cogs), returnedCogs: r2(c.returnedCogs), cogsWithReturnWriteoff: r2(c.cogsWithReturnWriteoff), ad: r2(c.ad), other: r2(c.other), tax: r2(c.tax), profit: r2(c.profit), profitWithReturnCogs: r2(c.profitWithReturnCogs),
         marginPct: c.revenue > 0 ? r2(c.profit / c.revenue * 100) : 0
       })).sort((a, b) => b.profit - a.profit);
 
       const round = (o) => Object.keys(o).forEach((k) => { if (typeof o[k] === 'number') o[k] = r2(o[k]); });
       round(T);
       T.marginPct = T.revenue > 0 ? r2(T.profit / T.revenue * 100) : 0;
+      T.marginWithReturnCogsPct = T.revenue > 0 ? r2(T.profitWithReturnCogs / T.revenue * 100) : 0;
+      T.avgProfitPerUnitWithReturnCogs = T.salesQty > 0 ? r2(T.profitWithReturnCogs / T.salesQty) : 0;
       T.commissionPct = T.revenue > 0 ? r2(T.commission / T.revenue * 100) : 0;
       T.logisticsPct = T.revenue > 0 ? r2(T.logistics / T.revenue * 100) : 0;
       T.avgCheck = T.salesQty > 0 ? r2(T.revenue / T.salesQty) : 0;
@@ -2958,12 +3067,13 @@ function createService(store, emit, electron, integrations) {
     const errors = [];
     const withOrders = o.withOrders === undefined ? !!o.patient : !!o.withOrders;
     let meta = { salesPages: 0, ordersPages: 0, truncated: false };
-    const from = daysAgoIso(d);
+    const from = StatMath.dayKey(Date.now() - d * StatMath.DAY) + 'T00:00:00', context = catalogContext();
     const rows = await getClient().getSalesAggregated(from, {
       withOrders,
       maxPages: Number(o.maxPages || s.statsMaxPages || 3),
       maxWaitMs: o.patient ? 200000 : undefined,
       windowFrom: from.slice(0, 10),
+      onRows: (detail) => { assertCatalogContext(context); captureStats(detail); },
       onMeta: (m) => { meta = m || meta; },
       onError: (e, source) => errors.push({
         source,
@@ -2975,6 +3085,7 @@ function createService(store, emit, electron, integrations) {
       })
     });
 
+    assertCatalogContext(context);
     const ordersFailed = errors.some((x) => x.source === 'orders');
     if (!rows.length && errors.length) {
       const prev = cache.stats || [];
@@ -3028,22 +3139,28 @@ function createService(store, emit, electron, integrations) {
     }
     const d = Number(days) || (cache.statsMeta && cache.statsMeta.days) || 30;
     const s = getSettings();
-    const from = daysAgoIso(d);
+    const from = StatMath.dayKey(Date.now() - d * StatMath.DAY) + 'T00:00:00', context = catalogContext();
     const winFrom = from.slice(0, 10);
     const res = await getClient().getStatRows('/api/v1/supplier/orders', from, {
       flag: 0,
       maxPages: Number(s.statsMaxPages || 3),
       maxWaitMs: 200000
     });
-    const rows = (res.rows || []).filter((r) => {
+    assertCatalogContext(context);
+    captureStats({ orders: res.rows || [], ordersComplete: !res.truncated && !res.error });
+    if (res.truncated || res.error) throw new WBError('Заказы получены не полностью. Предыдущие итоги сохранены; повторите загрузку позже.', { code: 'ORDERS_INCOMPLETE' });
+    const rows = StatMath.dedupe(res.rows || [], 'orders').filter((r) => {
       const dt = String(r.date || '').slice(0, 10);
       return !dt || dt >= winFrom;
     });
-    const base = (cache.stats || []).slice();
+    const base = (cache.stats || []).map((r) => ({ ...r }));
     const byNm = new Map(base.map((x) => [String(x.nmID), x]));
+    // Повторная загрузка заменяет окно заказов, а не складывает его второй раз.
+    base.forEach((row) => { row.ordersQty = 0; row.ordersSum = 0; });
     let added = 0;
     const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
     for (const r of rows) {
+      if (StatMath.canceled(r)) continue;
       const nm = Number(r.nmId || r.nmID || 0);
       if (!nm) continue;
       let a = byNm.get(String(nm));
@@ -3057,13 +3174,13 @@ function createService(store, emit, electron, integrations) {
         added++;
       }
       a.ordersQty = Number(a.ordersQty || 0) + 1;
-      a.ordersSum = r2(Number(a.ordersSum || 0) + Number(r.price || 0));
+      a.ordersSum = r2(Number(a.ordersSum || 0) + (StatMath.sellerPrice(r) || 0));
     }
     cache.stats = base;
     cache.statsAt = Date.now();
     cache.statsMeta = Object.assign({}, cache.statsMeta, {
-      withOrders: true,
-      ordersPending: false,
+      withOrders: !res.truncated && !res.error,
+      ordersPending: !!res.truncated || !!res.error,
       ordersPages: res.pages || 0,
       ordersAt: new Date().toISOString()
     });
@@ -3248,7 +3365,7 @@ function createService(store, emit, electron, integrations) {
    */
   function invalidateAllCaches(opts) {
     const keep = !!(opts && opts.keepExpensive);
-    if (!keep) { catalogEpoch++; promoLifecycleReady = false; promoLifecycle = new Map(); promoCache.noApi = {}; }
+    if (!keep) { officialSpp = {}; officialSppContext = ''; boostOrders = null; boostOrdersPending = null; sched.lastRun = null; catalogEpoch++; promoLifecycleReady = false; promoLifecycle = new Map(); promoCache.noApi = {}; }
     promoRevision++;
     invalidateGoodsCache();
     if (!keep) {
@@ -3265,7 +3382,8 @@ function createService(store, emit, electron, integrations) {
   }
 
   function repricerCfg() {
-    return RP.mergeConfig(store.loadRepricer());
+    const { analyticsArchive, officialSpp: spp, ...config } = store.loadRepricer();
+    return RP.mergeConfig(config);
   }
 
   /** Конкуренты: пользовательские данные приоритетнее, в демо недостающее дополняется демо-набором. */
@@ -3406,10 +3524,11 @@ function createService(store, emit, electron, integrations) {
 
   /** Собирает контекст товара для движка репрайсера. */
   async function buildContexts(opts) {
+    const context = catalogContext();
     const g = await handlers['wb:goods']({});
     const cfg = repricerCfg();
     const comps = await competitorsMap();
-    const itemConfigs = store.loadItemConfigs();
+    const itemConfigs = store.loadItemConfigs(), draftsForContext = store.loadPriceDrafts();
     const dayStart = store.dayStartPrices();
     const facts = factsMap();
     // товары, выведенные из акции: цену держим повышенной, пока автоакция не закончится
@@ -3420,6 +3539,8 @@ function createService(store, emit, electron, integrations) {
     // индекс акций нужен не всегда (это несколько запросов к WB) — грузим по запросу
     const pi = (opts && opts.promos === false) ? null : await promoIndex(!!(opts && opts.promosForce)).catch(() => null);
     const promoIndexNow = pi;
+    if (!(opts && opts.noBoostOrders) && (cfg.defaults.strategy === 'boost' || Object.values(itemConfigs).some((ic) => ic.strategy === 'boost'))) await ensureBoostOrders();
+    assertCatalogContext(context);
     const now = Date.now();
     const d = new Date(now);
     const monthDays = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
@@ -3439,15 +3560,22 @@ function createService(store, emit, electron, integrations) {
       const ov = EC.preferFacts(rawOv, fact, settings);
       const stats = statsByNm[key] || {};
       const ic = itemConfigs[key] || {};
-      const merged = RP.itemConfig(cfg.defaults, ic);
+      const merged = RP.itemConfig(cfg.defaults, ic, cfg.strategyTemplates);
+      const manualBase = (draftsForContext[key] || {}).basePrice;
+      if (!(Number(item.price) > 0) && Number(manualBase) > 0 && !(Number(merged.basePriceTarget) > 0)) merged.basePriceTarget = Number(manualBase);
 
       const seller = Number(item.price) * (1 - Number(item.discount) / 100);
+      const statsKnown = Object.prototype.hasOwnProperty.call(statsByNm, key);
       const perDay = stats.salesQty ? stats.salesQty / 30 : Number(ov.salesPerDay || 0);
       // Остаток: из загруженных остатков WB (по складам) — приоритетнее ручного
       // ввода; если остатки не загружены — ручной ввод/демо, с пометкой источника.
       const wbStock = stocksMap()[key];
-      const stock = wbStock ? Number(wbStock.total) : Number(ov.stock || 0);
-      const stockSource = wbStock ? 'wb' : (ov.source === 'user' ? 'manual' : 'demo');
+      const manualStock = (() => { const c = (costsMap()[key] || {}); return c.stock !== undefined && c.stock !== null && c.stock !== ''; })();
+      const stock = wbStock ? Number(wbStock.total || 0) : Number(ov.stock || 0);
+      const stockSource = wbStock ? 'wb' : (manualStock ? 'manual' : (isDemo() ? 'demo' : 'unknown'));
+      const promosForCtx = pi ? promosForItem(item, pi) : [];
+      const activePromo = promosForCtx.find((x) => x.inAction && Number(x.planPrice) > 0) || promosForCtx.find((x) => x.inAction);
+      const statsMissing = !statsKnown && !(Number(ov.salesPerDay) > 0);
       const salesMonthQty = perDay > 0 ? perDay * dayOfMonth : 0;
 
       const p = EC.resolveParams(settings, item, ov, fact);
@@ -3477,11 +3605,13 @@ function createService(store, emit, electron, integrations) {
           orders30: Number(stats.ordersQty || 0),
           returns30: Number(stats.returnsQty || 0),
           turnoverDays: perDay > 0 ? stock / perDay : (stock > 0 ? 999 : 0),
-          inPromo: !!item.inPromo,
-          promoPrice: Number(item.plannedPrice) > 0 ? Number(item.plannedPrice) : undefined,
+          statsKnown,
+          statsMissing,
+          inPromo: !!activePromo,
+          promoPrice: activePromo && Number(activePromo.planPrice) > 0 ? Number(activePromo.planPrice) : undefined,
           promoDiscountPct: Number(item.plannedDiscount || 0),
           competitors: comps[key] || [],
-          promos: pi ? promosForItem(item, pi) : [],
+          promos: promosForCtx,
           promoHold: promoHoldFor(key, exitsPend, promoIndexNow),
           rrp: merged.rrp,
           // ── данные для блоков таблицы репрайсера (задание D) ──
@@ -3508,6 +3638,7 @@ function createService(store, emit, electron, integrations) {
           params: p,
           factCosts: fact || null,
           factWindowDays: Number((fact && fact.windowDays) || 0),
+          priceObservedAt: g.catalogAt || (g.cachedAt || new Date(cache.goodsAt).toISOString()),
           now,
           monthDays
         },
@@ -3517,18 +3648,109 @@ function createService(store, emit, electron, integrations) {
     });
   }
 
+  function restoreOfficialSpp() {
+    const context = businessContext();
+    if (officialSppContext === context) return;
+    const saved = store.loadRepricer().officialSpp;
+    officialSpp = saved && saved.context === context ? { ...saved.items } : {};
+    officialSppContext = context;
+  }
+
+  function captureStats(detail) {
+    restoreOfficialSpp();
+    const context = businessContext();
+    if (detail.sales) {
+      officialSpp = StatMath.latestSpp(detail.sales, 'sales', officialSpp);
+      const old = store.loadRepricer().analyticsArchive;
+      const next = StatMath.archiveSales(old && old.context === context ? old : null, detail.sales, detail.from, Date.now(), detail.salesComplete);
+      store.saveRepricer({ analyticsArchive: { ...next, context } }, { replaceKeys: ['analyticsArchive'] });
+    }
+    if (detail.orders) officialSpp = StatMath.latestSpp(detail.orders, 'orders', officialSpp);
+    store.saveRepricer({ officialSpp: { context, items: officialSpp } }, { replaceKeys: ['officialSpp'] });
+  }
+
+  async function ensureDemoAnalytics() {
+    const context = businessContext(), old = store.loadRepricer().analyticsArchive;
+    if (old && old.context === context && old.demo && old.through === StatMath.dayKey(Date.now() - StatMath.DAY)) return;
+    const goods = await getDemo().getGoods({ maxItems: 100000 });
+    const days = {};
+    for (let i = 180; i >= 1; i--) {
+      const date = StatMath.dayKey(Date.now() - i * StatMath.DAY), products = {};
+      for (const [j, good] of (goods.items || []).entries()) {
+        const qty = Math.max(0, (j * 17 + i * 7) % 23 - 5);
+        if (qty) products[good.nmID] = { qty, revenue: U2(qty * Number(good.price) * (1 - Number(good.discount) / 100)) };
+      }
+      days[date] = { covered: true, products, updatedAt: new Date().toISOString() };
+    }
+    store.saveRepricer({ analyticsArchive: { version: 1, context, demo: true, through: StatMath.dayKey(Date.now() - StatMath.DAY), days } }, { replaceKeys: ['analyticsArchive'] });
+  }
+
+  async function ensureBoostOrders(force) {
+    const context = catalogContext(), business = businessContext(), day = StatMath.dayKey();
+    if (boostOrders && boostOrders.context === business && boostOrders.day === day && Date.now() - boostOrders.at < 60000) return boostOrders;
+    if (boostOrdersPending && boostOrdersPending.context === business && boostOrdersPending.day === day) return boostOrdersPending.task;
+    const at = Date.now();
+    const task = (async () => {
+      try {
+        const res = isDemo() ? { rows: [], demo: true } : await getClient().getStatRows('/api/v1/supplier/orders', day + 'T00:00:00', { flag: 0, maxPages: Number(getSettings().statsMaxPages || 3), maxWaitMs: 0 });
+        assertCatalogContext(context); captureStats({ orders: res.rows || [] });
+        boostOrders = { rows: StatMath.dedupe(res.rows || [], 'orders'), context: business, day, at, complete: !res.truncated && !res.error, error: res.error ? res.error.message : '' };
+      } catch (e) {
+        assertCatalogContext(context);
+        boostOrders = { rows: [], context: business, day, at, complete: false, error: 'Заказы WB не обновились: ' + e.message };
+      }
+      return boostOrders;
+    })();
+    boostOrdersPending = { context: business, day, task };
+    try { return await task; } finally { if (boostOrdersPending && boostOrdersPending.task === task) boostOrdersPending = null; }
+  }
+
+  function publicItemConfigs() {
+    return Object.fromEntries(Object.entries(store.loadItemConfigs()).map(([nm, value]) => {
+      const { boostRuntime, ...config } = value;
+      if (boostRuntime) config.boostProgress = { day: boostRuntime.day, counts: boostRuntime.counts, completed: boostRuntime.completed, activeSince: boostRuntime.activeSince };
+      return [nm, config];
+    }));
+  }
+
+  function inputSnapshot() {
+    const settings = { ...getSettings() };
+    for (const key of ['lastSync', 'lastDataRefreshAt', 'lastDataRefreshOk', 'factsLoadedAt']) delete settings[key];
+    return { context: businessContext(), settings, configs: store.loadItemConfigs(), costs: costsMap(), drafts: store.loadPriceDrafts(), cfg: repricerCfg(), facts: factsMap(), promoRevision };
+  }
+  function inputFingerprint(nmID, snapshot) {
+    const data = snapshot || inputSnapshot(), nm = String(nmID), ic = { ...(data.configs[nm] || {}) };
+    for (const key of ['boostRuntime', 'updatedAt', 'allowSend', 'tag', 'safetyLock']) delete ic[key];
+    const cost = { ...(data.costs[nm] || {}) }; delete cost.updatedAt;
+    return Boost.signature({ context: data.context, settings: data.settings, ic, costs: cost, draft: data.drafts[nm] || null, cfg: data.cfg, facts: data.facts[nm] || null, promoRevision: data.promoRevision, boostDay: (ic.strategy || data.cfg.defaults.strategy) === 'boost' ? StatMath.dayKey() : undefined });
+  }
+
   async function calcRepricer(opts) {
+    if (priceJobRunning && priceJobContext.getStore() !== priceJobRunning) throw new WBError('Выполняется отправка WB. Дождитесь результата перед новым пересчётом.', { code: 'PRICE_BUSY' });
     if (sched.running) throw new WBError('Пересчёт уже выполняется — дождитесь окончания.', { code: 'BUSY' });
     sched.running = true;
-    const startedAt = Date.now();
+    const startedAt = Date.now(), context = catalogContext();
+    opts = opts || {};
     try {
+      if (isDemo()) await ensureDemoAnalytics();
       const rows = await buildContexts(opts);
+      assertCatalogContext(context);
       const goodsByNm = new Map(((cache.goods && cache.goods.items) || []).map((g) => [Number(g.nmID), g]));
+      const runtimeUpdates = {}, fingerprints = inputSnapshot();
       const results = rows.map((r) => {
         try {
+          let boostPlan;
+          if (r.itemCfg.strategy === 'boost') {
+            boostPlan = Boost.plan(r.ctx, r.itemCfg.boost, r.itemCfg.boostRuntime, boostOrders, businessContext());
+            r.ctx.boostPlan = boostPlan;
+          }
           const result = RP.computeItem(r.ctx, r.cfg, r.itemCfg, EC);
           const good = goodsByNm.get(Number(r.ctx.nmID));
           const mode = result.context.sizePriceMode;
+          if (boostPlan) {
+            result.boost = Boost.checkResult(result, boostPlan, good);
+            if (!opts.previewOnly && boostPlan.runtime) runtimeUpdates[String(r.ctx.nmID)] = boostPlan.runtime;
+          }
           // Правка только размера тоже является предложением, даже если минимальная
           // цена товара и скидка не изменились. Без этого ручные цены не отправлялись.
           const manual = r.itemCfg.sizePrices || {};
@@ -3539,10 +3761,43 @@ function createService(store, emit, electron, integrations) {
                 Math.round(Number(price)) !== Math.round(Number(size.price));
             }).length : 0;
           if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
+          applyDraftToResult(result, r, fingerprints.drafts);
+          if (good && good.editableSizePrice && mode === 'sync') result.sizeChanges = (good.sizes || []).filter((size) => Math.round(Number(size.price)) !== Math.round(Number(result.proposed.basePrice))).length;
+          if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
+          result.inputFingerprint = inputFingerprint(result.nmID, fingerprints);
+          result.issues = StatMath.issuesFor(result, !!fingerprints.drafts[String(result.nmID)]);
+          if (!RP.STRATEGIES.some((s) => s.id === result.strategy)) result.issues.push({ code: 'STRATEGY_INVALID', message: 'Неизвестная стратегия товара', level: 'critical' });
+          result.autoBlocked = result.issues.some((i) => i.level === 'critical');
+          result.manualAllowSend = result.allowSend;
+          if (result.autoBlocked) { result.allowSend = false; result.needSend = false; }
           return result;
-        } catch (e) { return { nmID: r.ctx.nmID, vendorCode: r.ctx.vendorCode, error: e.message }; }
+        } catch (e) { const out = { nmID: r.ctx.nmID, vendorCode: r.ctx.vendorCode, error: e.message, autoBlocked: true }; out.issues = StatMath.issuesFor(out); return out; }
       });
+      assertCatalogContext(context);
+      if (!opts.previewOnly) {
+        const configs = store.loadItemConfigs(), business = businessContext(); let changed = false;
+        for (const result of results) {
+          const nm = String(result.nmID), previous = configs[nm] || {}, lock = previous.safetyLock;
+          const critical = (result.issues || []).filter((i) => i.level === 'critical');
+          let next = previous;
+          if (runtimeUpdates[nm]) { next = { ...next, boostRuntime: runtimeUpdates[nm] }; changed = true; }
+          if (critical.length || lock) {
+            const state = { active: critical.length > 0, context: business, issues: critical };
+            if (!lock || Boost.signature({ active: lock.active, context: lock.context, issues: lock.issues }) !== Boost.signature(state)) { next = { ...next, safetyLock: { ...state, checkedAt: new Date().toISOString() } }; changed = true; }
+          }
+          if (next !== previous) configs[nm] = next;
+        }
+        if (changed) store.saveItemConfigs(configs);
+      }
+      const archive = store.loadRepricer().analyticsArchive;
+      const byNm = new Map(rows.map((r) => [String(r.ctx.nmID), r.ctx]));
+      const abc = StatMath.abc(archive && archive.context === businessContext() ? archive : null, results.map((r) => String(r.nmID)), (nm, revenue, qty) => {
+        const ctx = byNm.get(nm), zero = ctx.econAt(0);
+        return ctx.costError || !(ctx.params.costPriceRub > 2) ? null : revenue * (1 - zero.pctCosts / 100) - qty * zero.fixedCosts;
+      });
+      results.forEach((r) => { r.abc = abc[String(r.nmID)]; });
       const summary = RP.summarize(results);
+      if (opts.previewOnly) return { results, summary, demo: isDemo(), at: new Date().toISOString() };
       const run = {
         id: startedAt,
         at: new Date(startedAt).toISOString(),
@@ -3591,6 +3846,20 @@ function createService(store, emit, electron, integrations) {
     } finally {
       sched.running = false;
     }
+  }
+
+  function applyDraftToResult(result, row, drafts) {
+    const draft = drafts[String(result.nmID)];
+    if (!draft || !(Number(draft.basePrice) > 0) || result.strategy === 'boost') return;
+    const basePrice = Math.round(Number(draft.basePrice)), discount = Math.round(Number(draft.discount) || 0), sellerPrice = U2(basePrice * (1 - discount / 100));
+    const marginCtx = { ...row.ctx, marginMode: row.cfg.marginMode, walletPct: Number(row.cfg.priceEdit.walletPct) || 0, forPayRatio: row.ctx.sellerPrice > 0 ? row.ctx.forPayAvg / row.ctx.sellerPrice : 1 };
+    marginCtx.forPayAtPrice = (price) => price * marginCtx.forPayRatio;
+    const unit = RP.marginOf(marginCtx, sellerPrice);
+    result.strategyProposed = result.proposed;
+    result.proposed = { basePrice, discount, sellerPrice, buyerPrice: U2(sellerPrice * (1 - row.ctx.sppPct / 100) * (1 - marginCtx.walletPct / 100)), profit: unit.profit, marginPct: unit.marginPct, priceMode: 'manual-draft' };
+    result.cost.next = row.ctx.econAt(sellerPrice);
+    result.needSend = result.allowSend !== false && (Math.abs(sellerPrice - row.ctx.sellerPrice) > .5 || result.sizeChanges > 0);
+    result.delta = { ...result.delta, abs: U2(sellerPrice - row.ctx.sellerPrice), pct: row.ctx.sellerPrice > 0 ? U2((sellerPrice / row.ctx.sellerPrice - 1) * 100) : 0, profitPerUnit: U2(unit.profit - result.current.profit), profitMonth: U2((unit.profit - result.current.profit) * row.ctx.salesPerDay * 30) };
   }
 
   /** Когда наступит фаза отправки для предложения, рассчитанного в at. */
@@ -3649,12 +3918,14 @@ function createService(store, emit, electron, integrations) {
     // настройки товара: режим цен по размерам и ручные цены размеров — для отправки
     const itemConfigsNow = store.loadItemConfigs() || {};
     (results || []).forEach((r) => {
-      if (!r || r.error) return;
+      if (!r) return;
+      if (r.error) { blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '', reasons: [r.error], autoBlocked: true }); return; }
       /**
        * «Отправка в WB» выключена для товара (колонка в таблице репрайсера).
        * Цена при этом рассчитана и видна — строка попадает в список blocked
        * с понятной причиной, чтобы продавец видел, почему товар не ушёл.
        */
+      if (r.autoBlocked) { blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '', reasons: (r.issues || []).filter((i) => i.level === 'critical').map((i) => i.message), autoBlocked: true }); return; }
       if (r.allowSend === false) {
         blocked.push({
           nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
@@ -3698,6 +3969,7 @@ function createService(store, emit, electron, integrations) {
         nmID: r.nmID,
         vendorCode: r.vendorCode || '',
         title: r.title || '',
+        inputFingerprint: r.inputFingerprint, boost: r.boost || null,
         strategy: r.strategy || '',
         strategyTitle: r.strategyTitle || '',
         // что стоит сейчас — по этим цифрам потом проверяем, не изменилось ли что-то в WB
@@ -3782,8 +4054,9 @@ function createService(store, emit, electron, integrations) {
     }
     const byNm = new Map(goods.map((x) => [Number(x.nmID), x]));
     const stale = [];
-    const fresh = [];
+    const fresh = [], fingerprints = inputSnapshot();
     for (const it of items) {
+      if (it.inputFingerprint && it.inputFingerprint !== inputFingerprint(it.nmID, fingerprints)) { stale.push({ ...it, reason: 'Изменились настройки/расходы/режим или день лесенки — пересчитайте цены' }); continue; }
       const cur = byNm.get(Number(it.nmID));
       if (!cur) { stale.push(Object.assign({}, it, { reason: 'товар не найден в кабинете' })); continue; }
       const sizeSnapshot = it.currentSizePrices;
@@ -3810,10 +4083,14 @@ function createService(store, emit, electron, integrations) {
   }
 
   /** Фаза 2: отправить сохранённое предложение в WB. */
-  async function sendProposal(source, nmIDs) {
+  async function sendProposal(source, nmIDs) { return priceJob(() => sendProposalImpl(source, nmIDs)); }
+
+  async function sendProposalImpl(source, nmIDs) {
     const saved = store.loadProposals();
+    if (saved.phase !== 'proposed') throw new WBError('Предложение уже отправлено, отменено или устарело — выполните новый пересчёт.', { code: 'PROPOSAL_STALE' });
     const ids = Array.isArray(nmIDs) ? new Set(nmIDs.map(String)) : null;
-    const prop = ids ? Object.assign({}, saved, { items: saved.items.filter((x) => ids.has(String(x.nmID))) }) : saved;
+    const ready = saved.items.filter((x) => !x.sendState || x.sendState === 'ready');
+    const prop = { ...saved, items: ids ? ready.filter((x) => ids.has(String(x.nmID))) : ready };
     if (!prop.items.length) {
       throw new WBError('Нет сохранённого предложения: сначала нажмите «Пересчитать цены».', { code: 'NO_PROPOSAL' });
     }
@@ -3832,7 +4109,9 @@ function createService(store, emit, electron, integrations) {
     }
     const v = await validateProposal(prop);
     if (!v.ok) {
-      store.saveProposals(Object.assign({}, prop, { phase: 'stale', staleCount: (v.stale || []).length, note: v.reason }));
+      const staleIDs = new Set((v.stale || []).map((x) => Number(x.nmID)));
+      const items = saved.items.map((x) => staleIDs.has(Number(x.nmID)) ? { ...x, sendState: 'stale' } : x);
+      store.saveProposals({ ...saved, items, phase: items.some((x) => !x.sendState || x.sendState === 'ready') ? 'proposed' : 'stale', sendAt: null, staleCount: staleIDs.size, note: v.reason });
       notify('repricer', { type: 'proposal-stale', reason: v.reason, stale: (v.stale || []).length });
       throw new WBError(v.reason, { code: 'PROPOSAL_STALE' });
     }
@@ -3840,23 +4119,26 @@ function createService(store, emit, electron, integrations) {
       nmID: x.nmID, needSend: true,
       current: { basePrice: x.currentBasePrice, discount: x.currentDiscount, sellerPrice: x.currentSellerPrice },
       proposed: { basePrice: x.basePrice, discount: x.discount, sellerPrice: x.sellerPrice },
+      inputFingerprint: x.inputFingerprint, boost: x.boost,
       sizePriceMode: x.sizePriceMode,
       sizePrices: x.sizePrices
     }));
     const res = await sendPrices(results, source || 'repricer-proposal');
-    const remaining = ids ? saved.items.filter((x) => !ids.has(String(x.nmID))) : [];
-    store.saveProposals(Object.assign({}, prop, {
-      // отправленные позиции и товары с выключенной отправкой остаются в предложении:
-      // по ним видно, что ушло в WB, а что продавец оставил под контролем вручную
-      items: remaining.length ? remaining : sentList.concat(disabled),
-      phase: remaining.length ? 'proposed' : 'sent',
-      sentAt: new Date().toISOString(),
-      staleCount: v.stale.length,
-      sendAt: null,
-      note: 'Отправлено ' + (res.sent || 0) + ' цен' + (v.stale.length ? ', пропущено устаревших: ' + v.stale.length : '') +
-        (disabled.length ? ', не отправлено (флаг «Отправка» выключен): ' + disabled.length : '')
-    }));
-    notify('repricer', { type: 'proposal-sent', count: res.sent || 0, stale: (v.stale || []).length });
+    const submitted = new Set((res.sentIDs || []).map(Number)), confirmed = new Set((res.confirmedIDs || []).map(Number));
+    const failed = new Set((res.details || []).filter((d) => d.nmID && (d.errorText || d.error || [4, 5, 6].includes(Number(d.status)))).map((d) => Number(d.nmID)));
+    const attempted = new Set(sentList.concat(disabled).map((x) => Number(x.nmID))), staleIDs = new Set((v.stale || []).map((x) => Number(x.nmID)));
+    const sentAt = new Date().toISOString();
+    const items = saved.items.map((x) => {
+      if (!attempted.has(Number(x.nmID))) return x;
+      const nm = Number(x.nmID), state = confirmed.has(nm) ? 'confirmed' : submitted.has(nm) ? failed.has(nm) ? 'rejected' : 'pending' : staleIDs.has(nm) ? 'stale' : disabled.some((d) => Number(d.nmID) === nm) ? 'disabled' : 'blocked';
+      return { ...x, sendState: state, submittedAt: submitted.has(nm) ? sentAt : null };
+    });
+    const untouched = items.some((x) => !x.sendState || x.sendState === 'ready');
+    const phase = untouched ? 'proposed' : items.every((x) => x.sendState === 'confirmed') ? 'sent' : items.some((x) => x.sendState === 'pending') ? 'pending' : 'partial';
+    store.saveProposals({ ...saved, items, phase, sentAt, sendAt: null, staleCount: v.stale.length,
+      note: 'Передано WB: ' + submitted.size + ', применение подтверждено: ' + confirmed.size + '. Неподтверждённые, отклонённые и пропущенные позиции сохранены со статусами. Автоповтора нет; проверьте WB, обновите данные и пересчитайте.' +
+        (v.stale.length ? ' Устарело: ' + v.stale.length + '.' : '') + (disabled.length ? ' Отправка выключена: ' + disabled.length + '.' : '') });
+    notify('repricer', { type: 'proposal-sent', count: res.sent || 0, confirmed: confirmed.size, stale: (v.stale || []).length });
     return Object.assign({ ok: true, stale: v.stale, staleReason: v.reason, skippedDisabled: disabled.length }, res);
   }
 
@@ -3866,11 +4148,116 @@ function createService(store, emit, electron, integrations) {
     return ['none', 'sync', 'manual'].includes(fallback) ? fallback : 'none';
   }
 
+  function confirmedRows(items, details, sizeMode, goods) {
+    const byNm = new Map((goods || []).map((g) => [Number(g.nmID), g]));
+    return (items || []).filter((item) => {
+      const rows = (details || []).filter((d) => Number(d.nmID) === Number(item.nmID) && (!sizeMode || Number(d.sizeID) === Number(item.sizeID)));
+      if (!rows.length || rows.some((d) => Number(d.status) !== 3 || d.applied === false || d.pending || d.historyComplete === false || d.error || d.errorText)) return false;
+      const taskIDs = new Set(rows.filter((d) => d.taskId != null).map((d) => String(d.taskId)));
+      if ((details || []).some((d) => taskIDs.has(String(d.taskId)) && d.pending)) return false;
+      // historyGoods содержит размеры. Одна успешная строка НЕ подтверждает весь
+      // товар, если WB ещё не вернул остальные размеры из снимка каталога.
+      const official = rows.some((d) => d.rawGoodStatus !== undefined);
+      if (official && rows.some((d) => d.historyComplete !== true)) return false;
+      if (!sizeMode) {
+        const expected = (byNm.get(Number(item.nmID))?.sizes || []).map((s) => Number(s.sizeID)).filter((id) => Number.isSafeInteger(id) && id > 0);
+        if (expected.length && (official || rows.every((d) => d.sizeID !== undefined))) {
+          const found = new Set(rows.map((d) => Number(d.sizeID)));
+          if (found.size !== expected.length || expected.some((id) => !found.has(id))) return false;
+        }
+      }
+      return true;
+    });
+  }
+  function uploadSummary(items, details, sizeMode, goods) {
+    const confirmedItems = confirmedRows(items, details, sizeMode, goods);
+    const confirmed = new Set(confirmedItems);
+    const failed = (items || []).filter((item) => !confirmed.has(item) && (details || []).some((d) =>
+      Number(d.nmID) === Number(item.nmID) && (!sizeMode || Number(d.sizeID) === Number(item.sizeID)) &&
+      (d.errorText || d.error && !d.pending || [4, 5, 6].includes(Number(d.status)))));
+    return { confirmedItems, ok: confirmedItems.length, failed: failed.length, pending: Math.max(0, (items || []).length - confirmedItems.length - failed.length) };
+  }
+  function activeSafetyLock(config) {
+    const lock = config && config.safetyLock;
+    return lock && lock.context === businessContext() ? lock : null;
+  }
+  async function mutationSnapshot(trustedGoods) {
+    const context = businessContext();
+    const goods = trustedGoods || (await handlers['wb:goods']({ force: true })).items || [];
+    const rows = await buildContexts({ promos: false, noBoostOrders: true });
+    assertPriceContext(context);
+    return { context, goods, byNm: new Map(goods.map((g) => [Number(g.nmID), g])), rows: new Map(rows.map((r) => [Number(r.ctx.nmID), r])), inputs: inputSnapshot() };
+  }
+  function checkCandidate(snapshot, nmID, basePrice, discount, grants) {
+    const good = snapshot.byNm.get(Number(nmID)), row = snapshot.rows.get(Number(nmID));
+    if (!row || !good) return { ok: false, issues: [{ message: 'Товар не найден в текущем кабинете.' }] };
+    const grant = grants && grants.get(Number(nmID));
+    if (grant && (grant.context !== snapshot.context || grant.day !== StatMath.dayKey() || grant.at && Date.now() - grant.at > 180000)) return { ok: false, issues: [{ message: 'Подтверждение лесенки устарело. Пересчитайте цены.' }] };
+    return PriceSafety.evaluate(row, { basePrice, discount }, { good, boost: grant && grant.plan, lock: activeSafetyLock(snapshot.inputs.configs[String(nmID)]), hasDraft: !!snapshot.inputs.drafts[String(nmID)] });
+  }
+  function mutationPreflight(snapshot, rows, grants) {
+    assertPriceContext(snapshot.context);
+    const current = inputSnapshot();
+    for (const row of rows) {
+      if (inputFingerprint(row.nmID, current) !== inputFingerprint(row.nmID, snapshot.inputs) || (current.configs[String(row.nmID)] || {}).allowSend === false || (activeSafetyLock(current.configs[String(row.nmID)]) || {}).active) throw new WBError('Данные товара ' + row.nmID + ' изменились в ожидании WB. Отправка остановлена; нужен пересчёт.', { code: 'PRICE_INPUT_CHANGED' });
+      const grant = grants && grants.get(Number(row.nmID));
+      if (grant && (grant.context !== businessContext() || grant.day !== StatMath.dayKey() || grant.at && Date.now() - grant.at > 180000)) throw new WBError('Снимок заказов лесенки устарел или начался новый день. Пересчитайте цены.', { code: 'BOOST_STALE' });
+    }
+  }
+  async function applyPricesWithSafety(payload, internal) {
+    return priceJob(async () => {
+      const input = payload && payload.items;
+      if (!Array.isArray(input) || !input.length) throw new WBError('Выберите товары для изменения цены.', { code: 'EMPTY' });
+      const snapshot = await mutationSnapshot(internal && internal.goods), grants = internal && internal.boostGrants;
+      const valid = new Map(), warnings = [], blocked = [];
+      for (const it of input) {
+        const nmID = Number(it && it.nmID), good = snapshot.byNm.get(nmID);
+        if (!it || !Number.isSafeInteger(nmID) || nmID <= 0 || !good || it.price === undefined && it.discount === undefined) { blocked.push({ nmID, reason: 'Некорректный или чужой товар / не указана цена.' }); continue; }
+        const bases = it.price === undefined && (good.sizes || []).length ? good.sizes.map((s) => Number(s.price)) : [it.price === undefined ? Number(good.price) : it.price];
+        const discount = it.discount === undefined ? Number(good.discount) : it.discount;
+        let failure, failureType = 'critical';
+        for (const base of bases) { const check = checkCandidate(snapshot, nmID, base, discount, grants); if (!check.ok) { failure = check.issues.map((i) => i.message).join('; '); failureType = check.issues.some((i) => i.code === 'QUARANTINE') ? 'quarantine' : 'critical'; break; } }
+        if (failure) { blocked.push({ nmID, reason: failure, type: failureType }); continue; }
+        const row = { nmID };
+        if (it.price !== undefined) row.price = Math.round(Number(it.price));
+        if (it.discount !== undefined) row.discount = Math.round(Number(it.discount));
+        valid.set(nmID, row);
+      }
+      for (const b of blocked) warnings.push({ nmID: b.nmID, type: b.type || 'critical', message: b.reason });
+      const quarantined = warnings.filter((w) => w.type === 'quarantine');
+      if (quarantined.length) notify('app-event', { type: 'quarantine', count: quarantined.length, warnings: quarantined });
+      const items = [...valid.values()];
+      if (!items.length) return { demo: isDemo(), uploaded: 0, batches: [], details: [], warnings, blocked, sentItems: [] };
+      mutationPreflight(snapshot, items, grants);
+      let result;
+      try {
+        result = await (isDemo() ? getDemo() : getClient()).applyPrices(items, { beforeSend: (chunk) => mutationPreflight(snapshot, chunk, grants) });
+        assertPriceContext(snapshot.context);
+      } catch (error) {
+        notify('app-event', { type: 'sendError', failed: items.length, message: error.message, source: payload.source || 'prices' });
+        throw error;
+      } finally { invalidateGoodsCache(); }
+      const submitted = result.partialError ? (result.batches || []).flatMap((b) => b.items || []) : items;
+      if (result.partialError) warnings.push({ type: 'partial-upload', message: 'Передача остановлена после ' + submitted.length + ' строк: ' + result.partialError.message });
+      const details = result.details || [], summary = uploadSummary(submitted, details, false, snapshot.goods);
+      const tasks = store.loadTasks();
+      tasks.unshift({ taskId: Date.now(), uploadIDs: (result.batches || []).map((b) => b.response?.data?.id ?? b.response?.data?.uploadID ?? b.response?.data?.taskId).filter((id) => id != null), createdAt: new Date().toISOString(), total: submitted.length, ok: summary.ok, failed: summary.failed, pending: summary.pending, details, warnings, demo: isDemo() });
+      store.saveTasks(tasks);
+      if (summary.failed) notify('app-event', { type: 'sendError', failed: summary.failed, message: details.find((d) => d.errorText)?.errorText || 'WB отклонил часть цен.', source: payload.source || 'prices' });
+      if (summary.pending) notify('warn', { where: 'prices', message: 'WB ещё не подтвердил применение цен: ' + summary.pending + ' товаров. Передача не равна установке; автоматического повтора нет.' });
+      if (summary.ok) notify('app-event', { type: 'sendSuccess', count: summary.ok, source: payload.source || 'prices' });
+      return { ...result, demo: isDemo(), warnings, blocked, sentItems: submitted, confirmedItems: summary.confirmedItems };
+    });
+  }
+
   /** Размеры валидируются только по данным сервера, а не по payload.goods из браузера. */
-  async function applySizePrices(payload, trustedGoods) {
+  async function applySizePrices(payload, trustedGoods, internal) {
+    return priceJob(() => applySizePricesImpl(payload, trustedGoods, internal));
+  }
+  async function applySizePricesImpl(payload, trustedGoods, internal) {
     const input = payload && payload.items;
     if (!Array.isArray(input) || !input.length) throw new WBError('Нет размеров для изменения цены.', { code: 'EMPTY' });
-    const goods = trustedGoods || (await handlers['wb:goods']({})).items || [];
+    const snapshot = await mutationSnapshot(trustedGoods), goods = snapshot.goods, grants = internal && internal.boostGrants;
     const byNm = new Map(goods.map((g) => [Number(g.nmID), g]));
     const warnings = [];
     const valid = new Map();
@@ -3889,6 +4276,10 @@ function createService(store, emit, electron, integrations) {
       else if ((typeof it.price !== 'number' && typeof it.price !== 'string') || String(it.price).trim() === '' ||
         !Number.isSafeInteger(price) || price < 1) { type = 'bad-price'; message = 'Цена размера должна быть конечным числом не меньше 1 ₽.'; }
       if (type) { warnings.push({ nmID, sizeID, type, message: message + ' Размер ' + sizeID + ' не отправлен.' }); continue; }
+      const discounts = new Set([Number(good.discount) || 0, internal && internal.targets && internal.targets.get(nmID)].filter((n) => n !== undefined));
+      let unsafe = '', quarantineRisk = false;
+      for (const discount of discounts) { const check = checkCandidate(snapshot, nmID, price, discount, grants); if (!check.ok) { unsafe = check.issues.map((i) => i.message).join('; '); quarantineRisk = check.issues.some((i) => i.code === 'QUARANTINE'); break; } }
+      if (unsafe) { warnings.push({ nmID, sizeID, type: quarantineRisk ? 'quarantine' : 'critical', message: unsafe }); continue; }
       if (price === Math.round(Number(size.price))) { skippedUnchanged++; continue; }
       const discount = Number(good.discount) || 0;
       const oldSeller = Number(size.price) * (1 - discount / 100);
@@ -3902,10 +4293,14 @@ function createService(store, emit, electron, integrations) {
       valid.set(nmID + ':' + sizeID, { nmID, sizeID, price });
     }
     const items = Array.from(valid.values());
+    const quarantined = warnings.filter((w) => w.type === 'quarantine');
+    if (quarantined.length) notify('app-event', { type: 'quarantine', count: quarantined.length, warnings: quarantined });
     if (!items.length) return { demo: isDemo(), uploaded: 0, batches: [], details: [], warnings, skippedUnchanged, sentItems: [] };
     let res;
     try {
-      res = await (isDemo() ? getDemo() : getClient()).applySizePrices(items);
+      mutationPreflight(snapshot, items, grants);
+      res = await (isDemo() ? getDemo() : getClient()).applySizePrices(items, { beforeSend: (chunk) => mutationPreflight(snapshot, chunk, grants) });
+      assertPriceContext(snapshot.context);
     } catch (error) {
       if (!isDemo()) notify('app-event', { type: 'sendError', failed: items.length, message: error.message || String(error), source: payload.source || 'size-prices' });
       throw error;
@@ -3913,34 +4308,51 @@ function createService(store, emit, electron, integrations) {
       // Даже при сетевой ошибке часть пачек могла быть принята WB.
       invalidateGoodsCache();
     }
+    const submitted = res.partialError ? (res.batches || []).flatMap((b) => b.items || []) : items;
+    if (res.partialError) warnings.push({ type: 'partial-upload', message: 'Передача размеров остановлена: ' + res.partialError.message });
     const details = res.details || [];
-    const failed = details.filter((d) => d.error || d.errorText || (d.status && d.status !== 3));
-    const succeeded = details.filter((d) => d.status === 3 && !d.error && !d.errorText);
+    const summary = uploadSummary(submitted, details, true, goods);
     if (!isDemo()) {
       const tasks = store.loadTasks();
-      tasks.unshift({ taskId: Date.now(), createdAt: new Date().toISOString(), kind: 'size-prices',
-        total: items.length, ok: succeeded.length, failed: failed.length, details, warnings });
+      tasks.unshift({ taskId: Date.now(), uploadIDs: (res.batches || []).map((b) => b.response?.data?.id ?? b.response?.data?.uploadID ?? b.response?.data?.taskId).filter((id) => id != null), createdAt: new Date().toISOString(), kind: 'size-prices',
+        total: submitted.length, ok: summary.ok, failed: summary.failed, pending: summary.pending, details, warnings });
       store.saveTasks(tasks);
-      if (failed.length) notify('app-event', { type: 'sendError', failed: failed.length, message: failed[0].error || failed[0].errorText || 'WB не обработал часть размеров.', source: payload.source || 'size-prices' });
-      if (succeeded.length) notify('app-event', { type: 'sendSuccess', count: succeeded.length, source: payload.source || 'size-prices' });
+      if (summary.failed) notify('app-event', { type: 'sendError', failed: summary.failed, message: details.find((d) => d.errorText)?.errorText || 'WB отклонил часть размеров.', source: payload.source || 'size-prices' });
+      if (summary.pending) notify('warn', { where: 'prices', message: 'WB ещё не подтвердил цены размеров: ' + summary.pending + '. Проверьте результат перед новым расчётом.' });
+      if (summary.ok) notify('app-event', { type: 'sendSuccess', count: summary.ok, source: payload.source || 'size-prices' });
     }
-    return Object.assign({}, res, { demo: isDemo(), warnings, skippedUnchanged, sentItems: items });
+    return Object.assign({}, res, { demo: isDemo(), warnings, skippedUnchanged, sentItems: submitted, confirmedItems: summary.confirmedItems });
   }
 
-  async function sendPrices(results, source) {
-    const toSend = (results || []).filter((r) => r.needSend && !r.error && r.proposed);
-    if (!toSend.length) return { sent: 0, skipped: (results || []).length };
-    const goodsSnap = ((await handlers['wb:goods']({})).items || []);
+  async function sendPrices(results, source) { return priceJob(() => sendPricesImpl(results, source)); }
+
+  async function sendPricesImpl(results, source) {
+    const toSend = (results || []).filter((r) => r.needSend && !r.error && !r.autoBlocked && r.proposed);
+    if (!toSend.length) return { sent: 0, sentIDs: [], skipped: (results || []).length };
+    const context = businessContext(), goodsSnap = ((await handlers['wb:goods']({})).items || []);
     const goodsByNm = new Map(goodsSnap.map((g) => [Number(g.nmID), g]));
-    const itemConfigsNow = store.loadItemConfigs() || {};
-    const cfg = repricerCfg();
-    const items = [], sizeRows = [], allWarnings = [];
-    // Сначала строим план целиком. Для sync/manual никогда не передаём общую
-    // базовую цену: иначе WB затрёт цены размеров, которые пользователь не менял.
+    const itemConfigsNow = store.loadItemConfigs() || {}, cfg = repricerCfg(), inputs = inputSnapshot();
+    const hasBoost = toSend.some((r) => (itemConfigsNow[String(r.nmID)] || {}).strategy === 'boost' || cfg.defaults.strategy === 'boost');
+    if (hasBoost) await ensureBoostOrders();
+    const contexts = await buildContexts({ noBoostOrders: true, promos: hasBoost });
+    assertPriceContext(context);
+    const rowsByNm = new Map(contexts.map((r) => [Number(r.ctx.nmID), r]));
+    const boostGrants = new Map(), items = [], sizeRows = [], allWarnings = [], eligible = [];
     for (const r of toSend) {
-      const good = goodsByNm.get(Number(r.nmID));
-      if (!good) { allWarnings.push({ nmID: r.nmID, type: 'unknown-item', message: 'Товар не найден в кабинете, отправка пропущена.' }); continue; }
+      const good = goodsByNm.get(Number(r.nmID)), row = rowsByNm.get(Number(r.nmID));
+      if (!good || !row) { allWarnings.push({ nmID: r.nmID, type: 'unknown-item', message: 'Товар не найден в текущем кабинете.' }); continue; }
       const ic = itemConfigsNow[String(r.nmID)] || {};
+      if (ic.allowSend === false || r.allowSend === false) continue;
+      if (r.inputFingerprint && r.inputFingerprint !== inputFingerprint(r.nmID, inputs)) { allWarnings.push({ nmID: r.nmID, type: 'stale', message: 'Изменились настройки/расходы/источники. Пересчитайте цены.' }); continue; }
+      let plan;
+      if (row.itemCfg.strategy === 'boost') {
+        plan = Boost.plan(row.ctx, row.itemCfg.boost, row.itemCfg.boostRuntime, boostOrders, context);
+        if (plan.blocked || !r.boost || plan.day !== r.boost.day || plan.status !== r.boost.status || plan.promoId !== r.boost.promoId || Math.abs(Number(plan.target) - Number(r.boost.target)) > .005) { allWarnings.push({ nmID: r.nmID, type: 'boost-stale', message: plan.blocked ? plan.reason : 'Заказы/ступень лесенки изменились. Нужен новый пересчёт.' }); continue; }
+        boostGrants.set(Number(r.nmID), { plan, at: boostOrders && boostOrders.at, day: StatMath.dayKey(), context });
+      }
+      const check = PriceSafety.evaluate(row, r.proposed, { good, boost: plan, lock: activeSafetyLock(ic), hasDraft: !!inputs.drafts[String(r.nmID)] });
+      if (!check.ok) { allWarnings.push({ nmID: r.nmID, type: 'critical', message: check.issues.map((i) => i.message).join('; ') }); continue; }
+      eligible.push(r);
       const mode = normalizeSizePriceMode(r.sizePriceMode || (r.context || {}).sizePriceMode || ic.sizePriceMode,
         (cfg.defaults || {}).sizePriceMode || cfg.sizePriceMode);
       const targetPrice = Math.round(Number(r.proposed.basePrice));
@@ -3961,27 +4373,58 @@ function createService(store, emit, electron, integrations) {
         const changesBase = targetPrice !== Math.round(Number(good.price));
         if (differentSizes && changesBase) {
           allWarnings.push({ nmID: r.nmID, type: 'size-equalize', message: 'У товара ' + r.nmID + ' разные цены размеров — отправка общей базовой цены сделает их одинаковыми.' });
-          if (source === 'repricer-auto') throw new WBError('Автоотправка остановлена: у товара ' + r.nmID + ' разные цены размеров. Выберите sync/manual или подтвердите общую цену вручную в репрайсере.', { code: 'SIZE_EQUALIZE_CONFIRM' });
+          if (source === 'repricer-auto') { allWarnings.push({ nmID: r.nmID, type: 'size-equalize-blocked', message: 'Автоотправка этого товара пропущена: разные цены размеров. Выберите sync/manual или подтвердите общую цену вручную в репрайсере.' }); continue; }
         }
         // Изменение только скидки не должно случайно выровнять разные цены.
         items.push(changesBase ? { nmID: r.nmID, price: targetPrice, discount: targetDiscount }
           : { nmID: r.nmID, discount: targetDiscount });
       }
     }
-    const empty = () => ({ uploaded: 0, batches: [], details: [], warnings: [], demo: isDemo() });
-    const res = items.length ? await handlers['wb:apply-prices']({ items, source: source || 'repricer' }) : empty();
-    const sizeRes = sizeRows.length ? await applySizePrices({ items: sizeRows, source: source || 'repricer' }, goodsSnap) : empty();
+    const targets = new Map(eligible.map((r) => [Number(r.nmID), Math.round(Number(r.proposed.discount))]));
+    const rejected = new Set();
+    for (const candidate of sizeRows) {
+      const row = rowsByNm.get(Number(candidate.nmID)), good = goodsByNm.get(Number(candidate.nmID)), grant = boostGrants.get(Number(candidate.nmID));
+      for (const discount of new Set([Number(good.discount), targets.get(Number(candidate.nmID))])) {
+        const test = PriceSafety.evaluate(row, { basePrice: candidate.price, discount }, { good, boost: grant && grant.plan, lock: activeSafetyLock(itemConfigsNow[String(candidate.nmID)]), hasDraft: !!inputs.drafts[String(candidate.nmID)] });
+        if (!test.ok) { rejected.add(Number(candidate.nmID)); allWarnings.push({ nmID: candidate.nmID, type: 'size-critical', message: 'Размер ' + candidate.sizeID + ': ' + test.issues.map((i) => i.message).join('; ') }); }
+      }
+    }
+    const validItems = items.filter((i) => !rejected.has(Number(i.nmID))), validSizes = sizeRows.filter((i) => !rejected.has(Number(i.nmID)));
+    const empty = () => ({ uploaded: 0, batches: [], details: [], warnings: [], sentItems: [], demo: isDemo() });
+    const res = validItems.length ? await applyPricesWithSafety({ items: validItems, source: source || 'repricer' }, { goods: goodsSnap, boostGrants }) : empty();
+    const commonOK = new Set((res.confirmedItems || []).map((i) => Number(i.nmID)));
+    const blockedProducts = new Set((res.blocked || []).map((i) => Number(i.nmID)));
+    validItems.forEach((i) => { if (!commonOK.has(Number(i.nmID))) blockedProducts.add(Number(i.nmID)); });
+    const readySizes = validSizes.filter((i) => !blockedProducts.has(Number(i.nmID)));
+    if (readySizes.length < validSizes.length) allWarnings.push({ type: 'discount-pending', message: 'Цены размеров не отправлены до подтверждения общей скидки WB. Проверьте результат и пересчитайте товар.' });
+    let sizeRes = empty();
+    try { if (readySizes.length) sizeRes = await applySizePrices({ items: readySizes, source: source || 'repricer' }, goodsSnap, { boostGrants, targets }); }
+    catch (error) {
+      if (!(res.sentItems || []).length) throw error;
+      sizeRes.partialError = { message: error.message, code: error.code || 'SIZE_UPLOAD_INTERRUPTED' };
+      allWarnings.push({ type: 'size-partial', message: 'Общая цена/скидка передана, но размеры не подтверждены: ' + error.message });
+    }
     allWarnings.push(...(res.warnings || []), ...(sizeRes.warnings || []));
     const details = (res.details || []).concat(sizeRes.details || []);
-    const sentIDs = new Set(items.map((item) => Number(item.nmID)));
+    const commonConfirmed = new Set((res.confirmedItems || []).map((r) => Number(r.nmID))), sizeConfirmed = new Set((sizeRes.confirmedItems || []).map((r) => Number(r.nmID) + '#' + Number(r.sizeID)));
+    const sentIDs = new Set((res.sentItems || []).map((item) => Number(item.nmID)));
     // size-метод может отфильтровать неизменённые/чужие/небезопасные размеры.
     (sizeRes.sentItems || []).forEach((row) => sentIDs.add(Number(row.nmID)));
+    const confirmedIDs = [...sentIDs].filter((nm) => validItems.filter((r) => Number(r.nmID) === nm).every(() => commonConfirmed.has(nm)) && validSizes.filter((r) => Number(r.nmID) === nm).every((r) => {
+      const installed = (goodsByNm.get(nm).sizes || []).find((s) => Number(s.sizeID) === Number(r.sizeID));
+      return installed && Math.round(Number(installed.price)) === Math.round(Number(r.price)) || sizeConfirmed.has(nm + '#' + Number(r.sizeID));
+    }));
     const sentResults = toSend.filter((r) => sentIDs.has(Number(r.nmID)));
+    const confirmedResults = sentResults.filter((r) => confirmedIDs.includes(Number(r.nmID)));
 
-    store.appendPriceHistory(sentResults.map((r) => ({
+    store.appendPriceHistory(confirmedResults.map((r) => ({
       nmID: r.nmID,
-      sizePrices: Object.fromEntries((sizeRes.sentItems || []).filter((row) => Number(row.nmID) === Number(r.nmID))
-        .map((row) => [String(row.sizeID), row.price])),
+      // Полный подтверждённый снимок размеров, включая неизменённые при manual.
+      sizePrices: Object.fromEntries((goodsByNm.get(Number(r.nmID))?.sizes || []).map((size) => {
+        const common = (res.confirmedItems || []).find((row) => Number(row.nmID) === Number(r.nmID));
+        const target = validSizes.find((row) => Number(row.nmID) === Number(r.nmID) && Number(row.sizeID) === Number(size.sizeID));
+        return [String(size.sizeID), target ? Number(target.price) : common && common.price !== undefined ? Number(common.price) : Number(size.price)];
+      })),
       basePrice: r.proposed.basePrice,
       discount: r.proposed.discount,
       sellerPrice: r.proposed.sellerPrice,
@@ -3991,14 +4434,14 @@ function createService(store, emit, electron, integrations) {
     // история пересчёта по артикулу: что реально ушло в WB (фаза 'send')
     store.appendRecalcHistory(sentResults.map((r) => ({
       nmID: r.nmID,
-      phase: 'send',
+      phase: confirmedIDs.includes(Number(r.nmID)) ? 'send' : 'submitted',
       basePrice: r.proposed.basePrice,
       discount: r.proposed.discount,
       sellerPrice: r.proposed.sellerPrice,
       prevSellerPrice: r.current ? r.current.sellerPrice : 0,
       strategy: r.strategyTitle || r.strategy || (source || 'repricer'),
       reason: source || 'repricer',
-      sent: true
+      sent: confirmedIDs.includes(Number(r.nmID))
     })));
 
     const runs = store.loadRuns();
@@ -4015,7 +4458,7 @@ function createService(store, emit, electron, integrations) {
     });
     store.saveRuns(runs);
     notify('repricer', { type: 'sent', count: sentIDs.size, at: new Date().toISOString() });
-    return Object.assign({}, res, { sent: sentIDs.size, toSendCount: toSend.length,
+    return Object.assign({}, res, { sent: sentIDs.size, sentIDs: [...sentIDs], confirmedIDs, confirmed: confirmedIDs.length, toSendCount: toSend.length,
       uploaded: Number(res.uploaded || 0) + Number(sizeRes.uploaded || 0),
       sizeSent: sizeRes.uploaded || 0, details, batches: (res.batches || []).concat(sizeRes.batches || []),
       warnings: allWarnings });
@@ -4259,7 +4702,8 @@ function createService(store, emit, electron, integrations) {
 
     // поле решения называется promoChosen в расчёте и chosen в плане акций — принимаем оба
     const chosenOf = (r) => r.promoChosen || r.chosen || null;
-    const exits = rows.filter((r) => !r.error && chosenOf(r) && chosenOf(r).type === 'exit');
+    rows = rows.filter((r) => !r.error && !r.autoBlocked && r.allowSend !== false && r.strategy !== 'boost');
+    let exits = rows.filter((r) => !r.error && chosenOf(r) && chosenOf(r).type === 'exit');
     const joins = rows.filter((r) => !r.error && chosenOf(r) && chosenOf(r).type === 'join');
     const invalidAbsoluteExit = exits.find((row) => Number(chosenOf(row).absolutePlanThreshold) > 0 &&
       Math.round(Number(row.proposed && row.proposed.basePrice) || 0) * (1 - Math.floor(Number(row.proposed && row.proposed.discount) || 0) / 100) <= Number(chosenOf(row).absolutePlanThreshold) + .005);
@@ -4280,15 +4724,18 @@ function createService(store, emit, electron, integrations) {
           discount: Math.floor(r.proposed.discount)
         }));
         try {
-          res = await handlers['wb:apply-prices']({ items, source: 'repricer-promo-exit' });
+          res = await sendPrices(exitsToSend, 'repricer-promo-exit');
         } catch (e) {
           out.exitFailed.push({ message: e.message });
           notify('warn', { where: 'promo-exit', message: e.message });
         }
       }
+      const confirmed = new Set((res.confirmedIDs || []).map(Number));
+      exits = exits.filter((r) => !r.needSend || confirmed.has(Number(r.nmID)));
       out.exited = exits.length;
-      out.exitSent = exitsToSend.length;
-      out.exitNoChange = exits.length - exitsToSend.length;
+      out.exitSent = Number(res.sent) || 0;
+      out.exitPending = Math.max(0, out.exitSent - confirmed.size);
+      out.exitNoChange = exits.filter((r) => !r.needSend).length;
       out.exitResult = { taskId: res.task && res.task.taskId, statusText: res.task && res.task.statusText };
       if (!out.exitFailed.length) {
         const pend = store.loadPromoExits();
@@ -4310,7 +4757,7 @@ function createService(store, emit, electron, integrations) {
         });
         store.savePromoExits(pend);
         if (exitsToSend.length) {
-          store.appendPriceHistory(exitsToSend.map((r) => ({
+          store.appendPriceHistory(exits.filter((r) => r.needSend).map((r) => ({
             nmID: r.nmID, basePrice: r.proposed.basePrice, discount: r.proposed.discount,
             sellerPrice: r.proposed.sellerPrice, source: 'promo-exit'
           })));
@@ -4347,14 +4794,16 @@ function createService(store, emit, electron, integrations) {
         (byPromo[pid] = byPromo[pid] || []).push(r);
       }));
 
+      const priceReady = new Set(joins.filter((r) => !r.needSend).map((r) => Number(r.nmID)));
       // 1) цена должна удовлетворять условиям акции
       const priceItems = joins.filter((r) => r.needSend).map((r) => ({
         nmID: r.nmID, price: Math.round(r.proposed.basePrice), discount: Math.round(r.proposed.discount)
       }));
       if (priceItems.length) {
         try {
-          await handlers['wb:apply-prices']({ items: priceItems, source: 'repricer-promo-join' });
-          store.appendPriceHistory(joins.filter((r) => r.needSend).map((r) => ({
+          const sent = await sendPrices(joins.filter((r) => r.needSend), 'repricer-promo-join');
+          (sent.confirmedIDs || []).forEach((nm) => priceReady.add(Number(nm)));
+          store.appendPriceHistory(joins.filter((r) => r.needSend && priceReady.has(Number(r.nmID))).map((r) => ({
             nmID: r.nmID, basePrice: r.proposed.basePrice, discount: r.proposed.discount,
             sellerPrice: r.proposed.sellerPrice, source: 'promo-join'
           })));
@@ -4365,7 +4814,9 @@ function createService(store, emit, electron, integrations) {
       }
 
       // 2) добавляем товары в акцию
-      for (const [pid, list] of Object.entries(byPromo)) {
+      for (const [pid, candidates] of Object.entries(byPromo)) {
+        const list = candidates.filter((r) => priceReady.has(Number(r.nmID)));
+        if (!list.length) continue;
         const promoMeta = ((pi && pi.promos) || []).find((x) => String(x.id) === String(pid)) || null;
         try {
           await handlers['wb:promo-join']({
@@ -4496,8 +4947,9 @@ function createService(store, emit, electron, integrations) {
     if (!items.length) return { restored: 0, pending: keys.length };
 
     const res = await handlers['wb:apply-prices']({ items, source: 'repricer-promo-restore' });
+    const confirmed = new Set((res.confirmedItems || []).map((r) => Number(r.nmID))), restoredItems = items.filter((r) => confirmed.has(Number(r.nmID)));
     // до удаления из очереди берём данные для журнала: после возврата запись исчезнет
-    const journalRows = items.map((i) => {
+    const journalRows = restoredItems.map((i) => {
       const rec = pend[String(i.nmID)] || {};
       return {
         nmID: i.nmID, vendorCode: rec.vendorCode || '', title: rec.title || '',
@@ -4511,15 +4963,15 @@ function createService(store, emit, electron, integrations) {
         ok: true
       };
     });
-    toRestore.forEach((k) => delete pend[k]);
+    restoredItems.forEach((row) => delete pend[String(row.nmID)]);
     store.savePromoExits(pend);
-    store.appendPriceHistory(items.map((i) => ({
+    store.appendPriceHistory(restoredItems.map((i) => ({
       nmID: i.nmID, basePrice: i.price, discount: i.discount,
       sellerPrice: Math.round(i.price * (1 - i.discount / 100) * 100) / 100, source: 'promo-restore'
     })));
     store.appendPromoJournal(journalRows);
-    notify('repricer', { type: 'promo-restored', count: items.length });
-    return { restored: items.length, pending: Object.keys(pend).length, task: res.task && res.task.statusText };
+    notify('repricer', { type: 'promo-restored', count: restoredItems.length });
+    return { restored: restoredItems.length, pending: Object.keys(pend).length, task: res.task && res.task.statusText };
   }
 
   function nextRunDate(cfg) {
@@ -4548,13 +5000,16 @@ function createService(store, emit, electron, integrations) {
   }
 
   function isBusy() {
-    return activeHandlers > 0 || backgroundJobs > 0 || sched.running ||
+    return activeHandlers > 0 || backgroundJobs > 0 || sched.running || !!priceJobRunning ||
       Object.values(deferred).some((rec) => rec.state === 'running');
   }
 
   function dispose() { disposed = true; catalogEpoch++; catalogSnapshot = null; stopScheduler(); }
 
   function resetAfterRestore() {
+    const configs = store.loadItemConfigs(); let changed = false;
+    for (const value of Object.values(configs)) if (value.boost) { delete value.boostRuntime; value.boost = { ...value.boost, requiresRestart: true }; changed = true; }
+    if (changed) store.saveItemConfigs(configs);
     stopScheduler();
     for (const key of Object.keys(deferred)) delete deferred[key];
     client = null; clientSignature = ''; demoApi = null;
@@ -4599,11 +5054,11 @@ function createService(store, emit, electron, integrations) {
             const res = await calcRepricer({ mode: 'auto', autoSend: !!c.schedule.autoSend });
             const wantJoin = !!c.promo.autoJoin;
             const wantExit = !!c.promo.autoExitAutoPromos || !!c.promo.autoExitManualPromos;
-            if (wantJoin || wantExit) {
+            if (c.schedule.autoSend && c.schedule.twoPhase === false && (wantJoin || wantExit)) {
               const rows = (res.results || []).filter((r) => r.promoChosen &&
                 (r.promoChosen.type === 'exit' ? wantExit : wantJoin));
               if (rows.length) await applyPromoActions(rows, {});
-            } else if (c.promo.restorePriceAfterExit !== false) {
+            } else if (c.schedule.autoSend && c.schedule.twoPhase === false && c.promo.restorePriceAfterExit !== false) {
               await restorePromoExits();
             }
           } catch (e) {
@@ -4618,13 +5073,16 @@ function createService(store, emit, electron, integrations) {
     return { enabled: true, nextRunAt: sched.nextRunAt.toISOString() };
   }
 
+  const priceChannels = new Set(['wb:apply-prices', 'wb:apply-size-prices', 'wb:promo-join', 'repricer:send', 'repricer:proposal-send', 'repricer:promo-apply', 'repricer:promo-exit', 'repricer:promo-restore']);
+  const inputChannels = new Set(['keys:set', 'keys:clear', 'settings:save', 'settings:reset', 'costs:save', 'costs:import', 'costs:clear', 'prices:draft-save', 'prices:draft-clear', 'repricer:save', 'repricer:item-configs:save', 'strategies:template', 'data:refresh-all', 'backup:import', 'backup:restore', 'repricer:calc', 'repricer:competitors:save', 'promos:import-noms', 'promos:noms:save', 'promos:clear-noms']);
   // Счётчик включает и вложенные асинхронные вызовы обработчиков: удаление или
   // импорт не могут обогнать запрос WB, который ещё запишет результат в этот профиль.
   for (const [channel, fn] of Object.entries(handlers)) {
     handlers[channel] = async (...args) => {
       if (disposed) throw new WBError('Сервис кабинета остановлен.', { code: 'PROFILE_CLOSED' });
+      if (priceJobRunning && priceJobContext.getStore() !== priceJobRunning && inputChannels.has(channel)) throw new WBError('Дождитесь окончания отправки WB. Локальные правки сохранены в очереди интерфейса.', { code: 'PRICE_BUSY' });
       activeHandlers++;
-      try { return await fn(...args); }
+      try { return await (priceChannels.has(channel) ? priceJob(() => fn(...args)) : fn(...args)); }
       finally { activeHandlers--; }
     };
   }

@@ -1215,9 +1215,9 @@ Views.settings = {
         for (const [name, vals] of Object.entries(this.catPatch)) {
           patch.categoryDefaults[name] = Object.assign({}, patch.categoryDefaults[name] || {}, vals);
         }
-        this.catPatch = null;
       }
       await S.saveSettings(patch);
+      if (patch.categoryDefaults) this.catPatch = null;
       S.invalidate();
       App.toast('Настройки сохранены', 'ok');
       App.refreshCurrent();
@@ -1428,7 +1428,9 @@ Views.settings = {
     const KEY_FIELDS = { single: '#k-single', prices: '#k-prices', statistics: '#k-stats', content: '#k-content', finance: '#k-finance', analytics: '#k-analytics', marketplace: '#k-marketplace' };
     const KEY_TITLES = KEY_NAMES;
     const saveKeys = async () => {
-      const payload = { demoMode: $('#k-demo').checked };
+      if (window.LocalDrafts && LocalDrafts.hasWork()) throw new Error('Есть несохранённые изменения: сначала нажмите их «Сохранить» или отмените. Сохранение ключей не применяет другие черновики.');
+      const payload = {};
+      if ($('#k-demo').checked !== !!s.demoMode) payload.demoMode = $('#k-demo').checked;
       const filled = [];
       for (const name of Object.keys(KEY_FIELDS)) {
         const el = $(KEY_FIELDS[name]);

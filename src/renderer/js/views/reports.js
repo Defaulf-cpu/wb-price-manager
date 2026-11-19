@@ -246,7 +246,7 @@ Views.reports = {
     return `
       <div class="grid g4" style="margin-bottom:14px">
         ${stat('Выручка за период', U.compact(rev) + ' ₽', U.fmt(T.salesQty || 0) + ' продаж, средний чек ' + U.money(T.avgCheck || 0))}
-        ${stat('Прибыль', U.compact(T.profit || 0) + ' ₽', 'после всех удержаний и налогов', U.profitClass(T.profit))}
+        ${stat('Прибыль', U.compact(T.profit || 0) + ' ₽', 'возвраты без списания себестоимости; со списанием ' + U.compact(T.profitWithReturnCogs || 0) + ' ₽', U.profitClass(T.profit))}
         ${stat('Маржинальность', U.pct(T.marginPct || 0), 'прибыль / выручка', U.profitClass(T.marginPct))}
         ${stat('Прибыль на продажу', U.money(T.avgProfitPerUnit || 0), 'возвраты: ' + U.pct(T.returnSharePct || 0), U.profitClass(T.avgProfitPerUnit))}
       </div>
@@ -264,7 +264,9 @@ Views.reports = {
             ${this.plLine('− Приёмка', T.acceptance, rev)}
             ${this.plLine('− Штрафы и удержания', T.penalties, rev)}
             ${this.plLine('= После расходов WB', T.wbAfterLogistics, rev, { total: true, sign: false })}
-            ${this.plLine('− Себестоимость проданного', T.cogs, rev)}
+            ${this.plLine('− Себестоимость проданного', T.cogs, rev, { note: 'возвращённые единицы не списаны' })}
+            ${this.plLine('Справочно: себестоимость возвращённых единиц', T.returnedCogs || 0, rev, { note: 'не вычтена в основной прибыли' })}
+            ${this.plLine('Справочно: прибыль со списанием возвратов', T.profitWithReturnCogs || 0, rev, { total: true, sign: false, cls: U.profitClass(T.profitWithReturnCogs || 0), note: 'если возвращённый товар нельзя продать снова' })}
             ${this.plLine('− Упаковка', T.packaging, rev)}
             ${this.plLine('− Реклама', T.ad, rev)}
             ${this.plLine('− Налог', T.tax, rev, { note: U.esc(String(rep.taxMode || '')) })}
@@ -375,7 +377,7 @@ Views.reports = {
         { title: 'К перечислению', key: 'forPay', num: true, render: (r) => U.money(r.forPay) },
         { title: 'После расходов WB', key: 'wbAfterLogistics', num: true, render: (r) => U.money(r.wbAfterLogistics) },
         { title: 'Себестоимость', key: 'cogs', num: true, render: (r) => U.money(r.cogs) },
-        { title: 'Прибыль', key: 'profit', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b>` },
+        { title: 'Прибыль', key: 'profit', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b><div class="tiny muted">со спис. возвратов: ${U.money(r.profitWithReturnCogs || 0)}</div>` },
         { title: 'Маржа %', key: 'marginPct', num: true, render: (r) => `<span class="${U.profitClass(r.marginPct)}">${U.pct(r.marginPct)}</span>` }
       ],
       rows: cats,
@@ -421,7 +423,7 @@ Views.reports = {
         { title: 'После расх. WB', key: 'wbAfterLogistics', num: true, render: (r) => U.money(r.wbAfterLogistics) },
         { title: 'Себест.', key: 'cogs', num: true, render: (r) => r.hasCost ? U.money(r.cogs) : '<span class="badge badge-info">нет</span>' },
         { title: 'Реклама+налог', key: 'ad', num: true, render: (r) => U.money(r.ad + r.tax) },
-        { title: 'Прибыль', key: 'profit', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b>` },
+        { title: 'Прибыль', key: 'profit', num: true, render: (r) => `<b class="${U.profitClass(r.profit)}">${U.money(r.profit)}</b><div class="tiny muted">со спис. возвратов: ${U.money(r.profitWithReturnCogs || 0)}</div>` },
         { title: 'Маржа %', key: 'marginPct', num: true, render: (r) => `<span class="${U.profitClass(r.marginPct)}">${U.pct(r.marginPct)}</span>` }
       ],
       rows: items,
@@ -465,20 +467,22 @@ Views.reports = {
     lines.push(row('Приёмка', T.acceptance));
     lines.push(row('Штрафы и удержания', T.penalties));
     lines.push(row('После расходов WB', T.wbAfterLogistics));
-    lines.push(row('Себестоимость', T.cogs));
+    lines.push(row('Себестоимость (без списания возвратов)', T.cogs));
+    lines.push(row('Себестоимость возвращённых (справочно, не вычтена)', T.returnedCogs || 0));
     lines.push(row('Упаковка', T.packaging));
     lines.push(row('Реклама', T.ad));
     lines.push(row('Налог', T.tax));
     lines.push(row('Чистая прибыль', T.profit));
+    lines.push(row('Прибыль со списанием себестоимости возвратов (справочно)', T.profitWithReturnCogs || 0));
     lines.push(['Маржинальность %', String(T.marginPct || 0), ''].join(';'));
     lines.push('');
     lines.push(['Товар', 'nmID', 'Артикул', 'Категория', 'Продажи шт', 'Выручка', 'Комиссия', 'Логистика',
-      'К перечислению', 'После расходов WB', 'Себестоимость', 'Упаковка', 'Реклама', 'Налог', 'Прибыль', 'Маржа %'].join(';'));
+      'К перечислению', 'После расходов WB', 'Себестоимость (без списания возвратов)', 'Себестоимость возвращённых (справочно)', 'Упаковка', 'Реклама', 'Налог', 'Прибыль', 'Прибыль со списанием возвратов', 'Маржа %'].join(';'));
     (rep.items || []).forEach((r) => lines.push([
       '"' + String(r.title || '').replace(/"/g, '""') + '"', r.nmID, r.vendorCode,
       '"' + String(r.category || '').replace(/"/g, '""') + '"',
       r.salesQty, r.revenue, r.commission, r.logistics, r.forPay, r.wbAfterLogistics,
-      r.cogs, r.packaging, r.ad, r.tax, r.profit, r.marginPct
+      r.cogs, r.returnedCogs || 0, r.packaging, r.ad, r.tax, r.profit, r.profitWithReturnCogs || 0, r.marginPct
     ].join(';')));
     API.exportCsv('pl-wb-' + (meta.dateFrom || '') + '-' + (meta.dateTo || '') + '.csv', lines.join('\r\n'));
     App.toast('P&L выгружен в CSV', 'ok');

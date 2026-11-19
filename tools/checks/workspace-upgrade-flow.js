@@ -111,7 +111,8 @@ const period = { startDateTime: '2026-01-01T00:00:00Z', endDateTime: '2026-12-31
   check('Налоги и условия файла не переходят в другой профиль', hub.getActiveStore().loadSettings().taxMode === 'usn6' && !hub.getActiveStore().loadPromoNoms()['3148']);
   await hub.handlers['profiles:switch']({ profileId: 'default' });
   await nativeFileBridge(hub, xlsx);
-  await reject('Авто-выход не отправляет цену, которая после округления не выше порога файла', () => hub.handlers['repricer:promo-apply']({ results: [{ nmID: 100000101, promoChosen: { type: 'exit', absolutePlanThreshold: 1200 }, proposed: { basePrice: 1000, discount: 0 }, needSend: true }] }));
+  const forgedExit = await hub.handlers['repricer:promo-apply']({ results: [{ nmID: 100000101, promoChosen: { type: 'exit', absolutePlanThreshold: 1200 }, proposed: { basePrice: 1000, discount: 0 }, needSend: true }] });
+  check('Авто-выход не доверяет подменённому результату браузера и не отправляет небезопасную цену', !forgedExit.exited && !forgedExit.exitSent);
   await analyticsCases();
   await dailyFinanceCases();
   await require('./workspace-ui-safety')({ check, ROOT, fixture, temp, hubs });
@@ -130,7 +131,7 @@ async function nativeFileBridge(hub, xlsx) {
   const context = { service: hub, fs, path, crypto, Buffer, MAX_BACKUP_BYTES, win: null,
     ipcMain: { handle: (channel, fn) => handlers.set(channel, fn) },
     dialog: { showOpenDialog: async () => canceled ? { canceled: true } : { filePaths: [filename] } }, shell: { showItemInFolder() {} } };
-  vm.runInNewContext(source.slice(source.indexOf('function registerIpc()'), source.indexOf('\napp.setName')) + '\nregisterIpc();', context);
+  vm.runInNewContext(source.slice(source.indexOf('function assertTrustedSender'), source.indexOf('function createWindow')) + '\n' + source.slice(source.indexOf('function registerIpc()'), source.indexOf('\napp.setName')) + '\nregisterIpc();', context);
   const response = await handlers.get('ui:import-file')(null, {});
   check('Настоящий IPC ui:import-file отдаёт данные в общем {ok,data}', response.ok && response.data.base64 === xlsx.toString('base64') && response.data.fileName === 'wb-original.xlsx');
   const downloads = [], scope = { window: { wbApp: { invoke: (channel, ...args) => handlers.get(channel)(null, ...args) } }, document: { cookie: '' }, U: { download: (...args) => downloads.push(args) } };

@@ -35,6 +35,6 @@ echo  Окно откроется автоматически. Это окно м
 echo.
 rem %%~dp0 раскрывается в путь с завершающим обратным слешем, и "\" перед кавычкой
 rem ломает разбор аргументов. Точка в конце (%%~dp0.) убирает висячий слеш.
-start "" "node_modules\electron\dist\electron.exe" "%~dp0." --no-sandbox
+start "" "node_modules\electron\dist\electron.exe" "%~dp0."
 endlocal
 exit /b 0

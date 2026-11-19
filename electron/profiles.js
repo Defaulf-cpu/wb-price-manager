@@ -321,7 +321,7 @@ function createProfileHub(options) {
     let totals = null;
     if (canAggregate) {
       totals = {};
-      for (const k of ['salesQty', 'returnsQty', 'revenue', 'commission', 'logistics', 'storage', 'acceptance', 'acquiring', 'penalties', 'forPay', 'wbAfterLogistics', 'cogs', 'packaging', 'ad', 'tax', 'profit', 'forPayFromWb']) {
+      for (const k of ['salesQty', 'returnsQty', 'revenue', 'commission', 'logistics', 'storage', 'acceptance', 'acquiring', 'penalties', 'forPay', 'wbAfterLogistics', 'cogs', 'packaging', 'ad', 'other', 'tax', 'profit', 'forPayFromWb']) {
         totals[k] = Math.round(valid.reduce((sum, r) => sum + (Number(r.totals[k]) || 0), 0) * 100) / 100;
       }
       totals.marginPct = totals.revenue ? Math.round(totals.profit / totals.revenue * 10000) / 100 : 0;

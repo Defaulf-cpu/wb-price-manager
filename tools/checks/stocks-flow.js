@@ -140,7 +140,8 @@ async function run() {
     '101: ' + (agg[101] && agg[101].total) + ', 102: ' + (agg[102] && agg[102].total));
   check('Разбивка по складам', agg[101] && agg[101].byWarehouse['Коледино'] === 10 && agg[101].byWarehouse['Электросталь'] === 20);
   check('Разбивка по регионам', agg[101] && agg[101].byRegion['Москва и МО'] === 10 && agg[101].byRegion['Московская область'] === 20);
-  check('Товар без остатка не попадает в агрегацию', WBClient.aggregateStocks([{ nmID: 200, stock: 0 }])[200] === undefined);
+  const zeroAgg = WBClient.aggregateStocks([{ nmID: 200, stock: 0 }])[200];
+  check('Товар с наблюдаемым нулевым остатком попадает в агрегацию', !!zeroAgg && zeroAgg.total === 0 && zeroAgg.observed === true && zeroAgg.sizeRows === 0, JSON.stringify(zeroAgg));
 
   check('stocksLowDays по умолчанию 14', store.loadSettings().stocksLowDays === 14);
 

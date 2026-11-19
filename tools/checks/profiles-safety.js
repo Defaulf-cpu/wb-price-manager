@@ -95,7 +95,7 @@ module.exports = async function runSafety(check) {
     } });
     const savedHandlers = Object.fromEntries(Object.entries(hub.handlers));
     const ipc = new Map(), source = read('electron/main.js');
-    vm.runInNewContext(source.slice(source.indexOf('function registerIpc()'), source.indexOf('\napp.setName')) + '\nregisterIpc();', {
+    vm.runInNewContext(source.slice(source.indexOf('function assertTrustedSender'), source.indexOf('function createWindow')) + '\n' + source.slice(source.indexOf('function registerIpc()'), source.indexOf('\napp.setName')) + '\nregisterIpc();', {
       service: hub, ipcMain: { handle: (c, fn) => ipc.set(c, fn) }, dialog: {}, shell: {}, win: null, fs, path, crypto, Buffer, MAX_BACKUP_BYTES
     });
     hub.getActiveStore().saveCosts({ '1001': { costPriceRub: 111 } });
@@ -318,13 +318,13 @@ module.exports = async function runSafety(check) {
       check('L UI: переключатель в шапке содержит оба кабинета', doc.querySelectorAll('.profile-switcher option').length === 2);
       w.S.state.priceEdits.set(1001, { basePrice: 777 });
       w.S.state.selection.add(1001); w.S.state.filters.q = 'Чужой фильтр';
-      w.Views.repricer.pendingEdits.set(1001, { price: 888 }); w.Views.repricer.results = [{ nmID: 1001 }]; w.Views.repricer.rstate = { from: 'A' };
+      w.Views.repricer.pendingEdits.set(1001, { config: { tag: 'Локально A' }, cost: {} }); w.Views.repricer.results = [{ nmID: 1001 }]; w.Views.repricer.rstate = { from: 'A' };
       w.Views.reports.period = { dateFrom: '2025-01-01', dateTo: '2025-02-01' };
       w.Views.promos.promoRows = { candidates: [{ nmID: 1001 }] };
       const ask = await w.App.switchProfile(bid);
       check('L UI: несохранённые правки требуют явного решения', ask === false && /несохранённые изменения/.test(doc.querySelector('#modal-root .modal').textContent) && hub.activeId() === 'default');
       doc.querySelector('#modal-root .modal-close').click();
-      check('L UI: отмена переключения сохраняет правки A', w.S.state.priceEdits.get(1001).basePrice === 777 && w.Views.repricer.pendingEdits.size === 1);
+      check('L UI: отмена переключения сохраняет только памятные правки A, но не записывает параметры', w.S.state.priceEdits.get(1001).basePrice === 777 && (w.Views.repricer.pendingEdits.get(1001) || w.Views.repricer.pendingEdits.get('1001')).config.tag === 'Локально A' && (hub.getActiveStore().loadItemConfigs()['1001'] || {}).tag === undefined);
       const switched = await w.App.switchProfile(bid, true);
       check('L UI: подтверждённое переключение читает B', switched && hub.activeId() === bid && w.S.state.costs['1001'].costPriceRub === 600 && w.API.activeProfileId() === bid);
       check('L UI: ручные правки, выделение и фильтры A не попали в B', !w.S.state.priceEdits.size && !w.S.state.selection.size && w.S.state.filters.q === '');

@@ -44,6 +44,27 @@ function registeredChannels() {
   return Array.from(new Set(svc.concat(ui)));
 }
 
+function allowedExternalUrl(value) {
+  try {
+    const u = new URL(String(value || ''));
+    return u.protocol === 'https:' && !u.username && !u.password && !u.port && /(^|\.)wildberries\.ru$/i.test(u.hostname);
+  } catch (_) { return false; }
+}
+function openExternalSafe(value) {
+  if (!allowedExternalUrl(value)) return false;
+  shell.openExternal(String(value));
+  return true;
+}
+function assertTrustedSender(event) {
+  const frame = event && event.senderFrame;
+  const url = frame && frame.url ? String(frame.url) : (event && event.sender && typeof event.sender.getURL === 'function' ? String(event.sender.getURL() || '') : '');
+  if (!url) return; // синтетические вызовы в тестах без Electron event
+  let parsed;
+  try { parsed = new URL(url); } catch (_) { throw new Error('IPC отклонён: неизвестный отправитель.'); }
+  const localRenderer = parsed.protocol === 'file:' && /\/src\/renderer\/index\.html$/i.test(parsed.pathname.replace(/\\/g, '/'));
+  if (!localRenderer) throw new Error('IPC отклонён: отправитель не является окном приложения.');
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1520,
@@ -59,7 +80,7 @@ function createWindow() {
       additionalArguments: ['--wb-channels=' + registeredChannels().join(',')],
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       spellcheck: false,
       devTools: true
     }
@@ -70,11 +91,11 @@ function createWindow() {
   if (DEV) win.webContents.openDevTools({ mode: 'detach' });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternalSafe(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) { e.preventDefault(); shell.openExternal(url); }
+    if (!url.startsWith('file://')) { e.preventDefault(); openExternalSafe(url); }
   });
   win.on('closed', () => { win = null; });
 }
@@ -122,6 +143,7 @@ function registerIpc() {
   for (const channel of Object.keys(service.handlers)) {
     ipcMain.handle(channel, async (_evt, ...args) => {
       try {
+        assertTrustedSender(_evt);
         const data = await service.handlers[channel](...args);
         return { ok: true, data };
       } catch (e) {
@@ -131,6 +153,7 @@ function registerIpc() {
   }
 
   ipcMain.handle('ui:export-csv', async (_e, payload) => {
+    assertTrustedSender(_e);
     const { defaultPath, content } = payload || {};
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
       title: 'Сохранить CSV',
@@ -143,7 +166,8 @@ function registerIpc() {
     return { ok: true, data: { filePath } };
   });
 
-  ipcMain.handle('ui:import-csv', async () => {
+  ipcMain.handle('ui:import-csv', async (_e) => {
+    assertTrustedSender(_e);
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
       title: 'Выберите CSV-файл',
       properties: ['openFile'],
@@ -158,6 +182,7 @@ function registerIpc() {
    * ui:import-csv не подходит: он читает файл как текст и портит двоичные данные.
    */
   ipcMain.handle('ui:import-file', async (_e, opts) => {
+    assertTrustedSender(_e);
     const o = opts || {};
     const exts = Array.isArray(o.extensions) && o.extensions.length ? o.extensions : ['xlsx', 'csv', 'txt'];
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
@@ -176,6 +201,7 @@ function registerIpc() {
 
   /** Файловые диалоги задания J: JSON без BOM, отмена не запускает скачивание. */
   ipcMain.handle('ui:save-backup', async (_e, payload) => {
+    assertTrustedSender(_e);
     try {
       const p = payload || {};
       const content = typeof p.content === 'string' ? p.content : '';
@@ -205,7 +231,8 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('ui:open-backup', async () => {
+  ipcMain.handle('ui:open-backup', async (_e) => {
+    assertTrustedSender(_e);
     try {
       const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Выберите файл резервной копии', properties: ['openFile'],
@@ -220,9 +247,9 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('ui:open-external', async (_e, url) => { shell.openExternal(String(url)); return { ok: true }; });
+  ipcMain.handle('ui:open-external', async (_e, url) => { assertTrustedSender(_e); if (!openExternalSafe(url)) return { ok: false, error: { message: 'Ссылка отклонена: разрешены только HTTPS-адреса Wildberries.', code: 'EXTERNAL_URL_BLOCKED' } }; return { ok: true }; });
 
-  ipcMain.handle('ui:app-info', async () => ({
+  ipcMain.handle('ui:app-info', async (_e) => { assertTrustedSender(_e); return ({
     ok: true,
     data: {
       version: app.getVersion(),
@@ -233,31 +260,37 @@ function registerIpc() {
       appDir: service.getActiveStore().dir,
       encryption: safeStorage.isEncryptionAvailable() ? 'Доступно (safeStorage)' : 'Недоступно — ключи хранятся в base64'
     }
-  }));
+  });
+  });
 
   ipcMain.handle('ui:theme', async (_e, theme) => {
+    assertTrustedSender(_e);
     nativeTheme.themeSource = theme || 'dark';
     return { ok: true };
   });
 
-  ipcMain.handle('ui:update-state', async () => ({
+  ipcMain.handle('ui:update-state', async (_e) => { assertTrustedSender(_e); return ({
     ok: true,
     data: updateManager ? updateManager.getState() : { status: 'unavailable', error: 'Менеджер обновлений не запущен.' }
-  }));
+  });
+  });
 
-  ipcMain.handle('ui:update-check', async () => ({
+  ipcMain.handle('ui:update-check', async (_e) => { assertTrustedSender(_e); return ({
     ok: true,
     data: updateManager ? await updateManager.checkNow(true) : { status: 'unavailable' }
-  }));
+  });
+  });
 
   ipcMain.handle('ui:update-enable', async (_e, value) => {
+    assertTrustedSender(_e);
     const enabled = !!value;
     const settings = service.getActiveStore().saveSettings({ autoUpdateEnabled: enabled });
     const update = updateManager ? await updateManager.setEnabled(enabled) : null;
     return { ok: true, data: { settings, update } };
   });
 
-  ipcMain.handle('ui:update-restart', async () => {
+  ipcMain.handle('ui:update-restart', async (_e) => {
+    assertTrustedSender(_e);
     if (!updateManager || !updateManager.restartAndInstall()) {
       return { ok: false, error: { message: 'Загруженного обновления для установки нет.' } };
     }
