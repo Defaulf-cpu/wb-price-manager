@@ -34,8 +34,8 @@ Views.calculator = {
     const warehouseTip = 'Введите значение уже с учётом актуального коэффициента склада (КЛ/КХ) или индекса локализации.';
     container.innerHTML = `
       <div class="alert info">Выберите категорию — комиссия, реклама, упаковка и тариф логистики подставятся из справочника категорий. Каждое значение можно изменить вручную; расчёт ничего не сохраняет в товары и не отправляет в WB.</div>
-      <div class="grid g2" style="margin-top:12px;align-items:start">
-        <div class="card"><h2>Исходные данные</h2><div class="grid g2" style="gap:10px">
+      <div class="grid g2 calc-layout" style="margin-top:12px;align-items:start">
+        <div class="card calc-input-panel"><div class="spread"><h2>Исходные данные</h2><button class="btn btn-ghost btn-sm" id="calc-toggle-inputs" type="button">Свернуть</button></div><div id="calc-collapsed-summary" class="calc-collapsed-summary" hidden></div><div id="calc-inputs"><div class="grid g2" style="gap:10px">
           <label class="field">Категория WB<select id="calc-category"><option value="">Без категории — общие настройки</option>${categories.map((c) => `<option value="${U.esc(c)}" ${c === d.category ? 'selected' : ''}>${U.esc(c)}</option>`).join('')}</select></label>
           <label class="field">Налоговый режим<select id="calc-tax">${taxModes.map((m) => `<option value="${m.id}">${U.esc(m.label)}</option>`).join('')}</select></label>
           <label class="field">Базовая цена, ₽<input type="number" class="num" id="calc-base" min="0" step="0.01" value="${d.basePrice}"></label>
@@ -67,13 +67,25 @@ Views.calculator = {
         <p class="hint" style="margin-top:8px">Если «Желаемая цена на полке» больше 0, весь расчёт идёт от неё: калькулятор сам выведет цену продавца до СПП и базовую цену, которую нужно поставить. Если поле пустое или 0 — расчёт идёт от базовой цены.</p>
         <div class="row wrap" style="margin-top:12px"><button class="btn btn-primary" id="calc-solve" type="button">Рассчитать нужную цену</button><button class="btn" id="calc-apply-category" type="button">Подставить категорию заново</button><button class="btn btn-ghost" id="calc-reset" type="button">Сбросить</button></div>
         <div id="calc-reverse-out" style="margin-top:10px"></div>
-        <p class="hint" id="calc-source" style="margin-top:8px"></p></div>
-        <div class="card"><h2>Итог расчёта</h2><div id="calc-out"></div></div>
+        <p class="hint" id="calc-source" style="margin-top:8px"></p></div></div>
+        <div class="card calc-result-panel"><h2>Итог расчёта</h2><div id="calc-out"></div></div>
       </div>`;
     const $ = (id) => container.querySelector(id);
     const num = (id) => U.num($(id).value);
     let logisticsAuto = true;
     let reverseShown = false;
+    let inputsCollapsed = false;
+    try { inputsCollapsed = localStorage.getItem('wb.calculator.inputsCollapsed') === '1'; } catch (_) { /* хранилище недоступно */ }
+    const setInputsCollapsed = (value) => {
+      inputsCollapsed = !!value;
+      container.querySelector('.calc-layout').classList.toggle('inputs-collapsed', inputsCollapsed);
+      $('#calc-inputs').hidden = inputsCollapsed;
+      $('#calc-collapsed-summary').hidden = !inputsCollapsed;
+      const button = $('#calc-toggle-inputs');
+      button.textContent = inputsCollapsed ? 'Развернуть' : 'Свернуть';
+      button.title = inputsCollapsed ? 'Показать исходные данные' : 'Свернуть исходные данные до компактного блока';
+      try { localStorage.setItem('wb.calculator.inputsCollapsed', inputsCollapsed ? '1' : '0'); } catch (_) { /* не критично */ }
+    };
     const applyCategory = () => {
       const cat = $('#calc-category').value;
       const def = (s.categoryDefaults || {})[cat] || {};
@@ -181,6 +193,7 @@ Views.calculator = {
       if (shelfSet > 0) { seller = shelfSet / (1 - p.sppPct / 100); calcBase = seller / (1 - p.discountPct / 100); }
       else { calcBase = p.basePrice; seller = calcBase * (1 - p.discountPct / 100); }
       const c = compute(seller, p);
+      $('#calc-collapsed-summary').innerHTML = '<b>Калькулятор свёрнут</b><br>' + U.esc(p.categoryName || 'Без категории') + '<br>База: ' + U.money(calcBase) + '<br>Покупателю: ' + U.money(c.sppPrice) + '<br>СПП: ' + U.pct(p.sppPct);
       const roi = p.costPriceRub > 0 ? c.profit / p.costPriceRub * 100 : 0;
       const costReturn = c.totalCosts > 0 ? c.profit / c.totalCosts * 100 : 0;
       const breakEvenPrice = solvePrice(p, (x) => x.profit);
@@ -236,9 +249,11 @@ Views.calculator = {
       el.addEventListener('input', () => { if (el.id === 'calc-logistics') logisticsAuto = false; if ((el.id === 'calc-volume') && logisticsAuto) updateLogistics(); draw(); });
       el.addEventListener('change', () => { if (el.id === 'calc-category') applyCategory(); else draw(); });
     });
+    $('#calc-toggle-inputs').onclick = () => setInputsCollapsed(!inputsCollapsed);
     $('#calc-solve').onclick = () => { reverseShown = true; draw(); };
     $('#calc-apply-category').onclick = applyCategory;
     $('#calc-reset').onclick = () => { this.data = null; this.render(container); };
+    setInputsCollapsed(inputsCollapsed);
     applyCategory();
   }
 };

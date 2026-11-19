@@ -98,12 +98,28 @@ window.App = (function () {
     }
   }
 
+  const SIDEBAR_KEY = 'wb.ui.sidebarCollapsed';
+  let sidebarCollapsed = false;
+  function setSidebarCollapsed(value) {
+    sidebarCollapsed = !!value;
+    document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+    try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? '1' : '0'); } catch (_) { /* недоступное хранилище не мешает */ }
+    const button = document.getElementById('sidebar-toggle');
+    if (button) {
+      button.textContent = sidebarCollapsed ? '›' : '‹';
+      button.title = sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню';
+      button.setAttribute('aria-label', button.title);
+      button.setAttribute('aria-expanded', String(!sidebarCollapsed));
+    }
+    return sidebarCollapsed;
+  }
+
   function buildNav() {
     const nav = document.getElementById('nav');
     nav.innerHTML = '';
     NAV.forEach((n) => {
-      const a = U.el(`<div class="nav-item ${n.id === S.state.view ? 'active' : ''}" data-id="${n.id}">
-        <span class="ico">${n.ico}</span><span>${n.label}</span>
+      const a = U.el(`<div class="nav-item ${n.id === S.state.view ? 'active' : ''}" data-id="${n.id}" title="${U.esc(n.label)}">
+        <span class="ico">${n.ico}</span><span class="nav-label">${n.label}</span>
         <span class="nav-count" data-count="${n.id}" style="display:none"></span></div>`);
       a.onclick = () => go(n.id);
       nav.appendChild(a);
@@ -543,8 +559,11 @@ window.App = (function () {
   }
 
   async function init() {
-    try { theme = localStorage.getItem(THEME_KEY) || 'dark'; } catch (_) {}
+    try { theme = localStorage.getItem(THEME_KEY) || 'dark'; sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === '1'; } catch (_) {}
     setTheme(theme);
+    setSidebarCollapsed(sidebarCollapsed);
+    const sidebarToggle = document.getElementById('sidebar-toggle');
+    if (sidebarToggle) sidebarToggle.onclick = () => setSidebarCollapsed(!sidebarCollapsed);
     rememberViewDefaults();
     const dirtyInput = (event) => { if (event.target && event.target.closest && event.target.closest('#view, #modal-root')) formDirty = true; };
     document.addEventListener('input', dirtyInput);
@@ -626,7 +645,7 @@ window.App = (function () {
     }
   }
 
-  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey, switchProfile, refreshProfiles, reloadProfileData, hasUnsavedProfileEdits, setTheme, getTheme: () => theme };
+  return { init, go, toast, refreshCurrent, refreshAllData, setModeBadge, updateNavCounts, updateSyncInfo, switchToLive, hasRealKey, switchProfile, refreshProfiles, reloadProfileData, hasUnsavedProfileEdits, setTheme, getTheme: () => theme, setSidebarCollapsed, getSidebarCollapsed: () => sidebarCollapsed };
 })();
 
 document.addEventListener('DOMContentLoaded', () => App.init());

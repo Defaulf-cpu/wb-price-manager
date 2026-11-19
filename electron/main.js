@@ -67,10 +67,10 @@ function assertTrustedSender(event) {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1520,
-    height: 950,
-    minWidth: 1100,
-    minHeight: 680,
+    width: 1240,
+    height: 880,
+    minWidth: 760,
+    minHeight: 620,
     show: false,
     backgroundColor: '#0f1115',
     autoHideMenuBar: true,

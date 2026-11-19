@@ -187,6 +187,10 @@ async function main() {
     assert.ok(doc.querySelector('#calc-category')); assert.match(doc.querySelector('#calc-out').textContent, /ROI по себестоимости/);
     assert.match(doc.querySelector('#calc-out').textContent, /Цена для покупателя/);
     assert.ok(!doc.querySelector('#calc-wallet'));
+    doc.querySelector('#sidebar-toggle').click(); assert.ok(doc.body.classList.contains('sidebar-collapsed')); assert.equal(w.App.getSidebarCollapsed(), true);
+    doc.querySelector('#sidebar-toggle').click(); assert.ok(!doc.body.classList.contains('sidebar-collapsed'));
+    doc.querySelector('#calc-toggle-inputs').click(); assert.ok(doc.querySelector('.calc-layout').classList.contains('inputs-collapsed')); assert.equal(doc.querySelector('#calc-inputs').hidden, true); assert.equal(doc.querySelector('#calc-collapsed-summary').hidden, false);
+    doc.querySelector('#calc-toggle-inputs').click(); assert.equal(doc.querySelector('#calc-inputs').hidden, false);
     const costBefore = plain(store.loadCosts().items[nm]);
     input('#calc-base', 2000); input('#calc-cost', 500);
     assert.match(doc.querySelector('#calc-out').textContent, /Прибыль с единицы/);

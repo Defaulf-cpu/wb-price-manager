@@ -1,7 +1,7 @@
 {
   "name": "wb-price-manager",
   "productName": "WB Price Manager",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Десктоп-приложение для управления ценами на Wildberries: массовая переценка, контроль входа в акции и расчёт юнит-экономики по данным API личного кабинета",
   "main": "electron/main.js",
   "author": "WB Price Manager",
