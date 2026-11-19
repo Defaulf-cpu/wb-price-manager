@@ -1033,13 +1033,16 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       break;
 
     case 'margin': {
-      const p = ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null;
-      if (p === null) {
+      const targetMarginRub = num(I.targetMarginRub, 0);
+      const pPct = ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null;
+      const pRub = ctx.econAt && targetMarginRub > 0 ? priceForProfit(marginCtx, targetMarginRub, priceFloor, searchMax) : null;
+      const candidates = [pPct, pRub].filter((x) => x !== null && x !== undefined);
+      if (!candidates.length) {
         target = Math.min(curSeller, corridorMax);
         notes.push(`Целевая маржа ${targetMargin}% недостижима даже на базовой цене — держим максимум коридора.`);
       } else {
-        target = Math.max(p, priceFloor);
-        notes.push(`Цена под целевую маржу ${targetMargin}%: ${Math.round(target)} ₽.`);
+        target = Math.max(...candidates, priceFloor);
+        notes.push(`Цена под целевую маржу ${targetMargin}%${targetMarginRub > 0 ? ' и ' + Math.round(targetMarginRub) + ' ₽' : ''}: ${Math.round(target)} ₽.`);
       }
       break;
     }

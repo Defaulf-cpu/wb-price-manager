@@ -103,4 +103,10 @@ check('конфликт порогов: минимальный побеждае�
   assert.ok(res.warnings.some((w) => /Пороги конфликтуют/.test(w)), res.warnings.join(' | '));
 });
 
+check('блок «Цена (вне акции)»: целевая Маржа в ₽ задаёт обычную цену', () => {
+  // profit = price − 400; прибыль 1200 ₽ достигается при цене 1600 ₽.
+  const res = RP.computeItem(ctx(), cfg(null), { strategy: 'margin', targetMarginPct: 0, targetMarginRub: 1200, basePriceTarget: 2000 });
+  assert.ok(Math.abs(res.proposed.sellerPrice - 1600) < 1, String(res.proposed.sellerPrice));
+});
+
 console.log('\nИТОГО custom-strategy: ' + passed + ' пройдено, 0 ошибок');

@@ -3429,6 +3429,7 @@ Views.repricer = {
             ${fld('minPrice', 'Минимальная цена, ₽', c.minPrice, 'пол коридора')}
             ${fld('basePriceTarget', 'Базовая цена (потолок), ₽', c.basePriceTarget || r.basePrice, 'потолок коридора')}
             ${fld('targetMarginPct', 'Целевая маржа, %', c.targetMarginPct, '', '0.5')}
+            ${fld('targetMarginRub', 'Целевая маржа, ₽', c.targetMarginRub, 'прибыль с единицы вне акции', '1')}
             ${fld('minMarginPct', 'Минимальная маржа, %', c.minMarginPct, '', '0.5')}
             ${fld('minMarginRub', 'Минимальная маржа, ₽', c.minMarginRub, 'пол по прибыли', '1')}
             ${fld('maxPrice', 'Максимальная цена, ₽', c.maxPrice, 'жёсткий потолок', '1')}

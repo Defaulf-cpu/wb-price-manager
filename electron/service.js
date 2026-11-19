@@ -2173,7 +2173,7 @@ function createService(store, emit, electron, integrations) {
           if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '') WorkspaceConfig.template({ [key]: clean[key] });
         }
         // Пороги коридора в рублях и максимальная Маржа: неотрицательные конечные числа.
-        for (const key of ['minPrice', 'maxPrice', 'minMarginRub', 'maxMarginRub']) {
+        for (const key of ['minPrice', 'maxPrice', 'minMarginRub', 'maxMarginRub', 'targetMarginRub']) {
           if (clean[key] !== undefined && clean[key] !== null && clean[key] !== '' && (!Number.isFinite(Number(clean[key])) || Number(clean[key]) < 0 || Number(clean[key]) > 1000000000)) throw new WBError('Порог «' + key + '» должен быть неотрицательным числом.', { code: 'BAD_CONFIG' });
         }
         if (clean.maxMarginPct !== undefined && clean.maxMarginPct !== null && clean.maxMarginPct !== '' && (!Number.isFinite(Number(clean.maxMarginPct)) || Number(clean.maxMarginPct) < 0 || Number(clean.maxMarginPct) > 99)) throw new WBError('Максимальная Маржа должна быть от 0 до 99%.', { code: 'BAD_CONFIG' });

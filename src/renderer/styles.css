@@ -282,6 +282,18 @@ table.grid-table tfoot td {
 @keyframes slidein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ─────────── Прочее ─────────── */
+.promo-price-block .pp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: 6px 12px 12px; }
+.promo-price-block .pp-col { padding: 4px 12px; }
+.promo-price-block .pp-col:first-child { border-right: 1px solid var(--line); }
+.promo-price-block .pp-col h4 { margin: 4px 0 8px; font-size: 13px; }
+.promo-price-block .pp-row { display: grid; grid-template-columns: minmax(130px, 1.15fr) 76px minmax(130px, 1fr); gap: 8px; align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12px; }
+.promo-price-block .pp-row:last-child { border-bottom: 0; }
+.promo-price-block .pp-row > span { color: var(--muted); }
+.promo-price-block .pp-row b { text-align: right; white-space: nowrap; }
+.promo-price-block .pp-row label { font-size: 11px; color: var(--muted); }
+.promo-price-block .pp-row input { width: 100%; margin-top: 2px; padding: 5px 7px; font-size: 12px; }
+.promo-price-block .pp-index { font-size: 11px; text-align: right; }
+@media (max-width: 900px) { .promo-price-block .pp-grid { grid-template-columns: 1fr; } .promo-price-block .pp-col:first-child { border-right: 0; border-bottom: 1px solid var(--line); } }
 .thresholds { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .thresholds .th-head { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
 .thresholds .th-grid { display: grid; grid-template-columns: minmax(210px, 1fr) minmax(260px, 1.2fr); gap: 14px; }

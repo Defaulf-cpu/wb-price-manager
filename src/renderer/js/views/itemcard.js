@@ -1122,8 +1122,36 @@ Views.itemcard = {
     const list = d.promos || [];
     const url = U.promoCabinetUrl;
 
+    const cfg = d.itemConfig || {};
+    const val = (x) => x === undefined || x === null || x === '' ? '' : x;
     host.innerHTML = `
-      <div class="card">
+      <div class="card promo-price-block" id="ic-promo-price-block">
+        <div class="card-head"><h3>Цены товара в акции и вне акции</h3>
+          <span class="hint">как в INDEEPA: слева расчёт, справа ввод цифрами</span></div>
+        <div class="pp-grid">
+          <section class="pp-col">
+            <h4>Мин цена (в акции)</h4>
+            <div class="pp-row"><span>Расчётная мин. цена, ₽</span><b id="pp-min-calc">—</b><label>Мин. цена, ₽ *<input type="number" class="num" id="pp-minPrice" step="1" value="${val(cfg.minPrice)}" placeholder="не ниже этой цены" /></label></div>
+            <div class="pp-row"><span>Расчётная мин. цена с СПП, ₽</span><b id="pp-min-spp">—</b><label>Мин. марж., % *<input type="number" class="num" id="pp-minMarginPct" step="0.5" value="${val(cfg.minMarginPct)}" placeholder="пол по марже" /></label></div>
+            <div class="pp-row"><span>Марж. расчётной мин. цены, %</span><b id="pp-min-margin-pct">—</b><label>Мин. марж., ₽ *<input type="number" class="num" id="pp-minMarginRub" step="1" value="${val(cfg.minMarginRub)}" placeholder="пол по прибыли" /></label></div>
+            <div class="pp-row"><span>Марж. расчётной мин. цены, ₽</span><b id="pp-min-margin-rub">—</b><span class="pp-index">Прогнозный индекс мин. цены<br><b>Без индекса</b></span></div>
+          </section>
+          <section class="pp-col">
+            <h4>Цена (вне акции)</h4>
+            <div class="pp-row"><span>Расчётная базовая цена, ₽</span><b id="pp-base-calc">—</b><label>Базовая цена, ₽ *<input type="number" class="num" id="pp-basePriceTarget" step="1" value="${val(cfg.basePriceTarget)}" placeholder="обычная цена" /></label></div>
+            <div class="pp-row"><span>Расчётная базовая цена с СПП, ₽</span><b id="pp-base-spp">—</b><label>Базовая марж., % *<input type="number" class="num" id="pp-targetMarginPct" step="0.5" value="${val(cfg.targetMarginPct)}" placeholder="целевая маржа" /></label></div>
+            <div class="pp-row"><span>Марж. расчётной базовой цены, %</span><b id="pp-base-margin-pct">—</b><label>Базовая марж., ₽ *<input type="number" class="num" id="pp-targetMarginRub" step="1" value="${val(cfg.targetMarginRub)}" placeholder="прибыль с единицы" /></label></div>
+            <div class="pp-row"><span>Марж. расчётной базовой цены, ₽</span><b id="pp-base-margin-rub">—</b><span class="pp-index">Прогнозный индекс базовой цены<br><b>Без индекса</b></span></div>
+          </section>
+        </div>
+        <div class="row wrap" style="gap:8px;margin-top:10px">
+          <button class="btn btn-primary btn-sm" id="pp-save">Сохранить цены и пороги</button>
+          <span class="hint" id="pp-status">Расчёт предварительный по экономике карточки; репрайсер строго не выйдет за мин./макс. пороги.</span>
+        </div>
+        <p class="hint" style="margin-top:6px">Для WB вместо колонки «по карте Ozon» показана цена покупателя после СПП. «Не ниже 500 ₽» — Мин. цена 500; «ровно 500» — Мин. цена 500 и максимальная цена 500 во вкладке «Комиссии и параметры».</p>
+      </div>
+
+      <div class="card" style="margin-top:12px">
         <div class="card-head"><h3>Акции, к которым относится товар</h3>
           <span class="hint">${list.length ? list.length + ' шт.' : 'нет данных'}</span></div>
         <div style="padding:12px 16px 16px">
@@ -1153,6 +1181,53 @@ Views.itemcard = {
           </div>
         </div>
       </div>`;
+
+    // Блок «Мин цена (в акции) / Цена (вне акции)»: расчёт слева, ввод справа, пересчёт при вводе.
+    const ppParams = this.econ().params;
+    const ppSpp = U.num(ppParams.sppPct);
+    const ppUnitAt = (price) => EC.calcUnit(price, ppParams);
+    const ppPriceFor = (get, target) => {
+      let lo = 1, hi = Math.max(100000, U.num(this.econ().current.revenue) * 4);
+      if (get(ppUnitAt(hi)) < target) return null;
+      for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (get(ppUnitAt(mid)) >= target) hi = mid; else lo = mid; }
+      return hi;
+    };
+    const ppVal = (id) => { const el = host.querySelector(id); return el && el.value !== '' ? U.num(el.value) : null; };
+    const ppSet = (id, text) => { const el = host.querySelector(id); if (el) el.textContent = text; };
+    const updatePromoPrices = () => {
+      const floorParts = [ppVal('#pp-minPrice'), ppVal('#pp-minMarginPct') > 0 ? ppPriceFor((u) => u.marginPct, ppVal('#pp-minMarginPct')) : null, ppVal('#pp-minMarginRub') > 0 ? ppPriceFor((u) => u.profit, ppVal('#pp-minMarginRub')) : null].filter((x) => x > 0);
+      const floor = floorParts.length ? Math.max(...floorParts) : null;
+      const baseParts = [ppVal('#pp-basePriceTarget'), ppVal('#pp-targetMarginPct') > 0 ? ppPriceFor((u) => u.marginPct, ppVal('#pp-targetMarginPct')) : null, ppVal('#pp-targetMarginRub') > 0 ? ppPriceFor((u) => u.profit, ppVal('#pp-targetMarginRub')) : null].filter((x) => x > 0);
+      const base = baseParts.length ? Math.max(...baseParts) : U.num(this.econ().current.revenue);
+      ppSet('#pp-min-calc', floor ? U.money(floor) : 'не задан');
+      ppSet('#pp-min-spp', floor ? U.money(floor * (1 - ppSpp / 100)) : '—');
+      ppSet('#pp-min-margin-pct', floor ? U.pct(ppUnitAt(floor).marginPct) : '—');
+      ppSet('#pp-min-margin-rub', floor ? U.money(ppUnitAt(floor).profit) : '—');
+      ppSet('#pp-base-calc', base ? U.money(base) : '—');
+      ppSet('#pp-base-spp', base ? U.money(base * (1 - ppSpp / 100)) : '—');
+      ppSet('#pp-base-margin-pct', base ? U.pct(ppUnitAt(base).marginPct) : '—');
+      ppSet('#pp-base-margin-rub', base ? U.money(ppUnitAt(base).profit) : '—');
+    };
+    ['#pp-minPrice', '#pp-minMarginPct', '#pp-minMarginRub', '#pp-basePriceTarget', '#pp-targetMarginPct', '#pp-targetMarginRub'].forEach((id) => {
+      const el = host.querySelector(id); if (el) el.addEventListener('input', updatePromoPrices);
+    });
+    updatePromoPrices();
+    host.querySelector('#pp-save').onclick = async (ev) => {
+      const btn = ev.currentTarget; btn.disabled = true;
+      const status = host.querySelector('#pp-status');
+      try {
+        const patch = { minPrice: ppVal('#pp-minPrice'), minMarginPct: ppVal('#pp-minMarginPct'), minMarginRub: ppVal('#pp-minMarginRub'), basePriceTarget: ppVal('#pp-basePriceTarget'), targetMarginPct: ppVal('#pp-targetMarginPct'), targetMarginRub: ppVal('#pp-targetMarginRub') };
+        await API.invoke('repricer:item-configs:save', { items: { [String(this.nmID)]: patch } });
+        const target = this.data.itemConfig || (this.data.itemConfig = {});
+        Object.entries(patch).forEach(([k, v]) => { if (v === null) delete target[k]; else target[k] = v; });
+        S.invalidate();
+        status.textContent = 'Сохранено. Репрайсер применит пороги при следующем пересчёте; в WB цены этим действием не отправляются.';
+        App.toast('Цены и пороги товара сохранены', 'ok', 5000);
+      } catch (e) {
+        status.textContent = e.message || String(e);
+        App.toast(e.message || String(e), 'err', 8000);
+      } finally { btn.disabled = false; }
+    };
 
     host.querySelectorAll('[data-promo]').forEach((b) => {
       b.onclick = () => {
