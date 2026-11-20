@@ -128,7 +128,7 @@
     const next = host.querySelector('#rp-grid .tablewrap'); if (next && scroll) { next.scrollLeft = left; next.scrollTop = top; }
     if (focus && focus.cls && !document.querySelector('#modal-root .modal')) { const field = host.querySelector('.' + focus.cls + '[data-nm="' + focus.nm + '"]'); if (field) field.focus({ preventScroll: true }); }
     host.querySelectorAll('.rp-minprice, .rp-baseprice, .rp-off-val').forEach((input) => { input.step = '0.01'; });
-    host.querySelectorAll('.rp-other-pct, .rp-other-rub, .rp-cost, .rp-tag, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-val').forEach((input) => { input.oninput = () => { input.dataset.localTouched = '1'; if (input.checkValidity() && input.onchange) input.onchange(); }; });
+    host.querySelectorAll('.rp-other-pct, .rp-other-rub, .rp-cost, .rp-tag, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-val').forEach((input) => { input.oninput = () => { input.dataset.localTouched = '1'; if (input.closest('.rp-minblock, .rp-baseblock')) this.updatePriceBlock(input); if (input.checkValidity() && input.onchange) input.onchange(); }; });
     this.drawHealthFilter();
   };
   const originalTabPrices = rp.tabPrices;

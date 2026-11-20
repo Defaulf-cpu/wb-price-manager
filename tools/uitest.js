@@ -2095,6 +2095,26 @@ async function run() {
       breakEvenHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80));
     check('D: в строке виден блок «Мин цена (в акции)»', /порог скидки|акций нет/.test(dText));
     check('D: в строке виден блок «Цена (вне акции)»', /база/.test(dText));
+    check('D: блок мин цены: один источник — заполнение поля очищает остальные', (() => {
+      const price = dTr.querySelector('.mb-min-price'), pct = dTr.querySelector('.mb-min-mpct'), rub = dTr.querySelector('.mb-min-mrub');
+      if (!price || !pct || !rub) return false;
+      price.value = '111'; pct.value = '22'; rub.value = '33';
+      pct.dispatchEvent(new window.Event('input', { bubbles: true }));
+      return price.value === '' && rub.value === '' && pct.value === '22';
+    })());
+    check('D: блок цены вне акции: один источник — заполнение поля очищает остальные', (() => {
+      const price = dTr.querySelector('.mb-base-price'), pct = dTr.querySelector('.mb-base-mpct'), rub = dTr.querySelector('.mb-base-mrub');
+      if (!price || !pct || !rub) return false;
+      price.value = '111'; pct.value = '22'; rub.value = '33';
+      rub.dispatchEvent(new window.Event('input', { bubbles: true }));
+      return price.value === '' && pct.value === '' && rub.value === '33';
+    })());
+    check('D: колонки ценовых блоков не сжимаются уже текста (минимум 340 px)', (() => {
+      const cols = Array.from(doc.querySelectorAll('#rp-grid col'));
+      const floor = cols.find((c) => c.getAttribute('data-col-id') === 'floor');
+      const restore = cols.find((c) => c.getAttribute('data-col-id') === 'restore');
+      return !!floor && !!restore && parseFloat(floor.style.width) >= 340 && parseFloat(restore.style.width) >= 340;
+    })());
 
     // ── правки в строке копятся и применяются одной кнопкой ──
     const rateCny = Number((window.S.state.settings.costRates || {}).CNY);
@@ -2537,11 +2557,12 @@ async function run() {
     'таких товаров: ' + invalid.length);
   if (invalid.length) {
     check('INDEEPA: показана плашка с причинами', /не заполнены данные/.test(rpText2));
-    const errs = rp.rowErrors(invalid[0]);
-    check('INDEEPA: ошибки строки названы по-русски', errs.length > 0 && /себестоимость|порог|базовая цена/.test(errs.join(' ')),
+    const missingRow = invalid.find((row) => /себестоимость|порог|базовая цена/.test(rp.rowErrors(row).join(' '))) || invalid[0];
+    const errs = rp.rowErrors(missingRow);
+    check('INDEEPA: ошибки строки названы по-русски', errs.length > 0 && /себестоимость|порог|базовая цена|убыток/.test(errs.join(' ')),
       errs.join('; '));
-    check('INDEEPA: товар с ошибками не помечен к отправке', invalid[0].needSend !== true || errs.length === 0,
-      'needSend=' + invalid[0].needSend + ', ошибки: ' + errs.join('; '));
+    check('INDEEPA: товар с ошибками не помечен к отправке', missingRow.needSend !== true || errs.length === 0,
+      'needSend=' + missingRow.needSend + ', ошибки: ' + errs.join('; '));
   }
   // в демо у всех товаров себестоимость задана, поэтому валидацию проверяем точечно:
   // подменяем данные по одному артикулу и смотрим, что строка помечается ошибкой

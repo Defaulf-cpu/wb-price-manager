@@ -33,8 +33,13 @@ window.GridLayout = (function () {
     return rows.slice().sort((a, b) => (rank.get(String(a.nmID)) ?? 1e9) - (rank.get(String(b.nmID)) ?? 1e9));
   }
   const DEFAULT_WIDTHS = { item: 300, priceNow: 250, priceNext: 300, other: 210, abc: 155, strategy: 250, offset: 290, competitor: 240, info: 235, stock: 180, plan: 180,
-    floor: 225, cost: 210, sizes: 260, promos: 240, status: 200, restore: 200, why: 110, barcode: 190, costDetail: 210 };
+    floor: 340, cost: 210, sizes: 260, promos: 240, status: 200, restore: 340, why: 110, barcode: 190, costDetail: 210 };
   const defaultWidth = (id) => DEFAULT_WIDTHS[id] || 165;
+  // Колонки с блоками «Мин цена (в акции)» и «Цена (вне акции)» нельзя сжать
+  // уже их текста и полей ввода — иначе подписи и значения вылезают в соседние
+  // колонки. Минимум держим и для уже сохранённых пользовательских ширин.
+  const MIN_WIDTHS = { item: 200, floor: 340, restore: 340 };
+  const minWidth = (id) => MIN_WIDTHS[id] || 70;
 
   function attach(options) {
     const o = options, table = o.table, columns = o.columns;
@@ -50,7 +55,7 @@ window.GridLayout = (function () {
     group = document.createElement('colgroup');
     const hasSelect = table.querySelector('th.rp-check') ? 1 : 0;
     if (hasSelect) { const col = document.createElement('col'); col.style.width = '42px'; group.appendChild(col); }
-    const widths = columns.map((c) => clamp(data.widths[c.colId] || defaultWidth(c.colId), c.colId === 'item' ? 200 : 70, 1400));
+    const widths = columns.map((c) => clamp(data.widths[c.colId] || defaultWidth(c.colId), minWidth(c.colId), 1400));
     const cols = columns.map((c, i) => { const col = document.createElement('col'); col.dataset.colId = c.colId; col.style.width = widths[i] + 'px'; group.appendChild(col); return col; });
     table.insertBefore(group, table.firstChild);
     const updateWidth = () => { table.style.width = (widths.reduce((a, b) => a + b, 0) + hasSelect * 42) + 'px'; table.style.minWidth = '0'; applyPins(); };
@@ -101,7 +106,7 @@ window.GridLayout = (function () {
       document.body.classList.add('grid-resizing');
     }
     function setWidth(index, value) {
-      widths[index] = clamp(value, columns[index].colId === 'item' ? 200 : 70, 1400);
+      widths[index] = clamp(value, minWidth(columns[index].colId), 1400);
       cols[index].style.width = widths[index] + 'px'; data.widths[columns[index].colId] = widths[index]; updateWidth();
     }
     function moveColumn(from, to) {

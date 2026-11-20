@@ -945,7 +945,7 @@ Views.itemcard = {
               ${fld('maxMarginRub', 'Макс. марж., ₽', cfg.maxMarginRub, 'потолок по прибыли')}
             </div>
           </div>
-          <p class="hint">Мин. цена заполняется в валюте кабинета: «удерживать цену не ниже 500 ₽» — заполнить 500; «ровно 500» — Мин и Макс по 500. Действующий минимум — самый строгий из минимальных порогов, потолок — самый строгий из максимальных; репрайсер строго работает внутри коридора. Расчёт слева предварительный, по текущей экономике карточки; точный коридор покажет пересчёт репрайсера.</p>
+          <p class="hint">Мин. цена заполняется в валюте кабинета: «удерживать цену не ниже 500 ₽» — заполнить 500; «ровно 500» — Мин и Макс по 500. В каждой группе (минимум и максимум) заполняется только одно поле: цена, Маржа % или Маржа ₽ — при вводе остальные поля группы очищаются. Минимум и максимум между собой комбинировать можно, например минимум по марже 10%, а максимум ценой 500 ₽; если минимум получится выше максимума, репрайсер покажет конфликт. Расчёт слева предварительный, по текущей экономике карточки; точный коридор покажет пересчёт репрайсера.</p>
         </div>
         <p class="hint" style="margin-top:8px">Личная стратегия важнее общей: она применяется только к этому артикулу.</p>
       </div>
@@ -989,9 +989,17 @@ Views.itemcard = {
       set('#th-ceil', ceil ? U.money(ceil) : 'не задан');
       set('#th-corridor', floor || ceil ? (floor ? U.money(floor) : '…') + ' — ' + (ceil ? U.money(ceil) : '…') + (floor && ceil && ceil < floor ? ' ⚠ конфликт: применится минимум' : '') : 'не задан');
     };
+    // Один источник в группе: заполнение одного поля очищает остальные той же группы.
+    const thExclusive = (el) => {
+      if (!el || el.value === '') return;
+      const key = el.id.replace('ic-p-', '');
+      const groups = [['minPrice', 'minMarginPct', 'minMarginRub'], ['maxPrice', 'maxMarginPct', 'maxMarginRub']];
+      const group = groups.find((g) => g.includes(key));
+      if (group) group.forEach((k) => { const other = host.querySelector('#ic-p-' + k); if (other && other !== el) other.value = ''; });
+    };
     ['minPrice', 'minMarginPct', 'minMarginRub', 'maxPrice', 'maxMarginPct', 'maxMarginRub'].forEach((k) => {
       const el = host.querySelector('#ic-p-' + k);
-      if (el) el.addEventListener('input', updateThresholds);
+      if (el) el.addEventListener('input', (e) => { thExclusive(e.target); updateThresholds(); });
     });
     updateThresholds();
 
@@ -1208,8 +1216,15 @@ Views.itemcard = {
       ppSet('#pp-base-margin-pct', base ? U.pct(ppUnitAt(base).marginPct) : '—');
       ppSet('#pp-base-margin-rub', base ? U.money(ppUnitAt(base).profit) : '—');
     };
+    // Один источник в блоке: цена, Маржа % или Маржа ₽; остальные поля блока очищаются при вводе.
+    const ppExclusive = (el) => {
+      if (!el || el.value === '') return;
+      const groups = [['#pp-minPrice', '#pp-minMarginPct', '#pp-minMarginRub'], ['#pp-basePriceTarget', '#pp-targetMarginPct', '#pp-targetMarginRub']];
+      const group = groups.find((g) => g.includes('#' + el.id));
+      if (group) group.forEach((id) => { const other = host.querySelector(id); if (other && other !== el) other.value = ''; });
+    };
     ['#pp-minPrice', '#pp-minMarginPct', '#pp-minMarginRub', '#pp-basePriceTarget', '#pp-targetMarginPct', '#pp-targetMarginRub'].forEach((id) => {
-      const el = host.querySelector(id); if (el) el.addEventListener('input', updatePromoPrices);
+      const el = host.querySelector(id); if (el) el.addEventListener('input', (e) => { ppExclusive(e.target); updatePromoPrices(); });
     });
     updatePromoPrices();
     // Введённые цифры — локальный черновик: закрытие карточки сохраняет их так же,

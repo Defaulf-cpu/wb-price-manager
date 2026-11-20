@@ -979,12 +979,42 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   // Порог «минимальная Маржа, ₽»: цена, ниже которой прибыль с единицы меньше заданной.
   const minMarginRub = num(I.minMarginRub, 0);
   const minByProfit = (ctx.econAt && !allowNeg && minMarginRub > 0) ? priceForProfit(marginCtx, minMarginRub, 1, searchMax) : null;
-  const priceFloor = Math.max(corridorMin, minByMargin || 0, minByProfit || 0);
+  /**
+   * Один источник порога: цена, Маржа % или Маржа ₽. Интерфейс очищает остальные
+   * поля группы при вводе; здесь — защита для старых/внешних настроек, где
+   * несколько полей успели заполниться одновременно. Берём первый источник
+   * в порядке «цена → % → ₽» и честно предупреждаем, а не смешиваем всё в
+   * самый строгий вариант молча. Маржа % на уровне общих настроек по умолчанию
+   * не считается отдельным выбором товара рядом с маржой в ₽.
+   */
+  const defaultMinMarginPct = num(C.defaults.minMarginPct, 0);
+  const sourceLabel = { price: 'цена', pct: 'Маржа %', rub: 'Маржа ₽' };
+  const minSources = [];
+  if (minPrice > 0) minSources.push({ id: 'price', price: minPrice });
+  if (!allowNeg && minByMargin !== null && minMargin > 0) minSources.push({ id: 'pct', price: minByMargin });
+  if (!allowNeg && minByProfit !== null && minMarginRub > 0) minSources.push({ id: 'rub', price: minByProfit });
+  let minSource = minSources[0] || null;
+  const minRubOverDefaultPct = !!(minSource && minSources.some((s) => s.id === 'rub') && !minSources.some((s) => s.id === 'price') && minMargin <= defaultMinMarginPct);
+  if (minRubOverDefaultPct) minSource = minSources.find((s) => s.id === 'rub');
+  if (minSources.length > 1 && !minRubOverDefaultPct) {
+    warnings.push(`Минимум задан несколькими способами (${minSources.map((s) => sourceLabel[s.id]).join(', ')}) — применён один источник: ${sourceLabel[minSource.id]}. Оставьте заполненным только одно поле в блоке «Мин цена (в акции)».`);
+  }
+  const activeMinByMargin = minSource ? (minSource.id === 'pct' ? minByMargin : null) : minByMargin;
+  const priceFloor = minSource ? Math.max(1, num(minSource.price, 1)) : Math.max(corridorMin, minByMargin || 0);
   // Максимальные пороги по марже: цена, выше которой Маржа превышает заданный максимум.
   const maxMarginPct = num(I.maxMarginPct, 0);
   const maxMarginRub = num(I.maxMarginRub, 0);
   const maxByMargin = (ctx.econAt && maxMarginPct > 0) ? priceForMargin(marginCtx, maxMarginPct, 1, searchMax) : null;
   const maxByProfit = (ctx.econAt && maxMarginRub > 0) ? priceForProfit(marginCtx, maxMarginRub, 1, searchMax) : null;
+  const maxSources = [];
+  if (hardMax > 0) maxSources.push({ id: 'price', price: hardMax });
+  if (maxByMargin !== null && maxMarginPct > 0) maxSources.push({ id: 'pct', price: maxByMargin });
+  if (maxByProfit !== null && maxMarginRub > 0) maxSources.push({ id: 'rub', price: maxByProfit });
+  const maxSource = maxSources[0] || null;
+  if (maxSources.length > 1) {
+    warnings.push(`Максимум задан несколькими способами (${maxSources.map((s) => sourceLabel[s.id]).join(', ')}) — применён один источник: ${sourceLabel[maxSource.id]}. Оставьте заполненным только одно поле максимума.`);
+  }
+  const activeMaxCeil = maxSource && maxSource.id !== 'price' ? maxSource.price : null;
 
   // ── СЛОЙ 1: универсальная стратегия ──
   let target = curSeller;
@@ -1000,7 +1030,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     const pp = planProgress(marginCtx, I);
     const fields = {
       SumStock: num(ctx.stock), BasePrice: curBase, SellerPrice: curSeller, BuyerPrice: curBuyer,
-      CalcMinPrice: priceFloor, CalcMaxPrice: corridorMax, MinMarginPrice: minByMargin,
+      CalcMinPrice: priceFloor, CalcMaxPrice: corridorMax, MinMarginPrice: activeMinByMargin,
       TargetMarginPrice: ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null,
       CompetitorPrice: rawCompetitors.length ? Math.min(...rawCompetitors.map((c) => num(c.price))) : null,
       PromoPrice: promoPrice, CostPrice: ctx.params && num(ctx.params.costPriceRub) > 0 ? num(ctx.params.costPriceRub) : null,
@@ -1033,16 +1063,28 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       break;
 
     case 'margin': {
+      // Обычная цена вне акции тоже задаётся одним источником: Маржа % или Маржа ₽.
+      // % из общих настроек по умолчанию не спорит с явно заданной маржой в ₽.
       const targetMarginRub = num(I.targetMarginRub, 0);
-      const pPct = ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null;
-      const pRub = ctx.econAt && targetMarginRub > 0 ? priceForProfit(marginCtx, targetMarginRub, priceFloor, searchMax) : null;
-      const candidates = [pPct, pRub].filter((x) => x !== null && x !== undefined);
-      if (!candidates.length) {
+      const defaultTargetMarginPct = num(C.defaults.targetMarginPct, 0);
+      const targetSources = [];
+      if (targetMargin > 0) targetSources.push({ id: 'pct', price: ctx.econAt ? priceForMargin(marginCtx, targetMargin, priceFloor, searchMax) : null });
+      if (targetMarginRub > 0) targetSources.push({ id: 'rub', price: ctx.econAt ? priceForProfit(marginCtx, targetMarginRub, priceFloor, searchMax) : null });
+      let targetSource = targetSources[0] || null;
+      const targetRubOverDefaultPct = !!(targetSource && targetSources.some((s) => s.id === 'rub') && targetMargin <= defaultTargetMarginPct);
+      if (targetRubOverDefaultPct) targetSource = targetSources.find((s) => s.id === 'rub');
+      if (targetSources.length > 1 && !targetRubOverDefaultPct) {
+        warnings.push(`Цена вне акции задана несколькими способами (${targetSources.map((s) => sourceLabel[s.id]).join(', ')}) — применён один источник: ${sourceLabel[targetSource.id]}. Оставьте заполненным только одно поле в блоке «Цена (вне акции)».`);
+      }
+      const chosen = targetSource ? targetSource.price : null;
+      if (chosen === null || chosen === undefined) {
         target = Math.min(curSeller, corridorMax);
         notes.push(`Целевая маржа ${targetMargin}% недостижима даже на базовой цене — держим максимум коридора.`);
       } else {
-        target = Math.max(...candidates, priceFloor);
-        notes.push(`Цена под целевую маржу ${targetMargin}%${targetMarginRub > 0 ? ' и ' + Math.round(targetMarginRub) + ' ₽' : ''}: ${Math.round(target)} ₽.`);
+        target = Math.max(chosen, priceFloor);
+        notes.push(targetSource.id === 'rub'
+          ? `Цена под целевую маржу ${Math.round(targetMarginRub)} ₽: ${Math.round(target)} ₽.`
+          : `Цена под целевую маржу ${targetMargin}%: ${Math.round(target)} ₽.`);
       }
       break;
     }
@@ -1193,8 +1235,8 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   }
 
   // 2.4 Минимальная маржа как жёсткий пол (верхнеуровневое правило)
-  if (minByMargin && target < minByMargin - 0.01) {
-    dco.push({ layer: 'ДЦО', name: 'Минимальная маржа', price: r2(minByMargin), note: `Целевая цена ниже точки маржи ${minMargin}% (${Math.round(minByMargin)} ₽).` });
+  if (activeMinByMargin && target < activeMinByMargin - 0.01) {
+    dco.push({ layer: 'ДЦО', name: 'Минимальная маржа', price: r2(activeMinByMargin), note: `Целевая цена ниже точки маржи ${minMargin}% (${Math.round(activeMinByMargin)} ₽).` });
   }
 
   if (strategy === 'boost' && ctx.boostPlan && ['scheduled', 'waiting', 'finished'].includes(ctx.boostPlan.status)) dco.length = 0;
@@ -1218,8 +1260,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   let corridorCeil = customDef && customDef.ignoreMaximums ? (hardMax > 0 ? hardMax : Infinity) : corridorMax;
   // Максимальная Маржа (% и ₽) — тот же потолок, только заданный через маржу, а не ценой.
   if (!(customDef && customDef.ignoreMaximums)) {
-    if (maxByMargin) corridorCeil = Math.min(corridorCeil, maxByMargin);
-    if (maxByProfit) corridorCeil = Math.min(corridorCeil, maxByProfit);
+    if (activeMaxCeil !== null && activeMaxCeil !== undefined) corridorCeil = Math.min(corridorCeil, activeMaxCeil);
   }
   if (corridorCeil < priceFloor) {
     warnings.push(`Пороги конфликтуют: минимальный порог ${Math.round(priceFloor)} ₽ выше максимального ${Math.round(corridorCeil)} ₽ — применён минимальный, проверьте настройки товара.`);
@@ -1532,9 +1573,9 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       min: r2(priceFloor),
       max: r2(corridorMax),
       corridorMin: r2(corridorMin),
-      minByMargin: minByMargin === null ? null : r2(minByMargin),
+      minByMargin: activeMinByMargin === null ? null : r2(activeMinByMargin),
       // чем задан пол: порогом минимальной цены или минимальной маржинальностью
-      by: (minByMargin !== null && minByMargin > corridorMin) ? 'margin' : 'corridor',
+      by: minSource ? (minSource.id === 'price' ? 'corridor' : 'margin') : ((activeMinByMargin !== null && activeMinByMargin > corridorMin) ? 'margin' : 'corridor'),
       minPriceSet: minPrice > 0 ? r2(minPrice) : null,
       basePriceTarget: r2(basePriceTarget)
     },

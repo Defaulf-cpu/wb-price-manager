@@ -956,6 +956,39 @@ Views.repricer = {
   },
 
   /**
+   * В каждом ценовом блоке источник только один: цена, Маржа % или Маржа ₽.
+   * Как только пользователь заполняет одно поле, остальные поля той же группы
+   * очищаются — иначе репрайсеру пришлось бы угадывать, какой порог главный.
+   * Минимум и максимум при этом комбинировать можно (например, минимум по
+   * марже 10%, а максимум — ценой 500 ₽): это разные группы.
+   */
+  enforcePriceBlockChoice(inp) {
+    const wrap = inp.closest('.rp-minblock, .rp-baseblock');
+    if (!wrap || inp.value === '') return;
+    const classes = wrap.dataset.block === 'min'
+      ? ['mb-min-price', 'mb-min-mpct', 'mb-min-mrub']
+      : ['mb-base-price', 'mb-base-mpct', 'mb-base-mrub'];
+    classes.forEach((cls) => {
+      const el = wrap.querySelector('.' + cls);
+      if (el && el !== inp) el.value = '';
+    });
+  },
+
+  /** К очищенным полям группы добавляем null в правку, чтобы они удалились и из сохранённых настроек. */
+  exclusivePricePatch(inp, patch) {
+    if (inp.value === '') return;
+    const byClass = {
+      'rp-minprice': 'minPrice', 'rp-minmarginpct': 'minMarginPct', 'rp-minmarginrub': 'minMarginRub',
+      'rp-baseprice': 'basePriceTarget', 'rp-targetmarginpct': 'targetMarginPct', 'rp-targetmarginrub': 'targetMarginRub'
+    };
+    const field = Object.keys(byClass).find((cls) => inp.classList.contains(cls));
+    if (!field) return;
+    const groups = [['minPrice', 'minMarginPct', 'minMarginRub'], ['basePriceTarget', 'targetMarginPct', 'targetMarginRub']];
+    const group = groups.find((g) => g.includes(byClass[field]));
+    if (group) group.forEach((key) => { if (key !== byClass[field]) patch[key] = null; });
+  },
+
+  /**
    * Блок «Мин цена (в акции)» как в INDEEPA: слева расчётные значения,
    * справа ввод цифрами. Расчётная мин. цена — действующий пол коридора
    * из результата пересчёта; при вводе слева всё пересчитывается сразу.
@@ -968,11 +1001,11 @@ Views.repricer = {
     const v = (x) => x === undefined || x === null || x === '' ? '' : x;
     return `<div class="rp-minblock" data-block="min"><div class="mb-grid">
       <span class="mb-calc">Расчётная мин. цена, ₽ <b class="mb-min-calc">${floor > 0 ? U.money(floor) : 'не задан'}</b></span>
-      <label class="mb-inp">Мин. цена, ₽ *<input type="number" step="1" class="num rp-minprice mb-min-price" data-nm="${r.nmID}" value="${v(cfg.minPrice)}" placeholder="не ниже этой цены" /></label>
+      <label class="mb-inp">Мин. цена, ₽ *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="1" class="num rp-minprice mb-min-price" data-nm="${r.nmID}" value="${v(cfg.minPrice)}" placeholder="не ниже этой цены" /></label>
       <span class="mb-calc">Расчётная мин. цена с СПП, ₽ <b class="mb-min-spp">${floor > 0 ? U.money(floor * (1 - spp / 100)) : '—'}</b></span>
-      <label class="mb-inp">Мин. марж., % *<input type="number" step="0.5" class="num rp-minmarginpct mb-min-mpct" data-nm="${r.nmID}" value="${v(cfg.minMarginPct)}" placeholder="пол по марже" /></label>
+      <label class="mb-inp">Мин. марж., % *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="0.5" class="num rp-minmarginpct mb-min-mpct" data-nm="${r.nmID}" value="${v(cfg.minMarginPct)}" placeholder="пол по марже" /></label>
       <span class="mb-calc">Марж. расчётной мин. цены, % <b class="mb-min-mpct-val">${unit ? U.pct(unit.marginPct) : '—'}</b></span>
-      <label class="mb-inp">Мин. марж., ₽ *<input type="number" step="1" class="num rp-minmarginrub mb-min-mrub" data-nm="${r.nmID}" value="${v(cfg.minMarginRub)}" placeholder="пол по прибыли" /></label>
+      <label class="mb-inp">Мин. марж., ₽ *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="1" class="num rp-minmarginrub mb-min-mrub" data-nm="${r.nmID}" value="${v(cfg.minMarginRub)}" placeholder="пол по прибыли" /></label>
       <span class="mb-calc">Марж. расчётной мин. цены, ₽ <b class="mb-min-mrub-val">${unit ? U.money(unit.profit) : '—'}</b></span>
       <span class="mb-calc">Прогнозный индекс мин. цены <b>Без индекса</b></span>
     </div></div>`;
@@ -988,11 +1021,11 @@ Views.repricer = {
     const restore = this.restoreCellHtml(r);
     return `<div class="rp-baseblock" data-block="base"><div class="mb-grid">
       <span class="mb-calc">Расчётная базовая цена, ₽ <b class="mb-base-calc">${base > 0 ? U.money(base) : '—'}</b></span>
-      <label class="mb-inp">Базовая цена, ₽ *<input type="number" step="1" class="num rp-baseprice mb-base-price" data-nm="${r.nmID}" value="${v(cfg.basePriceTarget)}" placeholder="обычная цена" /></label>
+      <label class="mb-inp">Базовая цена, ₽ *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="1" class="num rp-baseprice mb-base-price" data-nm="${r.nmID}" value="${v(cfg.basePriceTarget)}" placeholder="обычная цена" /></label>
       <span class="mb-calc">Расчётная базовая цена с СПП, ₽ <b class="mb-base-spp">${base > 0 ? U.money(base * (1 - spp / 100)) : '—'}</b></span>
-      <label class="mb-inp">Базовая марж., % *<input type="number" step="0.5" class="num rp-targetmarginpct mb-base-mpct" data-nm="${r.nmID}" value="${v(cfg.targetMarginPct)}" placeholder="целевая маржа" /></label>
+      <label class="mb-inp">Базовая марж., % *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="0.5" class="num rp-targetmarginpct mb-base-mpct" data-nm="${r.nmID}" value="${v(cfg.targetMarginPct)}" placeholder="целевая маржа" /></label>
       <span class="mb-calc">Марж. расчётной базовой цены, % <b class="mb-base-mpct-val">${unit ? U.pct(unit.marginPct) : '—'}</b></span>
-      <label class="mb-inp">Базовая марж., ₽ *<input type="number" step="1" class="num rp-targetmarginrub mb-base-mrub" data-nm="${r.nmID}" value="${v(cfg.targetMarginRub)}" placeholder="прибыль с единицы" /></label>
+      <label class="mb-inp">Базовая марж., ₽ *<input title="В блоке заполняется только одно поле: цена, Маржа % или Маржа ₽" type="number" step="1" class="num rp-targetmarginrub mb-base-mrub" data-nm="${r.nmID}" value="${v(cfg.targetMarginRub)}" placeholder="прибыль с единицы" /></label>
       <span class="mb-calc">Марж. расчётной базовой цены, ₽ <b class="mb-base-mrub-val">${unit ? U.money(unit.profit) : '—'}</b></span>
       <span class="mb-calc">Прогнозный индекс базовой цены <b>Без индекса</b></span>
     </div><div class="tiny muted" style="margin-top:4px">${restore}</div></div>`;
@@ -1002,6 +1035,7 @@ Views.repricer = {
   updatePriceBlock(inp) {
     const wrap = inp.closest('.rp-minblock, .rp-baseblock');
     if (!wrap) return;
+    this.enforcePriceBlockChoice(inp);
     const r = this.results.find((x) => String(x.nmID) === String(inp.getAttribute('data-nm')));
     if (!r) return;
     clearTimeout(wrap._mbTimer);
@@ -2156,6 +2190,8 @@ Views.repricer = {
           const sku = host.querySelector('.rp-off-sku[data-nm="' + nm + '"]');
           patch.competitorId = (inp.classList.contains('rp-use-sku') ? inp.checked : inp.value === 'sku') && sku ? (sku.value || (sku.options[1] && sku.options[1].value)) : null;
         }
+        this.enforcePriceBlockChoice(inp);
+        this.exclusivePricePatch(inp, patch);
         const previous = patch.strategy ? this.pendingEdits.get(String(nm)) : null;
         this.stageEdit(nm, 'config', patch);
         if (patch.strategy) this.openStrategyEditor(nm, patch.strategy, { previousPending: previous || null });

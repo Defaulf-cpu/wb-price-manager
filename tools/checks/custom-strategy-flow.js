@@ -103,6 +103,26 @@ check('конфликт порогов: минимальный побеждае�
   assert.ok(res.warnings.some((w) => /Пороги конфликтуют/.test(w)), res.warnings.join(' | '));
 });
 
+check('один источник минимума: несколько заполненных полей не смешиваются в самый строгий порог', () => {
+  // Цена 700, Маржа 50% → 800, Маржа 1200 ₽ → 1600. Применятся должна только цена (первый источник) + предупреждение.
+  const res = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, minPrice: 700, minMarginPct: 50, minMarginRub: 1200, allowNegativeMargin: false });
+  assert.equal(res.corridor.min, 700);
+  assert.ok(res.warnings.some((w) => /Минимум задан несколькими способами/.test(w)), res.warnings.join(' | '));
+  const pctVsRub = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, minMarginPct: 50, minMarginRub: 1200, allowNegativeMargin: false });
+  assert.equal(pctVsRub.corridor.min, 800);
+  assert.ok(pctVsRub.warnings.some((w) => /применён один источник: Маржа %/.test(w)), pctVsRub.warnings.join(' | '));
+});
+
+check('один источник максимума и цели вне акции: ₽ не спорит с % по умолчанию', () => {
+  const maxRes = RP.computeItem(ctx(), cfg(null), { strategy: 'hold', basePriceTarget: 2000, maxMarginPct: 30, maxMarginRub: 900 });
+  assert.ok(Math.abs(maxRes.corridor.max - 571.43) < 1, JSON.stringify(maxRes.corridor));
+  assert.ok(maxRes.warnings.some((w) => /Максимум задан несколькими способами/.test(w)), maxRes.warnings.join(' | '));
+  const baseCfg = cfg(null);
+  const baseRes = RP.computeItem(ctx(), baseCfg, { strategy: 'margin', targetMarginRub: 1200, basePriceTarget: 2000 });
+  assert.ok(Math.abs(baseRes.proposed.sellerPrice - 1600) < 1, String(baseRes.proposed.sellerPrice));
+  assert.ok(!baseRes.warnings.some((w) => /Цена вне акции задана несколькими способами/.test(w)), baseRes.warnings.join(' | '));
+});
+
 check('блок «Цена (вне акции)»: целевая Маржа в ₽ задаёт обычную цену', () => {
   // profit = price − 400; прибыль 1200 ₽ достигается при цене 1600 ₽.
   const res = RP.computeItem(ctx(), cfg(null), { strategy: 'margin', targetMarginPct: 0, targetMarginRub: 1200, basePriceTarget: 2000 });

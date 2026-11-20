@@ -282,12 +282,12 @@ table.grid-table tfoot td {
 @keyframes slidein { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ─────────── Прочее ─────────── */
-.rp-minblock, .rp-baseblock { min-width: 272px; }
-.rp-minblock .mb-grid, .rp-baseblock .mb-grid { display: grid; grid-template-columns: 1.18fr .95fr; gap: 5px 9px; align-items: center; }
-.rp-minblock .mb-calc, .rp-baseblock .mb-calc { font-size: 10px; color: var(--muted); line-height: 1.25; }
+.rp-minblock, .rp-baseblock { width: 100%; min-width: 0; box-sizing: border-box; }
+.rp-minblock .mb-grid, .rp-baseblock .mb-grid { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, .95fr); gap: 5px 9px; align-items: center; }
+.rp-minblock .mb-calc, .rp-baseblock .mb-calc { min-width: 0; font-size: 10px; color: var(--muted); line-height: 1.25; overflow-wrap: anywhere; }
 .rp-minblock .mb-calc b, .rp-baseblock .mb-calc b { display: block; font-size: 12px; white-space: nowrap; color: var(--text); }
-.rp-minblock .mb-inp, .rp-baseblock .mb-inp { font-size: 10px; color: var(--muted); line-height: 1.25; }
-.rp-minblock .mb-inp input, .rp-baseblock .mb-inp input { width: 100%; margin-top: 2px; padding: 4px 6px; font-size: 12px; }
+.rp-minblock .mb-inp, .rp-baseblock .mb-inp { min-width: 0; font-size: 10px; color: var(--muted); line-height: 1.25; overflow-wrap: anywhere; }
+.rp-minblock .mb-inp input, .rp-baseblock .mb-inp input { width: 100%; min-width: 0; box-sizing: border-box; margin-top: 2px; padding: 4px 6px; font-size: 12px; }
 .promo-price-block .pp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: 6px 12px 12px; }
 .promo-price-block .pp-col { padding: 4px 12px; }
 .promo-price-block .pp-col:first-child { border-right: 1px solid var(--line); }
