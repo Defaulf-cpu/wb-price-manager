@@ -44,3 +44,12 @@ CSS (`styles.css`, класс `.idbtn`): кнопки скрыты (`opacity: 0`
 ### Полный набор
 
 `npm test` — exit 0 (2053 проверки). Отпечаток версии `tools/version.js` — 300/300, версия 1.3.7.
+
+## Артефакты
+
+- Коммит `292119f`, тег `v1.3.7`, отправлены в `origin/main`.
+- Рядом с проектом: `wb-price-manager-v1.3.7.bundle` (полный Git,
+  SHA-256 `8cfbfb8e2412aa9ec96e3110c586680224730ccf2a333e6dc7c74f99467716b5`),
+  `wb-price-manager-v1.3.7-source.zip` (142 записи,
+  SHA-256 `49cbabfa8d9f3cd8eec11c5d3fcfde91f4e226e2973332de89dfb5b687d110e5`),
+  `wb-price-manager-v1.3.7.sha256`.
