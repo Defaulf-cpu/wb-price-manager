@@ -55,6 +55,10 @@ INDEEPA (расчётные значения слева, ввод справа).
 
 ## Артефакты и версия
 
-- Версия проекта: 1.3.4; коммит и тег v1.3.4 — в конце этого отчёта.
-- Рядом с проектом: `wb-price-manager-v1.3.4.bundle` (полный Git),
-  `wb-price-manager-v1.3.4-source.zip` (файлы исходников), `wb-price-manager-v1.3.4.sha256`.
+- Версия проекта: 1.3.4; коммит `8c40c537e7a86301ac1ba1482c1e444a65522567`,
+  тег `v1.3.4` (push в GitHub подтверждён).
+- Рядом с проектом: `wb-price-manager-v1.3.4.bundle` (полный Git,
+  SHA-256 `d5b97e65ddd7b42f4855527ee05edfa0f77b10fa660c4e8979188c0f7e063013`),
+  `wb-price-manager-v1.3.4-source.zip` (141 запись,
+  SHA-256 `0e8442eb86f1cd1ac3e2f35612cc98569249561c95f8fcd7d06287d57e7a574a`),
+  `wb-price-manager-v1.3.4.sha256`.
