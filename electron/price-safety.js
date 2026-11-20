@@ -24,7 +24,7 @@ function evaluate(row, candidate, options = {}) {
     result.proposed = { basePrice, discount, sellerPrice, profit: economics.profit, marginPct: economics.marginPct };
     result.cost.next = ctx.econAt(sellerPrice);
     if (options.boost) result.boost = Boost.checkResult(result, options.boost, options.good);
-    issues.push(...A.issuesFor(result, options.hasDraft).filter((i) => i.level === 'critical'));
+    issues.push(...A.issuesFor(result).filter((i) => i.level === 'critical'));
     if (sellerPrice < Number(result.corridor.min) - .005) add('BELOW_MIN', 'Цена после округления ниже безопасного минимального порога.');
     if (!ic.allowNegativeMargin && Number(economics.marginPct) < Number(ic.minMarginPct || 0) - .01) add('MIN_MARGIN', 'Маржа фактической пары ниже заданного минимума.');
     if (cfg.limits.blockQuarantine !== false && ctx.sellerPrice > 0 && sellerPrice < ctx.sellerPrice / 3 - .005) add('QUARANTINE', 'Снижение более чем в три раза заблокировано защитой от карантина WB.');

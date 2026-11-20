@@ -177,55 +177,37 @@ async function run() {
     check(`раздел «${id}» отрисован`, hasContent && !hasError, view ? view.innerHTML.length + ' симв.' : 'нет контента');
   }
 
-  // цены: таблица и строки
+  // товары репрайсера: таблица и строки (раздела ручных цен больше нет)
   window.App.go('prices');
-  await wait(400);
-  const priceRows = doc.querySelectorAll('#grid-host tbody tr').length;
-  check('таблица цен содержит строки', priceRows > 50, priceRows + ' строк');
+  for (let i = 0; i < 40 && doc.querySelectorAll('#rp-grid tbody tr').length < 10; i++) await wait(250);
+  const priceRows = doc.querySelectorAll('#rp-grid tbody tr').length;
+  check('таблица товаров репрайсера содержит строки', priceRows >= 10, priceRows + ' строк');
+  check('раздела ручных цен в интерфейсе нет', !doc.querySelector('#rp-tabs [data-t="price-tools"]') && !window.Views.prices);
 
-  // выбор товара + предпросмотр массовой переценки
   const st = window.S.state;
   const rows = window.S.getRows();
   const lossRows = rows.filter((r) => r.profit < 0);
   check('в демо-магазине есть убыточные товары', lossRows.length > 0, lossRows.length + ' шт');
 
-  st.filters.flag = 'loss';
-  window.App.go('prices');
-  await wait(500);
-  const lossInTable = doc.querySelectorAll('#grid-host tbody tr').length;
-  check('фильтр «убыточные» работает', lossInTable === lossRows.length, `${lossInTable} в таблице / ${lossRows.length} в данных`);
-
-  st.filters.flag = 'selected';
-  st.selection = new Set(lossRows.slice(0, 5).map((r) => r.nmID));
-  st.priceRule = { type: 'set-target-margin', value: 20, roundTo: 10, minPrice: 0 };
-  window.App.go('prices');
-  await wait(500);
-  const scopeSel = doc.querySelector('#b-scope');
-  if (scopeSel) { scopeSel.value = 'selected'; scopeSel.dispatchEvent(new window.Event('change')); }
-  await wait(200);
-  window.Views.prices.preview();
-  await wait(400);
-  const modal = doc.querySelector('#modal-root .modal');
-  check('модальное окно предпросмотра открылось', !!modal, modal ? modal.querySelector('.modal-head h2').textContent : '');
-  const planRows = modal ? modal.querySelectorAll('tbody tr').length : 0;
-  check('в предпросмотре 5 товаров', planRows === 5, planRows + ' строк');
-
-  // применяем цены в демо-режиме
-  if (modal) {
-    const applyBtn = Array.from(modal.querySelectorAll('.modal-foot .btn')).find((b) => /Применить|Отправить/.test(b.textContent));
-    check('есть кнопка применения', !!applyBtn, applyBtn ? applyBtn.textContent : '');
-    if (applyBtn) {
-      applyBtn.click();
-      await wait(1200);
-      const resultModal = doc.querySelector('#modal-root .modal');
-      check('показан результат загрузки цен', !!resultModal && /Результат загрузки цен/.test(resultModal.textContent), resultModal ? resultModal.querySelector('h2').textContent : '');
-      if (resultModal) {
-        const closeBtn = Array.from(resultModal.querySelectorAll('.btn')).find((b) => /Готово/.test(b.textContent));
-        if (closeBtn) closeBtn.click();
-      }
-      const after = window.S.getRows().filter((r) => r.profit < 0).length;
-      check('убыточных стало меньше после переценки', after < lossRows.length, `${lossRows.length} → ${after}`);
-    }
+  // пересчёт: первый расчёт ставит цены на минимальные пороги, дальше — стратегии
+  const calcBtn0 = doc.querySelector('#rp-calc');
+  check('кнопка пересчёта на месте', !!calcBtn0);
+  if (calcBtn0) {
+    calcBtn0.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    for (let i = 0; i < 80; i++) { await wait(250); if (window.Views.repricer.summary) break; }
+    await wait(400);
+    check('пересчёт выполнен', !!window.Views.repricer.summary,
+      window.Views.repricer.summary ? 'товаров ' + window.Views.repricer.summary.total : 'нет сводки');
+    window.Views.repricer.itemFilter.tile = 'loss';
+    window.Views.repricer.renderResults();
+    await wait(300);
+    const lossInTable = doc.querySelectorAll('#rp-grid tbody tr').length;
+    const lossFiltered = window.Views.repricer.filteredResults().length;
+    check('фильтр «убыточные» работает', lossFiltered > 0 && lossInTable === Math.min(lossFiltered, window.Views.repricer.PAGE_SIZE),
+      lossInTable + ' в таблице / ' + lossFiltered + ' в расчёте');
+    window.Views.repricer.itemFilter.tile = '';
+    window.Views.repricer.renderResults();
+    await wait(200);
   }
 
   // акции: открытие карточки
@@ -399,46 +381,43 @@ async function run() {
   }
   jInput = null; jModal = null; jMode = null; jConfirm = null; jKeys = null;
 
-  // карточка товара (клик по строке таблицы)
-  window.S.state.filters.flag = 'all';
-  window.App.go('prices');
-  await wait(700);
-  const dataRows = doc.querySelectorAll('#grid-host tbody tr').length;
-  check('после переценки таблица снова полная', dataRows > 100, dataRows + ' строк');
-  const firstRow = doc.querySelector('#grid-host tbody tr');
-  check('у строки назначен обработчик клика', !!(firstRow && firstRow.onclick));
-  if (firstRow) {
-    firstRow.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  // карточка товара (двойной клик по строке таблицы репрайсера)
+  window.App.go('repricer');
+  for (let i = 0; i < 40 && doc.querySelectorAll('#rp-grid tbody tr').length < 10; i++) await wait(250);
+  const dataRows = doc.querySelectorAll('#rp-grid tbody tr').length;
+  check('таблица товаров снова полная', dataRows >= 10, dataRows + ' строк');
+  const prodCell = doc.querySelector('#rp-grid tbody tr td.rp-product');
+  check('у строки есть ячейка товара для двойного клика', !!prodCell);
+  if (prodCell) {
+    prodCell.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
     await wait(1200);
     const dm = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
     check('карточка товара открывается', !!dm && /Прибыль с единицы/.test(dm.textContent), dm ? dm.querySelector('h2').textContent : '');
-    check('в карточке есть цена безубыточности', !!dm && /Цена безубыточности/.test(dm.textContent));
-    check('в карточке есть размеры и продажи', !!dm && /Размеры и цены/.test(dm.textContent) && /Продажи и остатки/.test(dm.textContent));
+    check('в карточке есть цена безубыточности', !!dm && /Безубыточность/.test(dm.textContent));
+    check('в карточке есть размеры и продажи', !!dm && /Цены по размерам/.test(dm.textContent) && /Продажи и факт WB/.test(dm.textContent));
+    check('в карточке нет ручной цены', !!dm && !dm.querySelector('#ic-base') && !dm.querySelector('#ic-save'));
+    if (dm) { const c = dm.querySelector('.modal-close'); if (c) c.click(); await wait(200); }
   }
 
-  // экспорт CSV
+  // экспорт CSV расчёта
   try {
-    window.Views.prices.exportCsv();
+    doc.querySelector('#rp-export').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     await wait(200);
-    check('экспорт цен в CSV не падает', true);
-  } catch (e) { check('экспорт цен в CSV не падает', false, e.message); }
+    check('экспорт расчёта в CSV не падает', true);
+  } catch (e) { check('экспорт расчёта в CSV не падает', false, e.message); }
 
-  // ручная правка цены в таблице
-  window.S.state.filters.flag = 'all';
-  window.App.go('prices');
+  // правка минимального порога в строке таблицы
+  window.App.go('repricer');
   await wait(700);
-  const inlineInput = doc.querySelector('#grid-host tbody tr td:nth-child(4) input');
-  check('в таблице есть инлайн-редактирование базовой цены', !!inlineInput);
-  if (inlineInput) {
-    inlineInput.value = '3990';
-    inlineInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  const minInput = doc.querySelector('#rp-grid .rp-minprice');
+  check('в таблице редактируется минимальный порог цены', !!minInput);
+  if (minInput) {
+    minInput.value = '3990';
+    minInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    minInput.dispatchEvent(new window.Event('change', { bubbles: true }));
     await wait(500);
-    check('ручная правка попала в editing', window.Views.prices.editing.size > 0, window.Views.prices.editing.size + ' записей');
-    const scope = doc.querySelector('#b-scope');
-    if (scope) { scope.value = 'edited'; scope.dispatchEvent(new window.Event('change', { bubbles: true })); }
-    await wait(300);
-    const applyBtn = doc.querySelector('#b-apply');
-    check('кнопка отправки активна для изменённых вручную', !!applyBtn && !applyBtn.disabled);
+    check('правка порога попала в несохранённые правки строки', window.Views.repricer.pendingEdits.size > 0, window.Views.repricer.pendingEdits.size + ' записей');
+    window.Views.repricer.discardEdits();
   }
 
   // панель: статус репрайсера и быстрое действие
@@ -454,7 +433,7 @@ async function run() {
   window.App.go('repricer');
   await wait(800);
   const rpTabs = doc.querySelectorAll('#rp-tabs .tab').length;
-  check('репрайсер: вкладки построены', rpTabs === 7, rpTabs + ' вкладок');
+  check('репрайсер: вкладки построены', rpTabs === 6, rpTabs + ' вкладок');
   check('репрайсер: есть журнал изменения цен',
     Array.from(doc.querySelectorAll('#rp-tabs .tab')).some((t) => /Журнал изменения цен/.test(t.textContent)));
   check('репрайсер: журнал участия перенесён, но функция сохранена', !doc.querySelector('#rp-tabs [data-t="journal-promos"]') && typeof window.Views.repricer.tabJournal === 'function');
@@ -817,7 +796,7 @@ async function run() {
     check('акции: очередь возврата очищена', q2.length === 0, q2.length + ' осталось');
   }
 
-  // ── регрессия: себестоимость из «Себестоимости» должна сразу доезжать до «Цены и скидки» ──
+  // ── регрессия: себестоимость из «Себестоимости» должна сразу доезжать до расчёта ──
   // Баг пользователя: ввёл себестоимость, а в ценах пусто. Причина — saveCosts обновлял
   // state.costs, а таблица цен строится из state.overrides (обновлялся только с товарами).
   (async function checkCostsReachPrices() {
@@ -838,28 +817,17 @@ async function run() {
   })();
   await wait(80);
 
-  // ── регрессия: ручной ввод цены не должен перетираться массовым правилом ──
-  // Баг пользователя: «в блоке Цены и скидки он не сохраняет цены» + «кнопка серая».
-  // Причина: правило по умолчанию «−5%» применялось поверх введённого значения,
-  // а область применения «Выбранным товарам» без галочек держала кнопку заблокированной.
-  (async function checkManualPriceWins() {
+  // ── регрессия: ручных цен в приложении нет, репрайсер работает по порогам ──
+  // Жалоба пользователя: при отправке в WB уходили цены из ручного блока, а не из
+  // минимального/максимального порогов товара. Ручной блок удалён полностью.
+  (async function checkNoManualPrices() {
     const fsx = require('fs');
     const pathx = require('path');
     const stSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'renderer', 'js', 'state.js'), 'utf8');
-    const prSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'renderer', 'js', 'views', 'prices.js'), 'utf8');
-    check('цены: правило по умолчанию выключено (не «−5%»)', /priceRule:\s*\{\s*type:\s*'none'/.test(stSrc));
-    check('цены: ручные правки хранятся в общем состоянии, а не в поле вьюхи',
-      /S\.state\.priceEdits/.test(prSrc) && /get editing\(\)/.test(prSrc));
-    const rulesSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'src', 'renderer', 'js', 'rules.js'), 'utf8');
-    check('цены: правило применяется только там, где нет ручной правки',
-      /const ruleActive = rule\.type && rule\.type !== 'none';/.test(rulesSrc) &&
-      /\(!manual && ruleActive\)\s*\?\s*EC\.applyRule/.test(rulesSrc) &&
-      /RULES\.buildPlan/.test(prSrc));
-    check('цены: при ручном вводе область сама переключается на «изменённые вручную»',
-      /sel\.value = 'edited'/.test(prSrc));
-    check('цены: заблокированная кнопка объясняет причину',
-      /b-apply-reason/.test(prSrc) && /btn\.title = rows\.length/.test(prSrc));
-    check('цены: есть кнопка «Обновить себестоимость»', /id="btn-costs"/.test(prSrc) && /S\.reloadOverrides\(\)/.test(prSrc));
+    const svcSrc = fsx.readFileSync(pathx.join(__dirname, '..', 'electron', 'service.js'), 'utf8');
+    check('цены: в общем состоянии нет ручных цен и черновиков', !/priceEdits|priceDrafts|loadDrafts/.test(stSrc));
+    check('цены: каналов черновиков в сервисе нет', !/prices:draft-(save|load|clear)/.test(svcSrc));
+    check('цены: первый расчёт товара ставит цену на минимальный порог', /firstCalcSeed/.test(svcSrc) && /seededToFloor/.test(fsx.readFileSync(pathx.join(__dirname, '..', 'electron', 'repricer-engine.js'), 'utf8')));
   })();
 
   // ── регрессия: отчёт P&L должен считаться и сходиться арифметически ──
@@ -1346,20 +1314,7 @@ async function run() {
     // именно так выглядит карточка, пока заказы ещё догружаются в фоне
     window.S.state.statsMeta = { days: 30, withOrders: false, ordersPending: true, truncated: true, stale: false };
     window.S.state.statsByNm = {};
-    window.Views.prices.openDetails(window.S.rows()[0]);
-    await wait(400);
-    const card = doc.getElementById('modal-root');
-    const cardText = card ? card.textContent.replace(/\s+/g, ' ') : '';
-    check('карточка товара: заказы помечены как недогруженные', /ещё не загружены/.test(cardText));
-    check('карточка товара: есть кнопка догрузить заказы', !!(card && card.querySelector('#st-orders-now')));
-    check('карточка товара: предупреждение об обрезанных страницах', /не все страницы статистики/.test(cardText));
-    const ob = card ? card.querySelector('#st-orders-now') : null;
-    if (ob) { ob.click(); await wait(400); }
-    check('карточка товара: догрузка заказов вызывает stats:orders',
-      !!(ordersCalled && ordersCalled.force === true), ordersCalled ? JSON.stringify(ordersCalled) : 'не вызван');
-    window.S.state.statsMeta = prevMeta;
-    window.S.state.statsByNm = prevByNm;
-    service.handlers['stats:orders'] = realOrders;
+    await window.Views.itemcard.open(window.S.rows()[0].nmID);    service.handlers['stats:orders'] = realOrders;
     const cc = doc.querySelector('#modal-root .modal-close');
     if (cc) cc.click();
     await wait(200);
@@ -1511,45 +1466,47 @@ async function run() {
   check('репрайсер: сброс параметров работает', backCfg.limits.maxChangePerUpdatePct === 19 && backCfg.marginMode === 'discounted');
 
   // ── сводные плитки работают как фильтры (просил пользователь: «сделать их кликабельными») ──
-  window.App.go('prices');
+  window.App.go('repricer');
   await wait(900);
-  const tiles = doc.querySelectorAll('#totals-line .tile');
-  check('плитки: отрисованы в «Цены и скидки»', tiles.length >= 6, 'плиток ' + tiles.length);
-  const rowsAll = window.S.filtered().length;
+  const tiles = doc.querySelectorAll('#rp-tiles .tile');
+  check('плитки: отрисованы в репрайсере', tiles.length >= 6, 'плиток ' + tiles.length);
+  const rowsAll = (window.Views.repricer.results || []).length || window.S.getRows().length;
   const lossTile = Array.from(tiles).find((t) => /убыточных/.test(t.textContent));
   check('плитки: есть «убыточных»', !!lossTile, lossTile ? lossTile.textContent.replace(/\s+/g, ' ').trim() : '');
   if (lossTile) {
     lossTile.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     await wait(500);
-    const filteredRows = doc.querySelectorAll('#grid-host tbody tr').length;
-    check('плитки: клик фильтрует таблицу', window.S.state.filters.flag === 'loss' && filteredRows <= rowsAll,
-      'фильтр ' + window.S.state.filters.flag + ', строк ' + filteredRows + ' из ' + rowsAll);
-    check('плитки: активная плитка отмечена', !!doc.querySelector('#totals-line .tile.active'));
-    const t2 = Array.from(doc.querySelectorAll('#totals-line .tile')).find((t) => /убыточных/.test(t.textContent));
+    const filteredRows = doc.querySelectorAll('#rp-grid tbody tr').length;
+    check('плитки: клик фильтрует таблицу', window.Views.repricer.itemFilter.tile === 'loss' && filteredRows <= rowsAll,
+      'плитка ' + window.Views.repricer.itemFilter.tile + ', строк ' + filteredRows + ' из ' + rowsAll);
+    check('плитки: активная плитка отмечена', !!doc.querySelector('#rp-tiles .tile.active'));
+    const t2 = Array.from(doc.querySelectorAll('#rp-tiles .tile')).find((t) => /убыточных/.test(t.textContent));
     if (t2) { t2.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(400); }
-    check('плитки: повторный клик снимает фильтр', window.S.state.filters.flag === 'all', window.S.state.filters.flag);
+    check('плитки: повторный клик снимает фильтр', window.Views.repricer.itemFilter.tile === '', window.Views.repricer.itemFilter.tile);
   }
 
-  // ── черновик цен: «сохранить без отправки» ──
-  const draftRow = window.S.getRows()[0];
-  await service.handlers['prices:draft-clear']({});
-  const draftSave = await service.handlers['prices:draft-save']({
-    items: { [String(draftRow.nmID)]: { basePrice: 2222, discount: 11, note: 'проверка' } }
-  });
-  check('черновик: сохраняется без отправки в WB', draftSave.ok === true && draftSave.count === 1);
-  await window.Views.prices.loadDrafts();
-  window.Views.prices.render(doc.getElementById('view'));
-  await wait(700);
-  const draftRowEl = Array.from(doc.querySelectorAll('#grid-host tbody tr'))
-    .find((tr) => tr.textContent.includes(String(draftRow.nmID)));
-  const draftInput = draftRowEl ? draftRowEl.querySelector('input.cellinput') : null;
-  check('черновик: введённое значение видно в таблице после перерисовки',
-    !!draftInput && Number(draftInput.value) === 2222,
-    draftInput ? 'значение ' + draftInput.value : (draftRowEl ? 'поля нет в строке' : 'строка товара не найдена'));
-  check('черновик: строка помечена значком черновика', /черновик/.test(doc.querySelector('#grid-host').textContent));
-  check('черновик: есть кнопка «Сохранить без отправки»', !!doc.getElementById('btn-save-draft'));
-  check('черновик: плитка показывает число сохранённых', /черновик цен/.test(doc.querySelector('#totals-line').textContent));
-  await service.handlers['prices:draft-clear']({});
+  // ── первый расчёт: цена встаёт на минимальный порог товара ──
+  const draftRow = window.S.getRows().find((r) => !(store.loadItemConfigs()[String(r.nmID)] || {}).floorSeededAt) || window.S.getRows()[0];
+  const seedFloor = Math.round(draftRow.sellerPrice * 0.9);
+  await service.handlers['repricer:item-configs:save']({ items: { [String(draftRow.nmID)]: { minPrice: seedFloor, maxPrice: Math.round(draftRow.sellerPrice * 1.8) } } });
+  // фоновая отрисовка могла уже посчитать товар — для сценария нужен «никогда не считанный»
+  const seedCfgs = store.loadItemConfigs();
+  if (seedCfgs[String(draftRow.nmID)]) { delete seedCfgs[String(draftRow.nmID)].floorSeededAt; store.saveItemConfigs(seedCfgs); }
+  check('первый расчёт: каналов ручных цен в сервисе нет', !service.handlers['prices:draft-save'] && !service.handlers['prices:draft-load']);
+  const seedCalc = await service.handlers['repricer:calc']({ full: true });
+  const seedRes = (seedCalc.results || []).find((r) => String(r.nmID) === String(draftRow.nmID));
+  check('первый расчёт: цена поставлена на минимальный порог',
+    !!seedRes && seedRes.firstCalcSeeded === true && Number(seedRes.corridor.min) >= seedFloor - 0.01 &&
+    (Math.abs(Number(seedRes.proposed.sellerPrice) - Number(seedRes.corridor.min)) <= Math.max(30, Number(seedRes.corridor.min) * 0.02) || !!seedRes.promoChosen) &&
+    Number(seedRes.proposed.sellerPrice) <= Math.round(draftRow.sellerPrice * 1.8) + 1,
+    seedRes ? 'предложено ' + seedRes.proposed.sellerPrice + ' при пороге ' + seedFloor + ' (эффективный минимум ' + seedRes.corridor.min + ', seeded=' + seedRes.firstCalcSeeded + ', promo=' + (seedRes.promoChosen && seedRes.promoChosen.type) + ', mode=' + seedRes.proposed.priceMode + ', cfg=' + JSON.stringify(store.loadItemConfigs()[String(draftRow.nmID)] || {}) + ')' : 'строки нет');
+  check('первый расчёт: отметка посадки сохранена в настройках товара',
+    !!(store.loadItemConfigs()[String(draftRow.nmID)] || {}).floorSeededAt);
+  const seedCalc2 = await service.handlers['repricer:calc']({ full: true });
+  const seedRes2 = (seedCalc2.results || []).find((r) => String(r.nmID) === String(draftRow.nmID));
+  check('второй расчёт: посадка не повторяется — цену ведёт стратегия в коридоре',
+    !!seedRes2 && seedRes2.firstCalcSeeded === false && Number(seedRes2.proposed.sellerPrice) >= seedFloor - Math.max(30, seedFloor * 0.02),
+    seedRes2 ? 'предложено ' + seedRes2.proposed.sellerPrice : 'строки нет');
 
   // ── карточка товара с вкладками (двойной клик) ──
   await window.Views.itemcard.open(draftRow.nmID);
@@ -1728,8 +1685,8 @@ async function run() {
   check('репрайсер: вкладки цен и стратегий объединены', doc.querySelector('#rp-tabs [data-t="prices"]').textContent.trim() === 'Товары' && !/>Новые цены</.test(rpHtml));
   check('репрайсер: цена на МП и новая цена в одной таблице',
     /Цена на МП/.test(rpHtml) && /Новая цена/.test(rpHtml));
-  check('репрайсер: сохранённая вручную цена видна отдельно от цены МП',
-    /Моя цена/.test(rpHtml));
+  check('репрайсер: ручной цены и раздела «Цены и скидки» в репрайсере нет',
+    !/Моя цена/.test(rpHtml) && !doc.querySelector('#rp-tabs [data-t="price-tools"]'));
   check('репрайсер: стратегию можно поменять прямо в таблице', !!doc.querySelector('.rp-strategy'));
   check('репрайсер: минимальная цена редактируется в строке', !!doc.querySelector('.rp-minprice'));
   check('репрайсер: сводные плитки-фильтры на месте', (doc.querySelectorAll('#rp-tiles .tile') || []).length >= 6,
@@ -1886,19 +1843,10 @@ async function run() {
   check('INDEEPA: есть колонка «Акции» с решениями', /<th[^>]*>\s*Акции/.test(rpHtml2) || /Акции/.test(rpHtml2));
   check('INDEEPA: есть колонка «План продаж»', /План продаж/.test(rpHtml2));
 
-  // сохранённая вручную цена важнее расчёта — это должно быть видно в ячейке «Новой цены»
-  const draftNm = (function () {
-    const d = window.S.state.priceDrafts || {};
-    const ids = Object.keys(d);
-    return ids.length ? Number(ids[0]) : null;
-  })();
-  if (draftNm) {
-    const draftRow = Array.from(doc.querySelectorAll('#rp-grid tbody tr'))
-      .find((tr) => tr.textContent.includes(String(draftNm)));
-    check('репрайсер: в «Новой цене» видно, что уйдёт сохранённая цена, а не расчёт',
-      !!draftRow && /приоритет ручного черновика/.test(draftRow.textContent) && !!draftRow.querySelector('[data-col-id="priceNow"] .rp-draft-summary'),
-      draftRow ? draftRow.textContent.replace(/\s+/g, ' ').slice(0, 130) : 'строка не найдена на этой странице');
-  }
+  // ручных цен в таблице нет: «Новая цена» — только расчёт репрайсера по порогам
+  check('репрайсер: в таблице нет ручных цен — только расчёт по порогам',
+    !/Моя цена|приоритет ручного черновика/.test(doc.getElementById('view').textContent) &&
+    !doc.querySelector('.rp-draft-summary'));
   check('INDEEPA: незаполненный план подписан как в референсе',
     /План не заполнен/.test(rpText2) || (window.Views.repricer.results || []).length === 0);
   check('INDEEPA: есть счётчик строк и пагинация', !!doc.getElementById('rp-pager') &&
@@ -1907,10 +1855,10 @@ async function run() {
 
   // сегментированный фильтр (как «Все / Основной» в INDEEPA) и плотность строк
   const seg = doc.querySelectorAll('#rp-seg [data-seg]');
-  check('INDEEPA: есть сегментированный фильтр', seg.length === 7, 'сегментов ' + seg.length);
-  check('INDEEPA: сегменты — Все, К отправке, Своя цена, Ошибки, Убыточные, Предупреждения, Не отправлять',
+  check('INDEEPA: есть сегментированный фильтр', seg.length === 6, 'сегментов ' + seg.length);
+  check('INDEEPA: сегменты — Все, К отправке, Ошибки, Убыточные, Предупреждения, Не отправлять',
     Array.from(seg).map((b) => b.textContent.trim()).join('|') ===
-      'Все|Только с изменением|Своя цена|Только ошибки|Только убыточные|С предупреждениями|Не отправлять',
+      'Все|Только с изменением|Только ошибки|Только убыточные|С предупреждениями|Не отправлять',
     Array.from(seg).map((b) => b.textContent.trim()).join('|'));
   const allCount = doc.querySelectorAll('#rp-grid tbody tr').length;
   const errSeg = Array.from(seg).find((b) => b.getAttribute('data-seg') === 'errors');
@@ -2286,7 +2234,7 @@ async function run() {
   check('F: выбор общих параметров возвращает режим sync', fView.sizeMode('7007') === 'sync');
   if (fModal) await fModal.querySelector('.modal-close').onclick();
 
-  window.Views.prices.showResult({ sent: 0, details: [{ nmID: 7007, sizeID: 702, status: 6, errorText: 'Ошибка размера' }] }, 2);
+  window.Views.repricer.showSendResult({ sent: 0, details: [{ nmID: 7007, sizeID: 702, status: 6, errorText: 'Ошибка размера' }] }, 2);
   fModal = doc.querySelector('#modal-root .modal:last-child');
   let fStats = fModal ? Array.from(fModal.querySelectorAll('.stat .value')).map((el) => el.textContent.trim()) : [];
   check('F: окно результатов не считает ошибки успешной загрузкой', fStats[0] === '0' && fStats[1] === '0' && fStats[2] === '1');
@@ -2366,57 +2314,20 @@ async function run() {
   window.App.go('repricer');
   await wait(900);
   const eTabs = Array.from(doc.querySelectorAll('#rp-tabs .tab')).map((t) => t.textContent.trim());
-  check('Е: семь вкладок РП, акции и настройки объединены в своих разделах', eTabs.length === 7, eTabs.join(' | '));
+  check('Е: шесть вкладок РП, акции и настройки объединены в своих разделах', eTabs.length === 6, eTabs.join(' | '));
   check('Е: порядок и названия вкладок как в задании',
-    eTabs.join('|') === 'Товары|Цены и скидки|Экономика|Массовые правила|Себестоимость|Конкуренты|Журнал изменения цен',
+    eTabs.join('|') === 'Товары|Экономика|Массовые параметры|Себестоимость|Конкуренты|Журнал изменения цен',
     eTabs.join('|'));
   check('Е: отдельных вкладок «Параметры товаров» и «История запусков» больше нет',
     !eTabs.some((t) => /Параметры товаров|История запусков/i.test(t)));
 
-  // общий модуль правил
-  check('Е: модуль RULES загружен до вьюх', !!window.RULES && typeof window.RULES.buildPlan === 'function');
-  check('Е: типы массовых правил сохранены', window.RULES.TYPES.length === 8 &&
-    window.RULES.TYPES.map((t) => t.id).join(',') === 'none,delta-pct,delta-price,set-price,set-discount,set-base,set-target-margin,set-profit',
-    window.RULES.TYPES.map((t) => t.id).join(','));
-  check('Е: «Цены и скидки» строят правило общим модулем',
-    String(window.Views.prices.scopeRows).includes('RULES.scopeRows') &&
-    String(window.Views.prices.preview).includes('RULES.buildPlan'));
-  const ePlan = window.RULES.buildPlan({
-    rows: window.S.getRows().slice(0, 3),
-    rule: { type: 'set-discount', value: 35, roundTo: 0, minPrice: 0 },
-    edits: null
-  });
-  check('Е: план правила считается и содержит риски', ePlan.plan.length === 3 &&
-    ePlan.plan.every((p) => Math.abs(p.newDisc - 35) < 2 && Array.isArray(p.warnings)),
-    'строк ' + ePlan.plan.length + ', скидки ' + ePlan.plan.map((p) => p.newDisc).join(', '));
-
-  // ── «Массовые правила» ──
-  check('Е: вкладка «Массовые правила» открывается', await eClick('rules', 1800));
-  check('Е: на вкладке есть выбор правила и области', !!doc.getElementById('rr-type') && !!doc.getElementById('rr-scope'));
-  check('Е: в правилах все восемь типов', doc.querySelectorAll('#rr-type option').length === 8,
-    doc.querySelectorAll('#rr-type option').length + ' вариантов');
-  check('Е: массовое назначение параметров товаров здесь же', !!doc.getElementById('st-grid'));
+  // ручных правил переценки больше нет: цены считает только репрайсер по порогам
+  check('Е: модуля ручных правил цен больше нет', !window.RULES && !window.Views.prices);
+  check('Е: вкладка «Массовые параметры» открывается', await eClick('rules', 1800));
+  check('Е: на вкладке нет правила переценки — только параметры товаров',
+    !doc.getElementById('rr-type') && !doc.getElementById('rr-scope') && !!doc.getElementById('st-grid'));
+  check('Е: массовое назначение параметров на месте', !!doc.getElementById('st-grid'));
   if (global.gc) global.gc();
-  doc.querySelector('#rr-type').value = 'set-discount';
-  doc.querySelector('#rr-type').dispatchEvent(new window.Event('change', { bubbles: true }));
-  doc.querySelector('#rr-value').value = '35';
-  doc.querySelector('#rr-value').dispatchEvent(new window.Event('input', { bubbles: true }));
-  doc.querySelector('#rr-scope').value = 'loss';
-  const eTasksBefore = (await service.handlers['tasks:history']()).length;
-  doc.querySelector('#rr-preview').click();
-  await wait(900);
-  const ePreviewRows = doc.querySelectorAll('#rr-preview-host tbody tr').length;
-  check('Е: предпросмотр правила рисует план', ePreviewRows > 0, ePreviewRows + ' строк');
-  check('Е: кнопка записи в черновик активировалась', doc.getElementById('rr-save') && !doc.getElementById('rr-save').disabled);
-  doc.getElementById('rr-save').click();
-  await wait(1600);
-  const eDrafts = await service.handlers['prices:draft-load']();
-  check('Е: правило пишет цены в черновик каналом prices:draft-save',
-    Object.keys(eDrafts.items || {}).length > 0, 'черновиков ' + Object.keys(eDrafts.items || {}).length);
-  check('Е: из массовых правил в WB ничего не отправлено',
-    (await service.handlers['tasks:history']()).length === eTasksBefore);
-  await service.handlers['prices:draft-clear']({});
-  await window.S.loadDrafts();
 
   // ── «Себестоимость» ──
   check('Е: вкладка «Себестоимость» открывается', await eClick('costs', 1800));
@@ -2530,21 +2441,22 @@ async function run() {
   check('Е: пересчёт и отправка разделены',
     !!doc.getElementById('rp-calc') && !!doc.getElementById('rp-send') && doc.getElementById('rp-calc') !== doc.getElementById('rp-send'));
 
-  // ── карточка товара: «Открыть в разделе» ──
+  // ── карточка товара: «Показать в репрайсере» ──
   const eFirst = window.S.getRows()[0];
   await window.Views.itemcard.open(eFirst.nmID);
   await wait(1200);
   const eCardModal = Array.from(doc.querySelectorAll('#modal-root .modal')).pop();
-  const eOpenBtn = eCardModal ? Array.from(eCardModal.querySelectorAll('.modal-foot .btn')).find((b) => /Открыть в разделе/.test(b.textContent)) : null;
-  check('Е: в карточке товара есть ссылка «Открыть в разделе»', !!eOpenBtn);
+  const eOpenBtn = eCardModal ? Array.from(eCardModal.querySelectorAll('.modal-foot .btn')).find((b) => /Показать в репрайсере/.test(b.textContent)) : null;
+  check('Е: в карточке товара есть ссылка «Показать в репрайсере»', !!eOpenBtn);
   if (eOpenBtn) {
     eOpenBtn.click();
     await wait(1000);
-    check('Е: ссылка открывает «Цены и скидки» с фильтром по товару',
-      window.S.state.view === 'repricer' && window.Views.repricer.tab === 'price-tools' && String(window.S.state.filters.q) === String(eFirst.nmID) && !!doc.getElementById('grid-host'),
-      'view=' + window.S.state.view + ', q=' + window.S.state.filters.q);
+    check('Е: ссылка открывает таблицу товаров репрайсера с фильтром по товару',
+      window.S.state.view === 'repricer' && window.Views.repricer.tab === 'prices' && String(window.Views.repricer.itemFilter.q) === String(eFirst.nmID) && !!doc.getElementById('rp-grid'),
+      'view=' + window.S.state.view + ', q=' + window.Views.repricer.itemFilter.q);
     await wait(600);
-    window.S.state.filters.q = '';
+    window.Views.repricer.itemFilter.q = '';
+    window.Views.repricer.renderResults();
   }
   window.App.go('repricer');
   await wait(1200);
@@ -2653,7 +2565,7 @@ async function run() {
 
   check('репрайсер: логика и флаг SKU доступны в строке', !!doc.querySelector('.rp-off-logic') && !!doc.querySelector('.rp-use-sku'));
   check('репрайсер: себестоимость и план редактируются в строке', !!doc.querySelector('.rp-cost') && !!doc.querySelector('.rp-plan'));
-  // Изолированный сервис: даже ручной черновик не обходит проверку себестоимости.
+  // Изолированный сервис: даже заданный порог не обходит проверку себестоимости.
   const safetyDir = path.join(os.tmpdir(), 'wb-validation-' + Date.now());
   try {
     const safetyStore = createStore(safetyDir, null);
@@ -2662,10 +2574,10 @@ async function run() {
     const safetyGoods = await safetyService.handlers['wb:goods']({});
     const nm = String(safetyGoods.items[0].nmID);
     await safetyService.handlers['costs:save']({ items: { [nm]: { costPriceRub: 2 } } });
-    await safetyService.handlers['prices:draft-save']({ items: { [nm]: { basePrice: 9999, discount: 0 } } });
+    await safetyService.handlers['repricer:item-configs:save']({ items: { [nm]: { minPrice: 9999 } } });
     await safetyService.handlers['repricer:calc']({ full: true });
     const blockedProposal = await safetyService.handlers['repricer:proposal']();
-    check('репрайсер: сервер блокирует себестоимость 2 рубля даже с ручной ценой',
+    check('репрайсер: сервер блокирует себестоимость 2 рубля даже с заданным порогом',
       !blockedProposal.items.some((r) => String(r.nmID) === nm) &&
       (blockedProposal.blocked || []).some((r) => String(r.nmID) === nm));
     let tooManyRejected = false;
@@ -2711,7 +2623,7 @@ async function run() {
   }
 
   // себестоимость и расходы правятся прямо в репрайсере (просил перенести из «Себестоимости»)
-  const stTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Массовые правила/.test(t.textContent));
+  const stTab = Array.from(doc.querySelectorAll('#rp-tabs .tab')).find((t) => /Массовые параметры/.test(t.textContent));
   if (stTab) { stTab.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await wait(2200); }
   const stHtml = doc.getElementById('view').innerHTML;
   check('репрайсер: себестоимость редактируется в параметрах товара', /Себестоимость/.test(stHtml));
@@ -2784,12 +2696,15 @@ async function run() {
   check('журнал акций: объяснено, что история постоянная',
     /возврат|История участия|автоакци/i.test(jpText));
 
-  // ── «закольцовка» цены: сохранил в карточке → видно во всех разделах ──
-  const loopRow = window.S.getRows()[0];
+  // ── «закольцовка» порогов: задал минимум/максимум → репрайсер ставит цену ──
+  const loopRow = window.S.getRows().find((r) => !(store.loadItemConfigs()[String(r.nmID)] || {}).floorSeededAt) || window.S.getRows()[0];
   const loopNm = loopRow.nmID;
   const mpPrice = loopRow.mpSellerPrice;
-  await service.handlers['prices:draft-clear']({});
-  await window.S.loadDrafts();
+  const loopFloor = Math.round(mpPrice * 0.9);
+  const loopCeil = Math.round(mpPrice * 1.8);
+  await service.handlers['repricer:item-configs:save']({ items: { [String(loopNm)]: { minPrice: loopFloor, maxPrice: loopCeil } } });
+  const loopCfgs = store.loadItemConfigs();
+  if (loopCfgs[String(loopNm)]) { delete loopCfgs[String(loopNm)].floorSeededAt; store.saveItemConfigs(loopCfgs); }
 
   await window.Views.itemcard.open(loopNm);
   await wait(900);
@@ -2798,87 +2713,56 @@ async function run() {
   check('карточка: экономика и цена объединены в одну вкладку',
     /Экономика и цена/.test(lmText) && !/Цена и черновик/.test(lmText),
     'вкладок: ' + Array.from(doc.querySelectorAll('#ic-tabs .tab')).map((t) => t.textContent.trim()).join(' | '));
-  // деньги в интерфейсе форматируются с разделителем-пробелом («1 417 ₽»), поэтому
-  // сравниваем текст без пробелов
   const lmCompact = lmText.replace(/\s+/g, '');
   check('карточка: показана цена, которая сейчас на МП',
     /Намаркетплейсесейчас/.test(lmCompact) && lmCompact.includes(String(Math.round(mpPrice))),
     'цена МП ' + mpPrice + ', в окне: ' + lmCompact.slice(lmCompact.indexOf('Намаркетплейсе'), 60));
-  check('карточка: одна кнопка «Сохранить» и нет отправки в WB из карточки',
-    !!doc.getElementById('ic-save') && !doc.getElementById('ic-send'),
-    'ic-save=' + !!doc.getElementById('ic-save') + ', ic-send=' + !!doc.getElementById('ic-send'));
-  check('карточка: объяснено, что отправка — из раздела «Репрайсер»', /Репрайсер/.test(lmText));
+  check('карточка: ручной цены нет — ни поля ввода, ни сохранения цены, ни отправки',
+    !doc.getElementById('ic-base') && !doc.getElementById('ic-save') && !doc.getElementById('ic-send'));
+  check('карточка: объяснено, что цену ставит только репрайсер по порогам', /цену ставит только/.test(lmText) && /порог/.test(lmText));
+  check('карточка: видны минимальный и максимальный пороги товара',
+    /Минимальный порог/.test(lmText) && /Максимальный порог/.test(lmText));
+  check('карточка: экономика при текущей цене показана',
+    /Прибыль с единицы/.test((doc.getElementById('ic-live') || { textContent: '' }).textContent));
+  const ccLoop = doc.querySelector('#modal-root .modal-close');
+  if (ccLoop) ccLoop.click();
+  await wait(200);
 
-  // живой пересчёт экономики при вводе цены
-  const beforeProfit = (function () {
-    const t = doc.getElementById('ic-live').textContent.replace(/\s+/g, ' ');
-    const m = t.match(/Прибыль с единицы[^−\d]*(−?\d[\d\s]*(?:,\d+)?)/);
-    return m ? m[1] : '';
-  })();
-  const baseInput = doc.getElementById('ic-base');
-  baseInput.value = String(Math.round(mpPrice * 1.5));
-  baseInput.dispatchEvent(new window.Event('input', { bubbles: true }));
-  await wait(500);
-  const afterProfit = doc.getElementById('ic-live').textContent.replace(/\s+/g, ' ');
-  check('карточка: экономика пересчитывается ЖИВЬЁМ при вводе цены',
-    /Прибыль с единицы/.test(afterProfit) && afterProfit !== beforeProfit,
-    'было «' + beforeProfit + '», стало фрагмент «' + afterProfit.slice(0, 70) + '»');
-  check('карточка: показана разница «было → станет»', /→/.test(afterProfit) && /Δ прибыли за месяц|Маржинальность/.test(afterProfit));
+  // сервер: первый расчёт ставит цену на минимальный порог, дальше — стратегия в коридоре
+  const calcLoop = await service.handlers['repricer:calc']({ full: true });
+  const loopRes = (calcLoop.results || []).find((r) => Number(r.nmID) === Number(loopNm));
+  check('закольцовка: первый расчёт поставил цену на минимальный порог',
+    !!loopRes && loopRes.firstCalcSeeded === true && Math.abs(Number(loopRes.proposed.sellerPrice) - loopFloor) <= Math.max(30, loopFloor * 0.02),
+    loopRes ? 'предложено ' + loopRes.proposed.sellerPrice + ' при коридоре ' + loopFloor + '–' + loopCeil : 'строки нет');
+  check('закольцовка: цена не вышла за максимальный порог',
+    !!loopRes && Number(loopRes.proposed.sellerPrice) <= loopCeil + 1,
+    loopRes ? 'предложено ' + loopRes.proposed.sellerPrice : 'строки нет');
+  const calcLoop2 = await service.handlers['repricer:calc']({ full: true });
+  const loopRes2 = (calcLoop2.results || []).find((r) => Number(r.nmID) === Number(loopNm));
+  check('закольцовка: второй расчёт не сажает на порог повторно',
+    !!loopRes2 && loopRes2.firstCalcSeeded === false, loopRes2 ? 'seeded=' + loopRes2.firstCalcSeeded : 'строки нет');
+  const propLoop = await service.handlers['repricer:proposal']();
+  const mine = (propLoop.items || []).find((x) => Number(x.nmID) === Number(loopNm));
+  check('закольцовка: в предложении только цена репрайсера, ручных пометок нет',
+    !mine || mine.manual !== true, mine ? JSON.stringify({ manual: mine.manual, base: mine.basePrice }) : 'позиции нет в предложении');
 
-  // сохраняем — цена должна примениться во всех разделах
-  doc.getElementById('ic-save').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  await wait(1600);
-  const savedDraft = (await service.handlers['prices:draft-load']({}).catch(() => null));
-  const drafts = (savedDraft && savedDraft.items) || (await service.handlers['prices:draft-load']()).items;
-  check('карточка: «Сохранить» записал цену в данные приложения',
-    !!drafts[String(loopNm)] && Number(drafts[String(loopNm)].basePrice) === Math.round(mpPrice * 1.5),
-    JSON.stringify(drafts[String(loopNm)] || null));
-
-  await window.S.loadDrafts();
-  window.S.invalidate();
-  const rowsAfter = window.S.getRows();
-  const rowAfter = rowsAfter.find((r) => r.nmID === loopNm);
-  check('закольцовка: сохранённая цена стала ценой товара в общем состоянии',
-    Math.abs(rowAfter.sellerPrice - Math.round(mpPrice * 1.5) * (1 - rowAfter.discount / 100)) < 1.01,
-    'sellerPrice ' + rowAfter.sellerPrice + ' при базе ' + rowAfter.basePrice);
-  check('закольцовка: цена маркетплейса не потеряна', rowAfter.mpSellerPrice === mpPrice,
-    'МП ' + rowAfter.mpSellerPrice + ' vs ' + mpPrice);
-  check('закольцовка: строка помечена как со своей ценой', rowAfter.hasDraft === true);
-  check('закольцовка: прибыль пересчиталась по новой цене',
-    Math.abs(rowAfter.profit - loopRow.profit) > 0.5,
-    loopRow.profit + ' → ' + rowAfter.profit);
-
-  // в «Цены и скидки» та же цена
-  window.App.go('prices');
-  await wait(1000);
-  const pricesRow = Array.from(doc.querySelectorAll('#grid-host tbody tr')).find((tr) => tr.textContent.includes(String(loopNm)));
-  const cellInput = pricesRow ? pricesRow.querySelector('input.cellinput') : null;
-  check('закольцовка: в «Цены и скидки» стоит сохранённая цена',
-    !!cellInput && Number(cellInput.value) === Math.round(mpPrice * 1.5),
-    cellInput ? 'в поле ' + cellInput.value : 'строка не найдена');
-  check('закольцовка: в «Цены и скидки» рядом видна цена маркетплейса',
-    !!pricesRow && /на МП/.test(pricesRow.textContent),
-    pricesRow ? pricesRow.textContent.replace(/\s+/g, ' ').slice(0, 110) : 'строка не найдена');
-
-  // в репрайсере — колонка «Моя цена»
+  // цена из расчёта видна в таблице товаров репрайсера
   window.App.go('repricer');
   await wait(600);
   window.Views.repricer.tab = 'prices';
   await window.Views.repricer.draw();
   await wait(2500);
   const rpHtml4 = doc.getElementById('view').innerHTML;
-  check('закольцовка: в репрайсере видна «Моя цена»', /Моя цена/.test(rpHtml4));
+  check('закольцовка: в репрайсере нет колонки ручной цены', !/Моя цена/.test(rpHtml4));
   check('закольцовка: в репрайсере цена МП показана отдельно', /Цена на МП/.test(rpHtml4));
 
-  // цена должна дойти и до «Экономики», и до «Панели» — они берут строки из общего состояния
-  // «Экономика» группирует по категориям, поэтому сверяем итог раздела с общим состоянием:
-  // если сохранённая цена применена, выручка в разделе совпадёт с выручкой по S.getRows()
+  // «Экономика» и «Панель» берут строки из общего состояния
   window.App.go('economics');
   await wait(1400);
   const econView = doc.getElementById('view');
   const econTotals = window.S.totals(window.S.getRows());
   const econViewText = econView.textContent.replace(/\s+/g, ' ');
-  check('закольцовка: «Экономика» считает по сохранённой цене',
+  check('закольцовка: «Экономика» считает по общему состоянию',
     econViewText.includes(window.U.compact(econTotals.revenue30)),
     'выручка по общему состоянию ' + window.U.compact(econTotals.revenue30) + ' ₽, в разделе: ' +
       econViewText.slice(econViewText.indexOf('Выручка'), econViewText.indexOf('Выручка') + 60));
@@ -2886,23 +2770,9 @@ async function run() {
   window.App.go('dashboard');
   await wait(1200);
   const dashText = doc.getElementById('view').textContent.replace(/\s+/g, ' ');
-  check('закольцовка: «Панель» пересчитана по сохранённым ценам',
+  check('закольцовка: «Панель» пересчитана по общему состоянию',
     dashText.length > 200 && !/Ошибка/.test(dashText),
     'символов ' + dashText.length);
-
-  // сервер: сохранённая цена важнее предложения репрайсера
-  await service.handlers['repricer:calc']({ full: true });
-  const propLoop = await service.handlers['repricer:proposal']();
-  const mine = (propLoop.items || []).find((x) => Number(x.nmID) === Number(loopNm));
-  check('закольцовка: ручная цена побеждает расчёт репрайсера',
-    !!mine && mine.manual === true && Number(mine.basePrice) === Math.round(mpPrice * 1.5),
-    mine ? JSON.stringify({ manual: mine.manual, base: mine.basePrice, rp: mine.rpSellerPrice }) : 'позиции нет в предложении');
-
-  await service.handlers['prices:draft-clear']({});
-  await window.S.loadDrafts();
-  const cc2 = doc.querySelector('#modal-root .modal-close');
-  if (cc2) cc2.click();
-  await wait(200);
 
   // ── возвращаем штатный размер товарной страницы и проверяем настоящую отрисовку ──
   // перед отрисовкой полного размера страницы (100 строк × 25 колонок) явно выпускаем мусор:

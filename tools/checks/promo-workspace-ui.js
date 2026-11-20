@@ -21,7 +21,7 @@ module.exports = async function ({ check, w, doc, until, modal, closeModals, req
   const tag = item.querySelector('.rp-tag'); tag.value = 'единый блок'; fire(tag);
   const plan = info.querySelector('.rp-plan'); plan.value = '120'; fire(plan);
   check('Рабочее место: метка и план сохранили nmID и пакетное редактирование', rp.pendingEdits.get(tag.dataset.nm).config.tag === 'единый блок' && rp.pendingEdits.get(plan.dataset.nm).config.planQtyMonth === 120);
-  rp.discardEdits(); w.S.state.priceEdits.clear();
+  rp.discardEdits();
 
   const layout = w.GridLayout.load('repricer-products');
   w.GridLayout.save('repricer-products', { ...layout, columnOrder: ['tag', 'stock', 'item', 'strategy', 'allowSend', 'info', 'plan'], widths: { ...layout.widths, item: 410, tag: 130, stock: 180 } });

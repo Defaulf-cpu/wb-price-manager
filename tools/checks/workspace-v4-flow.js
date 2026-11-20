@@ -218,7 +218,7 @@ async function stand(sizeMode = false) {
 async function serviceCases() {
   await asyncTest('частичные/pending ответы сохраняют все позиции предложения, фактическая история — только confirmed', async () => {
     const { service, store, goods } = await stand();
-    await service.handlers['prices:draft-save']({ items: Object.fromEntries(goods.map((g) => [String(g.nmID), { basePrice: Math.round(g.price * 1.02), discount: g.discount }])) });
+    await service.handlers['repricer:item-configs:save']({ items: Object.fromEntries(goods.map((g) => [String(g.nmID), { minPrice: Math.round(g.price * 0.85) }])) });
     await service.handlers['repricer:calc']({ full: true }); const prop = await service.handlers['repricer:proposal'](); assert.equal(prop.items.length, 3);
     service.getDemo().applyPrices = async (items) => ({ uploaded: items.length, batches: [], details: items.map((r, i) => ({ nmID: r.nmID, status: [3, 6, 1][i], errorText: i === 1 ? 'синтетический отказ' : '' })) });
     const result = await service.handlers['repricer:proposal-send'](); assert.equal(result.sent, 3); assert.equal(result.confirmed, 1);
@@ -226,14 +226,16 @@ async function serviceCases() {
     assert.equal(Object.values(store.loadPriceHistory()).flat().length, 1);
     assert.equal(Object.values(store.loadRecalcHistory()).flat().filter((r) => r.phase === 'submitted' && !r.sent).length, 2);
     await assert.rejects(() => service.handlers['repricer:proposal-send'](), /уже отправлено|устарело/);
-    assert.equal(Object.keys(store.loadPriceDrafts()).length, 3);
+    assert.equal(store.loadPriceDrafts, undefined); // ручных черновиков цен в хранилище больше нет
   });
-  await asyncTest('более новый черновик не удаляется ответом предыдущей отправки', async () => {
+  await asyncTest('отметка первого расчёта не сбрасывается сохранением настроек товара', async () => {
     const { service, store, goods } = await stand(), nm = String(goods[0].nmID);
-    await service.handlers['prices:draft-save']({ items: { [nm]: { basePrice: 2000, discount: 10 } } }); const expected = store.loadPriceDrafts()[nm];
-    await service.handlers['prices:draft-save']({ items: { [nm]: { basePrice: 2100, discount: 10 } } });
-    await service.handlers['prices:draft-clear']({ nmIDs: [Number(nm)], expectedItems: { [nm]: expected } }); assert.equal(store.loadPriceDrafts()[nm].basePrice, 2100);
-    await service.handlers['prices:draft-clear']({ nmIDs: [Number(nm)], expectedItems: { [nm]: store.loadPriceDrafts()[nm] } }); assert.equal(store.loadPriceDrafts()[nm], undefined);
+    await service.handlers['repricer:calc']({ full: true });
+    const seededAt = (store.loadItemConfigs()[nm] || {}).floorSeededAt; assert.ok(seededAt, 'первый расчёт должен посадить цену на порог');
+    await service.handlers['repricer:item-configs:save']({ items: { [nm]: { minPrice: 300 } } });
+    assert.equal((store.loadItemConfigs()[nm] || {}).floorSeededAt, seededAt);
+    const calc2 = await service.handlers['repricer:calc']({ full: true });
+    assert.equal(calc2.results.find((r) => String(r.nmID) === nm).firstCalcSeeded, false);
   });
   await asyncTest('неподтверждённая общая скидка не запускает отправку цен размеров и не считается полным успехом', async () => {
     const { service, goods } = await stand(true), good = goods[0]; let sizeCalls = 0;
@@ -247,7 +249,9 @@ async function serviceCases() {
     first.sizes[1].price += 100;
     await service.handlers['wb:goods']({ force: true });
     await service.handlers['repricer:item-configs:save']({ items: { [first.nmID]: { sizePriceMode: 'none' } } });
-    await service.handlers['prices:draft-save']({ items: Object.fromEntries([first, second].map((g) => [g.nmID, { basePrice: Math.round(g.price * 1.02), discount: g.discount }])) });
+    await service.handlers['repricer:item-configs:save']({ items: Object.fromEntries([first, second].map((g) => [String(g.nmID), { minPrice: Math.round(g.price * 0.85) }])) });
+    // без авто-действий по акциям: цена порога достигается изменением базовой цены товара
+    await service.handlers['repricer:save']({ promo: { autoJoin: false, autoExitAutoPromos: false, autoExitManualPromos: false } });
     await service.handlers['repricer:calc']({ full: true });
     service.getDemo().applyPrices = async (items) => { posts.push(...items); return { uploaded: items.length, details: items.map((r) => ({ nmID: r.nmID, status: 3 })) }; };
     service.getDemo().applySizePrices = async () => { throw new Error('size API не должен вызываться в none'); };

@@ -2360,71 +2360,9 @@ function createService(store, emit, electron, integrations) {
       return Object.assign({ ok: true }, cleared);
     },
 
-    // ─────────── Черновики цен: «сохранить без отправки в WB» ───────────
-
-    /**
-     * Сохранить введённые руками цены/скидки, НЕ отправляя их в WB.
-     * Раньше ручной ввод жил только в памяти интерфейса и терялся при перезапуске
-     * или обновлении данных — пользователь видел, как цифры «сбрасываются по нулям».
-     */
-    'prices:draft-save': async (payload) => {
-      const items = Object.assign({}, store.loadPriceDrafts());
-      const patch = (payload && payload.items) || {};
-      let added = 0;
-      for (const [k, v] of Object.entries(patch)) {
-        const nm = Number(k);
-        if (!(nm > 0)) continue;
-        const basePrice = Number(v && v.basePrice) || 0;
-        const discount = Number(v && v.discount) || 0;
-        if (v === null || (basePrice <= 0 && discount <= 0)) { delete items[String(nm)]; continue; }
-        items[String(nm)] = {
-          basePrice,
-          discount,
-          sellerPrice: Math.round(basePrice * (1 - discount / 100) * 100) / 100,
-          note: String((v && v.note) || ''),
-          savedAt: new Date().toISOString()
-        };
-        added++;
-      }
-      if (payload && payload.clearMissing) {
-        // сохранить только то, что пришло (режим «черновик = текущая таблица»)
-        const keep = {};
-        for (const [k, v] of Object.entries(patch)) {
-          const nm = Number(k);
-          if (nm > 0 && items[String(nm)]) keep[String(nm)] = items[String(nm)];
-        }
-        store.savePriceDrafts(keep);
-        return { ok: true, count: Object.keys(keep).length, items: keep };
-      }
-      store.savePriceDrafts(items);
-      notify('log', { where: 'prices', message: 'Черновик цен сохранён: ' + added + ' поз. (в WB не отправлено)' });
-      return { ok: true, count: Object.keys(items).length, added, items };
-    },
-
-    'prices:draft-load': async () => ({ ok: true, items: store.loadPriceDrafts(), demo: isDemo() }),
-
-    'prices:draft-clear': async (payload) => {
-      const items = store.loadPriceDrafts();
-      const only = (payload && payload.nmIDs) || null;
-      if (Array.isArray(only) && only.length) {
-        only.forEach((nm) => {
-          const key = String(Number(nm)), expected = payload && payload.expectedItems;
-          if (expected) {
-            const was = expected[key], now = items[key];
-            if (!was || !now || Number(was.basePrice) !== Number(now.basePrice) || Number(was.discount) !== Number(now.discount) || was.savedAt && was.savedAt !== now.savedAt || String(was.note || '') !== String(now.note || '')) return;
-          }
-          delete items[key];
-        });
-        store.savePriceDrafts(items);
-        return { ok: true, count: Object.keys(items).length, items };
-      }
-      store.clearPriceDrafts();
-      return { ok: true, count: 0, items: {} };
-    },
-
     /**
      * Всё для карточки товара (двойной клик по строке): экономика, конкуренты,
-     * комиссии, акции, история пересчёта и черновик цены — одним запросом,
+     * комиссии, акции и история пересчёта — одним запросом,
      * чтобы окно открывалось сразу и не дёргало WB по каждому блоку.
      */
     'items:card': async (payload) => {
@@ -2438,7 +2376,6 @@ function createService(store, emit, electron, integrations) {
       const cards = cache.cards || [];
       const card = cards.find((c) => Number(c.nmID) === nmID) || null;
       const pi = await promoIndex().catch(() => null);
-      const drafts = store.loadPriceDrafts()[String(nmID)] || null;
       const proposal = (store.loadProposals().items || []).find((x) => Number(x.nmID) === nmID) || null;
       const recalc = (store.loadRecalcHistory()[String(nmID)] || []).slice(-40).reverse();
       const priceHist = (store.loadPriceHistory()[String(nmID)] || []).slice(-40).reverse();
@@ -2467,7 +2404,6 @@ function createService(store, emit, electron, integrations) {
         promosNoApi: pi ? Object.keys(pi.noApi || {}).length : 0,
         competitors,
         itemConfig, enteredCosts,
-        drafts,
         proposal,
         recalcHistory: recalc,
         priceHistory: priceHist,
@@ -3575,7 +3511,7 @@ function createService(store, emit, electron, integrations) {
     const g = await handlers['wb:goods']({});
     const cfg = repricerCfg();
     const comps = await competitorsMap();
-    const itemConfigs = store.loadItemConfigs(), draftsForContext = store.loadPriceDrafts();
+    const itemConfigs = store.loadItemConfigs();
     const dayStart = store.dayStartPrices();
     const facts = factsMap();
     // товары, выведенные из акции: цену держим повышенной, пока автоакция не закончится
@@ -3608,8 +3544,16 @@ function createService(store, emit, electron, integrations) {
       const stats = statsByNm[key] || {};
       const ic = itemConfigs[key] || {};
       const merged = RP.itemConfig(cfg.defaults, ic, cfg.strategyTemplates);
-      const manualBase = (draftsForContext[key] || {}).basePrice;
-      if (!(Number(item.price) > 0) && Number(manualBase) > 0 && !(Number(merged.basePriceTarget) > 0)) merged.basePriceTarget = Number(manualBase);
+      /**
+       * Первый расчёт товара с заданными порогами: пока продавец не задал
+       * минимальный порог (ценой, маржой % или маржой ₽ в настройках товара),
+       * сажать цену не на что. Как только порог задан и товара ещё ни разу
+       * не считали, движок поставит цену на этот порог; отметку о выполненной
+       * посадке (floorSeededAt в настройках товара) ставит calcRepricer.
+       */
+      const userFloorSet = Number(ic.minPrice) > 0 || Number(ic.minMarginRub) > 0 ||
+        (ic.minMarginPct !== undefined && ic.minMarginPct !== null && ic.minMarginPct !== '' && Number(ic.minMarginPct) > 0);
+      const firstCalcSeed = userFloorSet && !ic.floorSeededAt;
 
       const seller = Number(item.price) * (1 - Number(item.discount) / 100);
       const statsKnown = Object.prototype.hasOwnProperty.call(statsByNm, key);
@@ -3677,6 +3621,9 @@ function createService(store, emit, electron, integrations) {
           // «Отправка в WB» и метка товара — из настроек товара (колонки таблицы)
           allowSend: merged.allowSend !== false,
           tag: merged.tag ? String(merged.tag) : '',
+          // первый расчёт с заданными порогами — движок поставит цену на минимальный порог
+          firstCalcSeed,
+          floorSeededAt: ic.floorSeededAt || null,
           // фактическая средняя СПП по продажам — это и есть «прогнозная СПП» для акций
           sppFactAvg: Number(stats.avgSppPct || 0),
           factCosts: fact || null,
@@ -3763,13 +3710,13 @@ function createService(store, emit, electron, integrations) {
   function inputSnapshot() {
     const settings = { ...getSettings() };
     for (const key of ['lastSync', 'lastDataRefreshAt', 'lastDataRefreshOk', 'factsLoadedAt']) delete settings[key];
-    return { context: businessContext(), settings, configs: store.loadItemConfigs(), costs: costsMap(), drafts: store.loadPriceDrafts(), cfg: repricerCfg(), facts: factsMap(), promoRevision };
+    return { context: businessContext(), settings, configs: store.loadItemConfigs(), costs: costsMap(), cfg: repricerCfg(), facts: factsMap(), promoRevision };
   }
   function inputFingerprint(nmID, snapshot) {
     const data = snapshot || inputSnapshot(), nm = String(nmID), ic = { ...(data.configs[nm] || {}) };
-    for (const key of ['boostRuntime', 'updatedAt', 'allowSend', 'tag', 'safetyLock']) delete ic[key];
+    for (const key of ['boostRuntime', 'updatedAt', 'allowSend', 'tag', 'safetyLock', 'floorSeededAt']) delete ic[key];
     const cost = { ...(data.costs[nm] || {}) }; delete cost.updatedAt;
-    return Boost.signature({ context: data.context, settings: data.settings, ic, costs: cost, draft: data.drafts[nm] || null, cfg: data.cfg, facts: data.facts[nm] || null, promoRevision: data.promoRevision, boostDay: (ic.strategy || data.cfg.defaults.strategy) === 'boost' ? StatMath.dayKey() : undefined });
+    return Boost.signature({ context: data.context, settings: data.settings, ic, costs: cost, cfg: data.cfg, facts: data.facts[nm] || null, promoRevision: data.promoRevision, boostDay: (ic.strategy || data.cfg.defaults.strategy) === 'boost' ? StatMath.dayKey() : undefined });
   }
 
   async function calcRepricer(opts) {
@@ -3799,7 +3746,7 @@ function createService(store, emit, electron, integrations) {
             if (!opts.previewOnly && boostPlan.runtime) runtimeUpdates[String(r.ctx.nmID)] = boostPlan.runtime;
           }
           // Правка только размера тоже является предложением, даже если минимальная
-          // цена товара и скидка не изменились. Без этого ручные цены не отправлялись.
+          // цена товара и скидка не изменились. Без этого цены размеров не отправлялись.
           const manual = r.itemCfg.sizePrices || {};
           result.sizeChanges = good && good.editableSizePrice && mode !== 'none'
             ? (good.sizes || []).filter((size) => {
@@ -3808,11 +3755,10 @@ function createService(store, emit, electron, integrations) {
                 Math.round(Number(price)) !== Math.round(Number(size.price));
             }).length : 0;
           if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
-          applyDraftToResult(result, r, fingerprints.drafts);
           if (good && good.editableSizePrice && mode === 'sync') result.sizeChanges = (good.sizes || []).filter((size) => Math.round(Number(size.price)) !== Math.round(Number(result.proposed.basePrice))).length;
           if (result.allowSend !== false && result.sizeChanges > 0) result.needSend = true;
           result.inputFingerprint = inputFingerprint(result.nmID, fingerprints);
-          result.issues = StatMath.issuesFor(result, !!fingerprints.drafts[String(result.nmID)]);
+          result.issues = StatMath.issuesFor(result);
           if (!RP.STRATEGIES.some((s) => s.id === result.strategy) && !(cfg.customStrategies || []).some((s) => s.id === result.strategy)) result.issues.push({ code: 'STRATEGY_INVALID', message: 'Неизвестная стратегия товара', level: 'critical' });
           result.autoBlocked = result.issues.some((i) => i.level === 'critical');
           result.manualAllowSend = result.allowSend;
@@ -3828,6 +3774,13 @@ function createService(store, emit, electron, integrations) {
           const critical = (result.issues || []).filter((i) => i.level === 'critical');
           let next = previous;
           if (runtimeUpdates[nm]) { next = { ...next, boostRuntime: runtimeUpdates[nm] }; changed = true; }
+          // Первый расчёт посадил цену на минимальный порог — запоминаем, чтобы
+          // дальше товар вели стратегии внутри коридора, а не посадка на порог.
+          // Заблокированная строка посадку не «расходует»: после исправления
+          // данных первый полноценный расчёт всё равно начнётся с порога.
+          if (result.firstCalcSeeded && !result.autoBlocked && !previous.floorSeededAt) {
+            next = { ...next, floorSeededAt: new Date().toISOString() }; changed = true;
+          }
           if (critical.length || lock) {
             const state = { active: critical.length > 0, context: business, issues: critical };
             if (!lock || Boost.signature({ active: lock.active, context: lock.context, issues: lock.issues }) !== Boost.signature(state)) { next = { ...next, safetyLock: { ...state, checkedAt: new Date().toISOString() } }; changed = true; }
@@ -3895,20 +3848,6 @@ function createService(store, emit, electron, integrations) {
     }
   }
 
-  function applyDraftToResult(result, row, drafts) {
-    const draft = drafts[String(result.nmID)];
-    if (!draft || !(Number(draft.basePrice) > 0) || result.strategy === 'boost') return;
-    const basePrice = Math.round(Number(draft.basePrice)), discount = Math.round(Number(draft.discount) || 0), sellerPrice = U2(basePrice * (1 - discount / 100));
-    const marginCtx = { ...row.ctx, marginMode: row.cfg.marginMode, walletPct: Number(row.cfg.priceEdit.walletPct) || 0, forPayRatio: row.ctx.sellerPrice > 0 ? row.ctx.forPayAvg / row.ctx.sellerPrice : 1 };
-    marginCtx.forPayAtPrice = (price) => price * marginCtx.forPayRatio;
-    const unit = RP.marginOf(marginCtx, sellerPrice);
-    result.strategyProposed = result.proposed;
-    result.proposed = { basePrice, discount, sellerPrice, buyerPrice: U2(sellerPrice * (1 - row.ctx.sppPct / 100) * (1 - marginCtx.walletPct / 100)), profit: unit.profit, marginPct: unit.marginPct, priceMode: 'manual-draft' };
-    result.cost.next = row.ctx.econAt(sellerPrice);
-    result.needSend = result.allowSend !== false && (Math.abs(sellerPrice - row.ctx.sellerPrice) > .5 || result.sizeChanges > 0);
-    result.delta = { ...result.delta, abs: U2(sellerPrice - row.ctx.sellerPrice), pct: row.ctx.sellerPrice > 0 ? U2((sellerPrice / row.ctx.sellerPrice - 1) * 100) : 0, profitPerUnit: U2(unit.profit - result.current.profit), profitMonth: U2((unit.profit - result.current.profit) * row.ctx.salesPerDay * 30) };
-  }
-
   /** Когда наступит фаза отправки для предложения, рассчитанного в at. */
   function proposalSendAt(at, cfg) {
     const minutes = Math.max(1, Number((cfg && cfg.schedule && cfg.schedule.sendDelayMinutes) || 40));
@@ -3927,7 +3866,7 @@ function createService(store, emit, electron, integrations) {
    *
    * @returns {string[]} причины (пустой массив = строка готова)
    */
-  function proposalBlockers(r, drafts) {
+  function proposalBlockers(r) {
     const out = [];
     // движок отдаёт не значение себестоимости, а её источник: 'none' = не задана нигде
     const src = (r.current && r.current.costSources) || {};
@@ -3936,14 +3875,12 @@ function createService(store, emit, electron, integrations) {
     /**
      * Базовой цены в ответе WB может не быть: продавец её ещё не задал либо товар
      * с поразмерными ценами (тогда цена подставляется из sizes[] — см. normalizeGood).
-     * Если цена сохранена вручную (черновик «Цены и скидки»), она и задаст базовую при
-     * отправке — блокировать такую строку нельзя: репрайсер спорил с разделом, где цена
-     * уже задана, и продавец видел «не задана базовая цена» при живой цене.
+     * Ручных цен в приложении больше нет: цена рождается только расчётом
+     * репрайсера по порогам товара, поэтому без базовой цены WB строку
+     * предлагать не из чего.
      */
-    const draft = (drafts || {})[String(r.nmID)];
-    const hasDraftBase = !!(draft && Number(draft.basePrice) > 0);
-    if (!(Number(r.current && r.current.basePrice) > 0) && !hasDraftBase) {
-      out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
+    if (!(Number(r.current && r.current.basePrice) > 0)) {
+      out.push('базовая цена в WB не задана — обновите данные из кабинета');
     }
     if (!(Number(r.corridor && r.corridor.min) > 0)) out.push('не задан порог минимальной цены');
     // себестоимость введена в валюте, курс которой не задан: считать цену нельзя
@@ -3956,12 +3893,11 @@ function createService(store, emit, electron, integrations) {
     const ready = [];
     const blocked = [];
     /**
-     * Цена, сохранённая вручную (черновик), важнее предложения репрайсера — тот же
-     * принцип, что в «Цены и скидки»: ручная правка всегда побеждает правило.
-     * Поэтому строка с черновиком уходит в предложение С ЦЕНОЙ ПОЛЬЗОВАТЕЛЯ,
-     * даже если репрайсер посчитал, что менять ничего не нужно.
+     * В предложение попадает только расчёт репрайсера: цена из порогов товара
+     * (минимум/максимум) и стратегии. Ручных цен, которые могли бы подменить
+     * расчёт, в приложении больше нет — поэтому и в истории отправки всегда
+     * видна именно цена репрайсера.
      */
-    const drafts = store.loadPriceDrafts() || {};
     // настройки товара: режим цен по размерам и ручные цены размеров — для отправки
     const itemConfigsNow = store.loadItemConfigs() || {};
     (results || []).forEach((r) => {
@@ -3982,26 +3918,14 @@ function createService(store, emit, electron, integrations) {
         });
         return;
       }
-      const blockers = proposalBlockers(r, drafts);
+      const blockers = proposalBlockers(r);
       if (blockers.length) {
         blocked.push({ nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
           reasons: blockers, sellerPrice: r.proposed && r.proposed.sellerPrice });
         return;
       }
-      const d = drafts[String(r.nmID)];
-      const hasDraft = !!(d && Number(d.basePrice) > 0);
-      if (hasDraft) {
-        const mpSeller = r.current ? r.current.sellerPrice : 0;
-        const mySeller = Math.round(Number(d.basePrice) * (1 - Number(d.discount || 0) / 100) * 100) / 100;
-        // отправлять нужно только если наша цена действительно отличается от цены МП
-        if (Math.abs(mySeller - mpSeller) > 0.5 || r.sizeChanges > 0) {
-          r.manualDraft = { basePrice: Number(d.basePrice), discount: Number(d.discount || 0), sellerPrice: mySeller, note: d.note || '' };
-          ready.push(r);
-        }
-        return;
-      }
       if (!r.needSend || !r.proposed) return;
-      const why = proposalBlockers(r, drafts);
+      const why = proposalBlockers(r);
       if (why.length) {
         blocked.push({
           nmID: r.nmID, vendorCode: r.vendorCode || '', title: r.title || '',
@@ -4023,12 +3947,10 @@ function createService(store, emit, electron, integrations) {
         currentBasePrice: r.current ? r.current.basePrice : 0,
         currentDiscount: r.current ? r.current.discount : 0,
         currentSellerPrice: r.current ? r.current.sellerPrice : 0,
-        // цена пользователя (черновик) важнее расчёта репрайсера
-        basePrice: r.manualDraft ? r.manualDraft.basePrice : r.proposed.basePrice,
-        discount: r.manualDraft ? r.manualDraft.discount : (r.proposed ? r.proposed.discount : 0),
-        sellerPrice: r.manualDraft ? r.manualDraft.sellerPrice : (r.proposed ? r.proposed.sellerPrice : 0),
-        manual: !!r.manualDraft,
-        manualNote: r.manualDraft ? r.manualDraft.note : '',
+        // только расчёт репрайсера по порогам и стратегии — ручных цен нет
+        basePrice: r.proposed.basePrice,
+        discount: r.proposed ? r.proposed.discount : 0,
+        sellerPrice: r.proposed ? r.proposed.sellerPrice : 0,
         rpSellerPrice: r.proposed ? r.proposed.sellerPrice : 0,
         profitNow: r.current ? r.current.profit : 0,
         profitNext: r.proposed ? r.proposed.profit : 0,
@@ -4240,7 +4162,7 @@ function createService(store, emit, electron, integrations) {
     if (!row || !good) return { ok: false, issues: [{ message: 'Товар не найден в текущем кабинете.' }] };
     const grant = grants && grants.get(Number(nmID));
     if (grant && (grant.context !== snapshot.context || grant.day !== StatMath.dayKey() || grant.at && Date.now() - grant.at > 180000)) return { ok: false, issues: [{ message: 'Подтверждение лесенки устарело. Пересчитайте цены.' }] };
-    return PriceSafety.evaluate(row, { basePrice, discount }, { good, boost: grant && grant.plan, lock: activeSafetyLock(snapshot.inputs.configs[String(nmID)]), hasDraft: !!snapshot.inputs.drafts[String(nmID)] });
+    return PriceSafety.evaluate(row, { basePrice, discount }, { good, boost: grant && grant.plan, lock: activeSafetyLock(snapshot.inputs.configs[String(nmID)]) });
   }
   function mutationPreflight(snapshot, rows, grants) {
     assertPriceContext(snapshot.context);
@@ -4397,7 +4319,7 @@ function createService(store, emit, electron, integrations) {
         if (plan.blocked || !r.boost || plan.day !== r.boost.day || plan.status !== r.boost.status || plan.promoId !== r.boost.promoId || Math.abs(Number(plan.target) - Number(r.boost.target)) > .005) { allWarnings.push({ nmID: r.nmID, type: 'boost-stale', message: plan.blocked ? plan.reason : 'Заказы/ступень лесенки изменились. Нужен новый пересчёт.' }); continue; }
         boostGrants.set(Number(r.nmID), { plan, at: boostOrders && boostOrders.at, day: StatMath.dayKey(), context });
       }
-      const check = PriceSafety.evaluate(row, r.proposed, { good, boost: plan, lock: activeSafetyLock(ic), hasDraft: !!inputs.drafts[String(r.nmID)] });
+      const check = PriceSafety.evaluate(row, r.proposed, { good, boost: plan, lock: activeSafetyLock(ic) });
       if (!check.ok) { allWarnings.push({ nmID: r.nmID, type: 'critical', message: check.issues.map((i) => i.message).join('; ') }); continue; }
       eligible.push(r);
       const mode = normalizeSizePriceMode(r.sizePriceMode || (r.context || {}).sizePriceMode || ic.sizePriceMode,
@@ -4432,7 +4354,7 @@ function createService(store, emit, electron, integrations) {
     for (const candidate of sizeRows) {
       const row = rowsByNm.get(Number(candidate.nmID)), good = goodsByNm.get(Number(candidate.nmID)), grant = boostGrants.get(Number(candidate.nmID));
       for (const discount of new Set([Number(good.discount), targets.get(Number(candidate.nmID))])) {
-        const test = PriceSafety.evaluate(row, { basePrice: candidate.price, discount }, { good, boost: grant && grant.plan, lock: activeSafetyLock(itemConfigsNow[String(candidate.nmID)]), hasDraft: !!inputs.drafts[String(candidate.nmID)] });
+        const test = PriceSafety.evaluate(row, { basePrice: candidate.price, discount }, { good, boost: grant && grant.plan , lock: activeSafetyLock(itemConfigsNow[String(candidate.nmID)]) });
         if (!test.ok) { rejected.add(Number(candidate.nmID)); allWarnings.push({ nmID: candidate.nmID, type: 'size-critical', message: 'Размер ' + candidate.sizeID + ': ' + test.issues.map((i) => i.message).join('; ') }); }
       }
     }
@@ -5121,7 +5043,7 @@ function createService(store, emit, electron, integrations) {
   }
 
   const priceChannels = new Set(['wb:apply-prices', 'wb:apply-size-prices', 'wb:promo-join', 'repricer:send', 'repricer:proposal-send', 'repricer:promo-apply', 'repricer:promo-exit', 'repricer:promo-restore']);
-  const inputChannels = new Set(['keys:set', 'keys:clear', 'settings:save', 'settings:reset', 'costs:save', 'costs:import', 'costs:clear', 'prices:draft-save', 'prices:draft-clear', 'repricer:save', 'repricer:item-configs:save', 'strategies:template', 'strategies:custom-save', 'data:refresh-all', 'backup:import', 'backup:restore', 'repricer:calc', 'repricer:competitors:save', 'promos:import-noms', 'promos:noms:save', 'promos:clear-noms']);
+  const inputChannels = new Set(['keys:set', 'keys:clear', 'settings:save', 'settings:reset', 'costs:save', 'costs:import', 'costs:clear', 'repricer:save', 'repricer:item-configs:save', 'strategies:template', 'strategies:custom-save', 'data:refresh-all', 'backup:import', 'backup:restore', 'repricer:calc', 'repricer:competitors:save', 'promos:import-noms', 'promos:noms:save', 'promos:clear-noms']);
   // Счётчик включает и вложенные асинхронные вызовы обработчиков: удаление или
   // импорт не могут обогнать запрос WB, который ещё запишет результат в этот профиль.
   for (const [channel, fn] of Object.entries(handlers)) {

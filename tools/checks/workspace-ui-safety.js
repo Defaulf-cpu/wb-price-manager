@@ -58,8 +58,8 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     doc.dispatchEvent(new w.Event('DOMContentLoaded'));
     await until(() => w.S.state.appState && w.S.state.items.length && !w.API.pending());
     check('UI: удалённые три пункта отсутствуют в боковом меню, отдельный калькулятор добавлен', !doc.querySelector('#nav [data-id="prices"], #nav [data-id="economics"], #nav [data-id="costs"]') && !!doc.querySelector('#nav [data-id="calculator"]') && doc.querySelectorAll('#nav .nav-item').length === 8);
-    w.App.go('prices'); await until(() => doc.querySelector('#grid-host tbody tr'));
-    check('UI: старый переход к ценам открывает вложенную панель репрайсера', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'price-tools' && !!doc.querySelector('#rp-tabs') && !!doc.querySelector('#grid-host'));
+    w.App.go('repricer'); await until(() => doc.querySelector('#rp-grid tbody tr'));
+    check('UI: репрайсер открывается на таблице товаров, раздела ручных цен нет', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'prices' && !!doc.querySelector('#rp-tabs') && !!doc.querySelector('#rp-grid') && !doc.querySelector('#rp-tabs [data-t="price-tools"]'));
     w.App.go('economics'); await until(() => doc.querySelector('#ec-tabs'));
     check('UI: экономика и калькулятор остались внутри репрайсера', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'economics' && !!doc.querySelector('#ec-tabs'));
     w.App.go('calculator'); await until(() => doc.querySelector('#calc-out'));
@@ -68,7 +68,7 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     check('UI: себестоимость осталась внутри репрайсера', w.S.state.view === 'repricer' && w.Views.repricer.tab === 'costs' && !!doc.querySelector('#c-grid'));
     w.App.go('repricer'); await until(() => doc.querySelector('#rp-grid tbody tr[data-row-id]'));
     const view = w.Views.repricer;
-    check('UI: все вкладки репрайсера одного типа и со скруглением как у журнала', doc.querySelectorAll('#rp-tabs button.tab').length === 7 && w.getComputedStyle(doc.querySelector('#rp-tabs [data-t="costs"]')).borderRadius === w.getComputedStyle(doc.querySelector('#rp-tabs [data-t="journal-prices"]')).borderRadius);
+    check('UI: все вкладки репрайсера одного типа и со скруглением как у журнала', doc.querySelectorAll('#rp-tabs button.tab').length === 6 && w.getComputedStyle(doc.querySelector('#rp-tabs [data-t="costs"]')).borderRadius === w.getComputedStyle(doc.querySelector('#rp-tabs [data-t="journal-prices"]')).borderRadius);
     const themeButton = doc.querySelector('[data-theme-toggle]'); check('UI: кнопка темы показывает полное название и не обрезает подпись', /Светлая/.test(themeButton.textContent) && w.getComputedStyle(themeButton).minWidth === '118px'); themeButton.click();
     check('UI: светлая тема включается явной кнопкой', w.App.getTheme() === 'light' && doc.documentElement.dataset.theme === 'light' && /Тёмная/.test(themeButton.textContent));
     check('UI: выбор темы переживает перерисовку', w.localStorage.getItem('wb.ui.theme') === 'light');
@@ -105,7 +105,7 @@ module.exports = async function ({ check, ROOT, fixture, temp, hubs }) {
     check('UI: выбор всех не теряет обработчики редактирования ячеек', view.pendingEdits.has(strategy.dataset.nm));
     await until(() => modal() && modal().querySelector('[data-strategy-field]'));
     if (modal()) await modal().querySelector('.modal-close').onclick();
-    view.discardEdits(); w.S.state.priceEdits.clear();
+    view.discardEdits();
     await until(() => !w.API.pending());
     await w.App.switchProfile(bid, true);
     check('UI: размеры и ручной порядок строк не переходят в другой кабинет', !w.GridLayout.load('repricer-products').widths.priceNext && !w.GridLayout.load('repricer-products').rowOrder.length);

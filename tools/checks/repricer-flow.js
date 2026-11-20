@@ -4,8 +4,9 @@
  * Прогон новой логики цен и репрайсера.
  *
  * Что проверяем (это то, что просил пользователь):
- *  1. «Цены и скидки» сохраняют введённые цифры БЕЗ отправки в WB и не сбрасывают их
- *     ни при обновлении данных, ни после перезапуска приложения.
+ *  1. Ручных цен нет: каналы черновиков удалены, а первый расчёт товара с заданным
+ *     минимальным порогом ставит цену ровно на этот порог (один раз); дальше цену
+ *     ведут стратегии внутри коридора [минимум; максимум].
  *  2. Автопересчёт работает в две фазы: сначала репрайсер ПОКАЗЫВАЕТ, какие цены хочет
  *     поставить (фактические цены не меняются), и только потом отправляет их в WB.
  *  3. Отправка не затирает чужие правки: если цена в кабинете изменилась с момента
@@ -90,46 +91,49 @@ function makeStand(opts) {
   return { store, service, events, dir };
 }
 
-// ───────────────────────── 1. Черновик цен ─────────────────────────
+// ───────────────────────── 1. Первый расчёт: посадка на минимальный порог ─────────────────────────
 
-async function tDrafts() {
+async function tFirstCalcSeed() {
   const st = makeStand();
   await st.service.handlers['data:refresh-all']({ facts: false });
   const goods = await st.service.handlers['wb:goods']({});
   const first = (goods.items || [])[0];
-  const second = (goods.items || [])[1];
-  check('черновик: товары загружены', !!first && !!second);
+  check('первый расчёт: товары загружены', !!first);
+  const nm = String(first.nmID);
+  const seller = Number(first.price) * (1 - Number(first.discount) / 100);
+  const floor = Math.max(100, Math.round(seller * 0.8));
 
-  const draft = {};
-  draft[String(first.nmID)] = { basePrice: 1234, discount: 17, note: 'моя цена' };
-  draft[String(second.nmID)] = { basePrice: 999, discount: 5 };
-  const saved = await st.service.handlers['prices:draft-save']({ items: draft });
-  check('черновик: сохранён без отправки в WB', saved.ok === true && saved.count === 2, 'count=' + saved.count);
+  // ручных цен как канала больше не существует
+  check('ручные цены: каналы черновиков удалены из сервиса',
+    !st.service.handlers['prices:draft-save'] && !st.service.handlers['prices:draft-load'] && !st.service.handlers['prices:draft-clear']);
 
-  const loaded = await st.service.handlers['prices:draft-load']();
-  const d1 = loaded.items[String(first.nmID)];
-  check('черновик: значения читаются обратно', !!d1 && d1.basePrice === 1234 && d1.discount === 17, JSON.stringify(d1));
-  check('черновик: посчитана цена со скидкой', !!d1 && Math.abs(d1.sellerPrice - 1024.22) < 0.01, d1 && String(d1.sellerPrice));
+  await st.service.handlers['costs:save']({ items: { [nm]: { costPriceRub: 100 } } });
+  await st.service.handlers['repricer:item-configs:save']({ items: { [nm]: { minPrice: floor } } });
 
-  // обновление данных из кабинета не должно стирать введённые вручную цифры
-  await st.service.handlers['data:refresh-all']({ facts: false });
-  const after = await st.service.handlers['prices:draft-load']();
-  check('черновик: пережил «Обновить данные из WB»',
-    !!after.items[String(first.nmID)] && after.items[String(first.nmID)].basePrice === 1234);
+  const calc1 = await st.service.handlers['repricer:calc']({ full: true });
+  const r1 = (calc1.results || []).find((r) => String(r.nmID) === nm);
+  check('первый расчёт: строка помечена посадкой на порог', !!r1 && r1.firstCalcSeeded === true,
+    r1 && JSON.stringify({ seeded: r1.firstCalcSeeded, corridor: r1.corridor }));
+  check('первый расчёт: коридор начинается с заданного минимума',
+    !!r1 && Math.abs(Number(r1.corridor.min) - floor) < 0.01, r1 && 'min=' + r1.corridor.min);
+  check('первый расчёт: предложенная цена — минимальный порог (с точностью до пары база+скидка)',
+    !!r1 && Math.abs(Number(r1.proposed.sellerPrice) - floor) <= Math.max(30, floor * 0.02),
+    r1 && 'seller=' + r1.proposed.sellerPrice + ' floor=' + floor);
+  check('первый расчёт: отметка посадки записана в настройки товара',
+    !!(st.store.loadItemConfigs()[nm] || {}).floorSeededAt,
+    JSON.stringify(st.store.loadItemConfigs()[nm] || {}));
 
-  // «перезапуск приложения»: новый сервис на том же каталоге данных
-  const store2 = createStore(st.dir, null);
-  const service2 = createService(store2, () => {});
-  const afterRestart = await service2.handlers['prices:draft-load']();
-  check('черновик: пережил перезапуск приложения',
-    !!afterRestart.items[String(first.nmID)] && afterRestart.items[String(first.nmID)].discount === 17);
+  const calc2 = await st.service.handlers['repricer:calc']({ full: true });
+  const r2 = (calc2.results || []).find((r) => String(r.nmID) === nm);
+  check('второй расчёт: повторной посадки нет — цену ведёт стратегия внутри коридора',
+    !!r2 && r2.firstCalcSeeded === false &&
+    Number(r2.proposed.sellerPrice) >= floor - Math.max(30, floor * 0.02),
+    r2 && 'seller=' + r2.proposed.sellerPrice);
 
-  const cleared = await service2.handlers['prices:draft-clear']({});
-  check('черновик: очищается по кнопке', cleared.ok === true && cleared.count === 0);
-
-  // черновик не уходит в WB сам по себе
-  check('черновик: в WB ничего не отправлено', (await service2.handlers['tasks:history']()).length === 0 ||
-    !JSON.stringify(await service2.handlers['tasks:history']()).includes('1234'));
+  const prop = await st.service.handlers['repricer:proposal']();
+  check('предложение: ручных цен в позициях нет',
+    (prop.items || []).every((x) => x.manual === undefined && x.manualNote === undefined),
+    JSON.stringify((prop.items || []).map((x) => [x.nmID, x.manual])));
 }
 
 // ───────────────────────── 2. Двухфазный автопересчёт ─────────────────────────
@@ -308,7 +312,7 @@ async function tSizePricedGoods() {
 
   // себестоимость задаём всем, чтобы в блокировках осталась только тема базовой цены
   await st.service.handlers['costs:save']({ items: {
-    3333333: { costPriceRub: 300 }, 4444444: { costPriceRub: 300 }, 5555555: { costPriceRub: 300 }
+    3333333: { costPriceRub: 100 }, 4444444: { costPriceRub: 100 }, 5555555: { costPriceRub: 100 }
   } });
   await st.service.handlers['repricer:item-configs:save']({ items: {
     3333333: { minPrice: 500 }, 4444444: { minPrice: 500 }, 5555555: { minPrice: 500 }
@@ -332,19 +336,11 @@ async function tSizePricedGoods() {
     (prop.items || []).some((x) => Number(x.nmID) === 3333333),
     'причины: ' + JSON.stringify(reasonsOf(3333333)));
   check('репрайсер: товар без цены заблокирован честной подписью с подсказкой',
-    reasonsOf(4444444).some((t) => /базовая цена в WB не задана/.test(t) && /кабинет|свою цену/.test(t)),
+    reasonsOf(4444444).some((t) => /базовая цена в WB не задана/.test(t) && /кабинет/.test(t)),
     'причины: ' + JSON.stringify(reasonsOf(4444444)));
-
-  // цену сохранили вручную в «Цены и скидки» — значит базовая задана, блокировать не за что
-  await st.service.handlers['prices:draft-save']({ items: { 4444444: { basePrice: 1500, discount: 15 } } });
-  await st.service.handlers['repricer:calc']({ full: true });
-  const prop2 = await st.service.handlers['repricer:proposal']();
-  check('репрайсер: сохранённая вручную цена снимает блокировку по базовой цене',
-    !reasonsOf(4444444, prop2).some((t) => /базовая цена/i.test(t)),
-    'причины: ' + JSON.stringify(reasonsOf(4444444, prop2)));
-  check('репрайсер: товар с ручной ценой ушёл в предложение с ценой пользователя',
-    (prop2.items || []).some((x) => Number(x.nmID) === 4444444 && Number(x.basePrice) === 1500),
-    'в items: ' + JSON.stringify((prop2.items || []).map((x) => [x.nmID, x.basePrice])));
+  check('репрайсер: ручной цены больше нет — товар без базовой цены в предложение не попадает',
+    !(prop.items || []).some((x) => Number(x.nmID) === 4444444),
+    'в items: ' + JSON.stringify((prop.items || []).map((x) => [x.nmID, x.basePrice])));
 }
 
 // ───────────────────────── Цены по размерам: отправка, режимы, валидация ─────────────────────────
@@ -400,11 +396,11 @@ async function tSizePrices() {
     1001: { minPrice: 500, sizePriceMode: 'sync' },
     2002: { minPrice: 500, sizePriceMode: 'none' }
   } });
-  // своя цена в «Цены и скидки» — гарантирует попадание в предложение (репрайсер
-  // сам поверх расчёта не меняет цену, поэтому без черновика needSend=false)
-  await st.service.handlers['prices:draft-save']({ items: {
-    1001: { basePrice: 850, discount: 0 },
-    2002: { basePrice: 950, discount: 0 }
+  // минимальный порог выше текущей цены — гарантирует попадание в предложение:
+  // первый расчёт ставит цену на порог (1001 → 850, 2002 → 950)
+  await st.service.handlers['repricer:item-configs:save']({ items: {
+    1001: { minPrice: 850 },
+    2002: { minPrice: 950 }
   } });
 
   await st.service.handlers['repricer:calc']({ full: true });
@@ -422,7 +418,7 @@ async function tSizePrices() {
   const itemPosts = callsTo('/api/v2/upload/task').length - callsTo('/api/v2/upload/task/size').length;
   check('цены по размерам: цена товара тоже отправлена (upload/task)', itemPosts >= 1, 'POST upload/task: ' + itemPosts);
 
-  // sync: все размеры товара 1001 (900 и 800) получат цену товара (черновик — 850)
+  // sync: все размеры товара 1001 (900 и 800) получат цену товара (порог — 850)
   const sizeBody = sizePosts.length ? JSON.parse(sizePosts[sizePosts.length - 1].body).data : [];
   check('режим sync: размер 1001#11 отправлен с ценой товара (850)',
     sizeBody.some((x) => Number(x.nmID) === 1001 && Number(x.sizeID) === 11 && Number(x.price) === 850),
@@ -513,9 +509,11 @@ async function tSizePriceSafety() {
   await st.service.handlers['wb:goods']({ force: true });
   await st.service.handlers['costs:save']({ items: { 7007: { costPriceRub: 200 }, 8008: { costPriceRub: 200 } } });
   await st.service.handlers['repricer:item-configs:save']({ items: {
-    7007: { minPrice: 500, sizePriceMode: 'manual', sizePrices: { 702: 1050, 703: 1100 } }
+    7007: { strategy: 'hold', minPrice: 500, sizePriceMode: 'manual', sizePrices: { 702: 1050, 703: 1100 } }
   } });
-  await st.service.handlers['prices:draft-save']({ items: { 7007: { basePrice: 900, discount: 10 } } });
+  // первый расчёт сажает цену на минимальный порог и запоминает это; сценарий ниже —
+  // про уже посчитанный товар, у которого общая цена не меняется, а размер — меняется
+  await st.service.handlers['repricer:calc']({ full: true });
   const calc = await st.service.handlers['repricer:calc']({ full: true });
   const row = calc.results.find((r) => r.nmID === 7007);
   check('F: правка только размера помечает строку к отправке', row && row.needSend && row.sizeChanges === 1);
@@ -598,8 +596,7 @@ async function tSizePriceSafety() {
   check('F: чужая правка неминимального размера делает предложение устаревшим',
     stale && sizePosts.length + commonPosts.length === beforeStale);
 
-  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: 'none' } } });
-  await st.service.handlers['prices:draft-save']({ items: { 7007: { basePrice: 950, discount: 20 } } });
+  await st.service.handlers['repricer:item-configs:save']({ items: { 7007: { sizePriceMode: 'none', minPrice: 1000 } } });
   await st.service.handlers['repricer:calc']({ full: true });
   const beforeAuto = sizePosts.length + commonPosts.length;
   const skippedAuto = await st.service.handlers['repricer:proposal-send']({ source: 'repricer-auto', nmIDs: [7007] });
@@ -652,14 +649,13 @@ async function tItemCard() {
   // конкуренты и ручная комиссия — чтобы карточка показывала не только расчёт
   await st.service.handlers['repricer:competitors:save']({ items: { [String(nm)]: [{ id: 'c1', name: 'Конкурент А', price: 900, stock: 5, enabled: true }] } });
   await st.service.handlers['repricer:item-configs:save']({ items: { [String(nm)]: { strategy: 'margin', commissionPct: 21 } } });
-  await st.service.handlers['prices:draft-save']({ items: { [String(nm)]: { basePrice: 1500, discount: 10 } } });
 
   const card = await st.service.handlers['items:card']({ nmID: nm });
   check('карточка: товар найден', card.ok === true && Number(card.item.nmID) === Number(nm));
   check('карточка: есть экономика (расходы и источник)', !!card.overrides || !!card.item);
   check('карточка: есть конкуренты', (card.competitors || []).length === 1, JSON.stringify(card.competitors));
   check('карточка: есть ручные настройки товара', !!card.itemConfig && card.itemConfig.commissionPct === 21, JSON.stringify(card.itemConfig));
-  check('карточка: есть черновик цены', !!card.drafts && card.drafts.basePrice === 1500);
+  check('карточка: ручной цены в ответе нет', card.drafts === undefined);
   check('карточка: есть акции товара', Array.isArray(card.promos), 'акций: ' + (card.promos || []).length);
   check('карточка: есть статистика продаж', card.stats === null || typeof card.stats === 'object');
   check('карточка: есть история цен', Array.isArray(card.priceHistory));
@@ -1261,8 +1257,8 @@ async function tSingleScreen() {
 }
 
 (async () => {
-  console.log('=== Черновики цен («сохранить без отправки») ===');
-  await tDrafts();
+  console.log('=== Первый расчёт: посадка на минимальный порог ===');
+  await tFirstCalcSeed();
   console.log('\n=== Двухфазный автопересчёт репрайсера ===');
   await tTwoPhase();
   console.log('\n=== Валидация строк (товары без данных не отправляются) ===');

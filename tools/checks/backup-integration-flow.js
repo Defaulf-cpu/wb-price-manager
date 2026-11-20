@@ -41,7 +41,6 @@ function stand(seed) {
     store.saveTasks([{ taskId: 'j-task', total: 2, ok: 2, source: 'manual', createdAt: '2026-01-01' }]);
     store.saveFactCosts({ 1001: { logisticsAvg: 50 } }, { dateFrom: '2026-01-01' });
     store.savePromoExits({ 1001: { promoId: 5, raisedTo: 1200 } });
-    store.savePriceDrafts({ 1001: { basePrice: 1000, discount: 10 } });
     store.saveProposals({ at: '2026-01-01', phase: 'proposed', items: [{ nmID: 1001, sellerPrice: 900 }] });
     store.saveRepricer({ schedule: { enabled: true }, sizePriceMode: 'manual' });
     store.saveCompetitors({ 1001: [{ sku: '999', price: 850 }] });
@@ -112,7 +111,7 @@ async function main() {
   merge.store.saveSettings({ shopName: 'Локальный магазин', targetMarginPct: 15 });
   merge.store.saveCosts({ 1001: { costPriceRub: 999 }, 2001: { costPriceRub: 123 } });
   merge.store.saveTasks([{ taskId: 'local-task', total: 1 }, { taskId: 'j-task', total: 77 }]);
-  merge.store.savePriceDrafts({ 3001: { basePrice: 500, discount: 5 } });
+  merge.store.saveItemConfigs({ 3001: { minPrice: 500 } });
   const mergePreview = merge.manager.importBackup({ content: exported.content });
   check('предпросмотр сообщает о сохранённых конфликтах', mergePreview.totals.conflicts > 0);
   merge.manager.importBackup({ action: 'apply', content: exported.content });
@@ -120,7 +119,7 @@ async function main() {
   equal('локальная себестоимость не затёрта', merge.store.loadCosts().items['1001'].costPriceRub, 999);
   equal('добавлена новая себестоимость', merge.store.loadCosts().items['1002'].costPriceRub, 700);
   check('локальная себестоимость другого товара не удалена', !!merge.store.loadCosts().items['2001']);
-  check('черновики объединены без удаления локального', !!merge.store.loadPriceDrafts()['1001'] && !!merge.store.loadPriceDrafts()['3001']);
+  check('настройки товаров объединены без удаления локальных', !!merge.store.loadItemConfigs()['1001'] && !!merge.store.loadItemConfigs()['3001']);
   equal('задача с тем же taskId не дублируется и не перезаписывается', merge.store.loadTasks().filter((t) => t.taskId === 'j-task').map((t) => t.total), [77]);
   rejected('replace требует подтверждение', () => merge.manager.importBackup({ action: 'apply', content: exported.content, mode: 'replace' }), 'CONFIRMATION_REQUIRED');
   rejected('перезапись конфликтов требует подтверждение', () => merge.manager.importBackup({ action: 'apply', content: exported.content, overwriteExisting: true }), 'CONFIRMATION_REQUIRED');
@@ -150,7 +149,7 @@ async function main() {
   oldTarget.manager.importBackup({ action: 'apply', content: legacy, applyKeys: true, password: 'fixture-password-J' });
   equal('ранний settings перенесён', oldTarget.store.loadSettings().shopName, 'Магазин из задания J');
   equal('ранний costs перенесён', oldTarget.store.loadCosts().items['1001'].costPriceRub, 500);
-  equal('ранний черновик перенесён', oldTarget.store.loadPriceDrafts()['1001'].basePrice, 1000);
+  check('ручные цены из раннего формата не переносятся', oldTarget.store.loadPriceDrafts === undefined && !fs.existsSync(path.join(oldTarget.dir, 'pricedrafts.json')));
   equal('старое расписание переведено в единый формат', oldTarget.store.loadSettings().backupSchedule, 'weekly');
   equal('старое хранение N переведено в единый формат', oldTarget.store.loadSettings().backupRetention, 3);
   equal('WB-ключ раннего формата расшифрован', oldTarget.store.loadSecrets().single, 'fictional-wb-key-from-J');

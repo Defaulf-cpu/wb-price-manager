@@ -927,7 +927,9 @@ function planPromos(ctx, cfg, itemCfg, extra) {
  * @param {object} ctx контекст товара:
  *   { nmID, basePrice, discount, sellerPrice, buyerPrice, minPrice, basePriceTarget,
  *     stock, salesPerDay, salesMonthQty, turnoverDays, inPromo, promoPrice, promoDiscountPct,
- *     competitors[], forPayAvg, rrp, econAt(price) → {profit, marginPct, revenue}, sppPct }
+ *     competitors[], forPayAvg, rrp, econAt(price) → {profit, marginPct, revenue}, sppPct,
+ *     firstCalcSeed — true, если это первый расчёт товара с заданными порогами:
+ *     цена ставится на минимальный порог коридора }
  * @param {object} cfg глобальные настройки репрайсера (DEFAULT_CONFIG + правки пользователя)
  * @param {object} itemCfg настройки артикула (strategy, targetMarginPct, minPrice, …)
  * @param {object} ec модуль экономики (window.EC / require('./economics'))
@@ -1271,6 +1273,20 @@ function computeItem(ctx, cfg, itemCfg, ec) {
     notes.push(hardMax > 0 && finalPrice >= hardMax - 0.5 ? `Цена ограничена потолком карточки maxPrice: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽.` : `Цена ограничена коридором: ${Math.round(beforeCorridor)} → ${Math.round(finalPrice)} ₽ (мин ${Math.round(priceFloor)}, базовая ${Math.round(corridorMax)}).`);
   }
 
+  // ── ПЕРВЫЙ РАСЧЁТ ТОВАРА: посадка на минимальный порог ──
+  // Пока репрайсер ни разу не считал товар с заданными порогами, цена не может
+  // «висеть» где попало: первый расчёт ставит её ровно на минимальный порог
+  // коридора. Дальше работают стратегии — но только внутри [минимум; максимум].
+  // Признак первого расчёта (ctx.firstCalcSeed) выставляет сервис: он же после
+  // успешного расчёта запоминает, что посадка уже выполнена. Лесенка буста
+  // управляет ценой по своим ступеням и из этого правила исключена.
+  const seededToFloor = !!(ctx.firstCalcSeed && strategy !== 'boost' && priceFloor > 0);
+  if (seededToFloor) {
+    finalPrice = priceFloor;
+    notes.push(`Первый расчёт товара репрайсером: цена поставлена на минимальный порог ${Math.round(priceFloor)} ₽. Дальше цена будет двигаться стратегией внутри коридора от минимального до максимального порога.`);
+    layers.push({ layer: 'Первый расчёт', name: 'Минимальный порог', price: r2(finalPrice), note: `первый расчёт — цена на минимальном пороге ${Math.round(priceFloor)} ₽` });
+  }
+
   // ── АКЦИИ: вход/выход — решение поверх стратегии ──
   // Выход из акции возможен только повышением цены выше плановой (API WB исключать товар не даёт),
   // поэтому такое повышение выполняется сразу, минуя лимит шага: оно не рискует карантином
@@ -1332,7 +1348,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   const ignoreStep = belowMin && !!C.limits.ignoreStepIfBelowMin;
   // headroom — на сколько ещё можно сдвинуть цену, не нарушив ни один лимит
   let headroom = Infinity;
-  if (maxStepPct > 0 && !promoBypass) {
+  if (maxStepPct > 0 && !promoBypass && !seededToFloor) {
     const maxDelta = curSeller * maxStepPct / 100;
     const exceeds = Math.abs(finalPrice - curSeller) > maxDelta;
     if (exceeds && ignoreStep) {
@@ -1363,7 +1379,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
   // ── ограничение изменения за сутки ──
   const maxDayPct = num(C.limits.maxChangePerDayPct);
   const dayStart = num(ctx.priceDayStart, curSeller);
-  if (maxDayPct > 0 && dayStart > 0 && !promoBypass) {
+  if (maxDayPct > 0 && dayStart > 0 && !promoBypass && !seededToFloor) {
     const maxDelta = dayStart * maxDayPct / 100;
     if (Math.abs(finalPrice - dayStart) > maxDelta) {
       const dir = finalPrice > dayStart ? 1 : -1;
@@ -1532,6 +1548,7 @@ function computeItem(ctx, cfg, itemCfg, ec) {
       breakEvenUpliftPct: promoJoin ? (promoPlan.chosen.breakEvenUpliftPct === undefined ? null : promoPlan.chosen.breakEvenUpliftPct) : null
     },
     corridor: { min: r2(priceFloor), max: Number.isFinite(corridorCeil) ? r2(corridorCeil) : r2(corridorMax), minByMargin: minByMargin === null ? null : r2(minByMargin), minByProfit: minByProfit === null ? null : r2(minByProfit), maxByMargin: maxByMargin === null ? null : r2(maxByMargin), maxByProfit: maxByProfit === null ? null : r2(maxByProfit) },
+    firstCalcSeeded: seededToFloor,
     maxPrice: hardMax > 0 ? r2(hardMax) : null,
     promoExitBlockedByMaxPrice,
     needSend: needSend && allowSend,

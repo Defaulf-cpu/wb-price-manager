@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, SECRETS_FILE, PRICEWATCH_FILE, STOCKS_FILE, STOCK_HISTORY_FILE,
-  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
+  PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
   REPRICER_FILE, COMPETITORS_FILE, ITEMCONFIGS_FILE, PRICES_HISTORY_FILE,
   REPRICER_RUNS_FILE, FACTCOSTS_FILE, PROMOEXITS_FILE, PROMONOMS_FILE
 } = require('./config');
@@ -197,7 +197,6 @@ function createStore(dir, secretBox) {
   const factCostsPath = path.join(dir, FACTCOSTS_FILE);
   const promoExitsPath = path.join(dir, PROMOEXITS_FILE);
   const promoNomsPath = path.join(dir, PROMONOMS_FILE);
-  const priceDraftsPath = path.join(dir, PRICEDRAFTS_FILE);
   const proposalsPath = path.join(dir, PROPOSALS_FILE);
   const recalcHistoryPath = path.join(dir, RECALC_HISTORY_FILE);
   const promoJournalPath = path.join(dir, PROMOJOURNAL_FILE);
@@ -547,46 +546,6 @@ function createStore(dir, secretBox) {
     savePromoNoms(items) {
       writeJson(promoNomsPath, { items: isObject(items) ? items : {}, updatedAt: new Date().toISOString() });
       return items;
-    },
-
-    // ─────────── Черновики цен («сохранить без отправки в WB») ───────────
-
-    /**
-     * Введённые руками цены, которые ещё НЕ отправлены в WB.
-     *
-     * Без этого черновика ручной ввод жил только в памяти интерфейса и исчезал
-     * при перезапуске или обновлении данных из кабинета — пользователь видел,
-     * как введённые цифры «сбрасываются по нулям».
-     *
-     * @returns {object} nmID → { basePrice, discount, note, savedAt }
-     */
-    loadPriceDrafts() {
-      const d = readJson(priceDraftsPath, { items: {} });
-      return isObject(d.items) ? d.items : {};
-    },
-
-    savePriceDrafts(items) {
-      const clean = {};
-      for (const [k, v] of Object.entries(isObject(items) ? items : {})) {
-        if (!v) continue;
-        const basePrice = Number(v.basePrice) || 0;
-        const discount = Number(v.discount) || 0;
-        clean[String(k)] = {
-          basePrice,
-          discount,
-          // цена со скидкой считается сразу: по ней черновик сравнивают с ценой в WB
-          sellerPrice: Number(v.sellerPrice) || Math.round(basePrice * (1 - discount / 100) * 100) / 100,
-          note: String(v.note || ''),
-          savedAt: v.savedAt || new Date().toISOString()
-        };
-      }
-      writeJson(priceDraftsPath, { items: clean, updatedAt: new Date().toISOString() });
-      return clean;
-    },
-
-    clearPriceDrafts() {
-      writeJson(priceDraftsPath, { items: {}, updatedAt: new Date().toISOString() });
-      return {};
     },
 
     // ─────────── Предложения репрайсера (двухфазный автоцикл) ───────────

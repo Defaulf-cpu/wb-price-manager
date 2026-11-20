@@ -26,9 +26,8 @@ Views.repricer = {
       <div class="rp-tabs-row">
         <div class="tabs" id="rp-tabs">
           <button type="button" class="tab" data-t="prices">Товары</button>
-          <button type="button" class="tab" data-t="price-tools">Цены и скидки</button>
           <button type="button" class="tab" data-t="economics">Экономика</button>
-          <button type="button" class="tab" data-t="rules">Массовые правила</button>
+          <button type="button" class="tab" data-t="rules">Массовые параметры</button>
           <button type="button" class="tab" data-t="costs">Себестоимость</button>
           <button type="button" class="tab" data-t="competitors">Конкуренты</button>
           <button type="button" class="tab" data-t="journal-prices">Журнал изменения цен</button>
@@ -135,7 +134,6 @@ Views.repricer = {
      */
     if (window.Views && Views.costs) Views.costs.container = null;
     if (window.Views && Views.promos) Views.promos.container = null;
-    if (Views.prices) { Views.prices.container = null; Views.prices.grid = null; }
     if (Views.economics) Views.economics.container = null;
     host.innerHTML = UI.loading();
     this._noticeSources = {};
@@ -150,7 +148,6 @@ Views.repricer = {
        * Вложенные панели используют прежние общие модули без потери функций.
        */
       if (this.tab === 'prices') await this.tabPrices(host);
-      else if (this.tab === 'price-tools') Views.prices.render(host);
       else if (this.tab === 'economics') Views.economics.render(host);
       else if (this.tab === 'rules') await this.tabRules(host);
       else if (this.tab === 'costs') this.tabCosts(host);
@@ -220,7 +217,7 @@ Views.repricer = {
       </div>
       <div class="row wrap" style="gap:8px;margin-bottom:10px;align-items:center">
         <div class="seg" id="rp-seg">
-          ${[['all', 'Все'], ['tosend', 'Только с изменением'], ['mine', 'Своя цена'], ['errors', 'Только ошибки'],
+          ${[['all', 'Все'], ['tosend', 'Только с изменением'], ['errors', 'Только ошибки'],
              ['loss', 'Только убыточные'], ['warn', 'С предупреждениями'], ['nosend', 'Не отправлять']]
             .map(([id, label]) => `<button class="seg-btn ${this.itemFilter.seg === id ? 'active' : ''}" data-seg="${id}">${label}</button>`).join('')}
         </div>
@@ -404,7 +401,7 @@ Views.repricer = {
   },
 
   /**
-   * Сводные плитки — те же, что в «Цены и скидки», и тоже кликабельные:
+   * Сводные плитки по признакам товаров, кликабельные:
    * фильтр применяется к таблице репрайсера.
    */
   drawTiles() {
@@ -486,8 +483,6 @@ Views.repricer = {
       return;
     }
 
-    const manualCount = items.filter((x) => x.manual).length;
-    const rpCount = items.length - manualCount;
     const sendAt = prop.sendAt ? new Date(prop.sendAt) : null;
     const minutesLeft = sendAt ? Math.max(0, Math.round((sendAt - Date.now()) / 60000)) : null;
     const phaseLabel = ({ sent: 'применение подтверждено WB', pending: 'передано, применение ещё не подтверждено', partial: 'частичный результат — проверьте WB', stale: 'устарело — нужен новый пересчёт' })[prop.phase] || 'ждёт отправки';
@@ -498,8 +493,7 @@ Views.repricer = {
         <div class="row wrap" style="gap:12px">
           <div style="flex:1;min-width:280px">
             <b>Цен в предложении: ${U.fmt(items.length)}</b> ${UI.badge(phaseLabel, kind)}
-            ${manualCount ? UI.badge('из них ваших сохранённых: ' + U.fmt(manualCount), 'info') : ''}
-            ${rpCount ? '<span class="hint">по расчёту репрайсера: ' + U.fmt(rpCount) + '</span>' : ''}
+            <span class="hint">все цены — по расчёту репрайсера (пороги и стратегии)</span>
             <div class="hint" style="margin-top:4px">
               Расчёт от <b>${U.date(prop.at, true)}</b>.
               ${sch.autoSend
@@ -573,7 +567,6 @@ Views.repricer = {
     { id: 'plan', title: 'План продаж', group: 'info', mergedInto: 'info' },
     // ── блок «Текущая цена» ──
     { id: 'priceNow', title: 'Цена на МП', always: true, group: 'now' },
-    { id: 'myPrice', title: 'Моя цена', always: true, group: 'now' },
     { id: 'buyerNow', title: 'Цена покупателю сейчас', group: 'now' },
     { id: 'value', title: 'Выгодность', group: 'now' },
     // ── блок «Новая цена» ──
@@ -630,7 +623,7 @@ Views.repricer = {
    * Все они включаются в один клик в окне «Колонки» — целиком блоком или по отдельности.
    */
   DEFAULT_COLUMNS: ['item', 'info',
-    'priceNow', 'myPrice', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'sizes', 'delta',
+    'priceNow', 'buyerNow', 'value', 'priceNext', 'buyerNext', 'sizes', 'delta',
     'strategy', 'status', 'why', 'floor', 'promoMin', 'promos', 'restore',
     'cost', 'profit', 'margin', 'profitMonth',
     'competitor', 'offset'],
@@ -638,7 +631,7 @@ Views.repricer = {
    * Компактный набор — по одной-две ключевые колонки из каждого блока,
    * для небольшого экрана. Обязательные колонки всегда внутри.
    */
-  COMPACT_COLUMNS: ['item', 'priceNow', 'myPrice', 'value', 'priceNext',
+  COMPACT_COLUMNS: ['item', 'priceNow', 'value', 'priceNext',
     'delta', 'strategy', 'floor', 'cost', 'profit', 'margin', 'status', 'why'],
   COLS_KEY: 'wb.repricer.columns',
 
@@ -797,10 +790,7 @@ Views.repricer = {
     const floor = U.num(cfg.minPrice) || U.num(r.corridor && r.corridor.min);
     if (!(floor > 0)) out.push('не задан порог минимальной цены');
     const base = U.num(r.current && r.current.basePrice);
-    // цена, сохранённая вручную в «Цены и скидки», задаст базовую при отправке —
-    // поэтому ругаться «не задана базовая цена» при живом черновике нельзя (как на сервере)
-    const draftBase = U.num(((S.state.priceDrafts || {})[String(r.nmID)] || {}).basePrice);
-    if (!(base > 0) && !(draftBase > 0)) out.push('базовая цена в WB не задана — обновите данные из кабинета или сохраните свою цену');
+    if (!(base > 0)) out.push('базовая цена в WB не задана — обновите данные из кабинета');
     /**
      * Себестоимость в валюте закупки без курса: сервер не берёт такую строку в
      * предложение, поэтому клиентская проверка обязана показать ту же причину.
@@ -1565,24 +1555,6 @@ Views.repricer = {
     if (next) next.onclick = () => { this.page = this.page + 1; this.renderResults(); };
   },
 
-  /**
-   * «Моя цена» — сохранённая вручную цена (черновик), которая ещё не отправлена в WB.
-   * Показывается рядом с ценой маркетплейса, чтобы было видно расхождение, и именно она
-   * уйдёт в WB при отправке: ручная цена важнее расчёта репрайсера.
-   */
-  myPriceCellHtml(r) {
-    const d = (S.state.priceDrafts || {})[String(r.nmID)];
-    if (!d) return '<span class="muted tiny">нет — цена как на МП</span>';
-    const mp = U.num(r.current && r.current.sellerPrice);
-    const mine = U.num(d.sellerPrice) || Math.round(U.num(d.basePrice) * (1 - U.num(d.discount) / 100) * 100) / 100;
-    const diff = mine - mp;
-    const pct = mp > 0 ? (diff / mp) * 100 : 0;
-    return `<b>${U.money(mine)}</b>
-      <div class="tiny muted">база ${U.money(d.basePrice)} · скидка ${U.pct(U.num(d.discount), 0)}</div>
-      <div class="tiny ${diff > 0 ? 'pos' : (diff < 0 ? 'neg' : 'muted')}">${U.signed(Math.round(diff))} ₽ · ${U.signed(pct, 1)}% к МП</div>
-      ${UI.badge('не отправлена', 'info')}`;
-  },
-
   /** СПП товара: личное значение → значение из карточки WB → настройки кабинета. */
   sppOf(r) {
     const ov = (S.state.overrides || {})[String(r.nmID)] || {};
@@ -1929,11 +1901,9 @@ Views.repricer = {
     if (f.onlyChanges) list = list.filter((r) => r.needSend);
     if (f.onlyWarn) list = list.filter((r) => (r.warnings || []).length);
     // сегментированный фильтр: один признак за раз
-    const drafts = S.state.priceDrafts || {};
     if (f.seg && f.seg !== 'all') {
       const test = {
-        tosend: (r) => !!r.needSend || !!drafts[String(r.nmID)],
-        mine: (r) => !!drafts[String(r.nmID)],
+        tosend: (r) => !!r.needSend,
         errors: (r) => this.rowErrors(r).length > 0,
         loss: (r) => U.num(r.proposed ? r.proposed.profit : (r.current || {}).profit) < 0,
         warn: (r) => (r.warnings || []).length > 0
@@ -1941,10 +1911,9 @@ Views.repricer = {
       if (test) list = list.filter(test);
     }
     if (f.strategy) list = list.filter((r) => r.strategy === f.strategy);
-    // клик по сводной плитке — это фильтр (те же признаки, что и в «Цены и скидки»)
+    // клик по сводной плитке — это фильтр по признакам товаров
     if (f.tile) {
       const rowsById = new Map(S.getRows().map((r) => [String(r.nmID), r]));
-      const drafts = S.state.priceDrafts || {};
       const test = {
         revenue30: (r) => U.num((rowsById.get(String(r.nmID)) || {}).revenue30) > 0,
         profit30: (r) => U.num((rowsById.get(String(r.nmID)) || {}).profit30) > 0,
@@ -1953,8 +1922,7 @@ Views.repricer = {
           U.num(r.current && r.current.marginPct) < U.num(S.state.settings.minMarginPctAlert),
         nocogs: (r) => !U.num((rowsById.get(String(r.nmID)) || {}).costPrice),
         badturn: (r) => { const x = rowsById.get(String(r.nmID)) || {}; return x.isBadTurnover || (U.num(x.turnoverDays) > 90 && U.num(x.stock) > 0); },
-        tosend: (r) => !!r.needSend,
-        draft: (r) => !!drafts[String(r.nmID)]
+        tosend: (r) => !!r.needSend
       }[f.tile];
       if (test) list = list.filter(test);
     }
@@ -2013,7 +1981,6 @@ Views.repricer = {
         { colId: 'plan', title: 'План продаж', num: true, render: (r) => this.planCellHtml(r) },
         // ══ блок «Текущая цена» ══
         { colId: 'priceNow', title: 'Цена на МП', render: (r) => this.currentPriceBlock(r) },
-        { colId: 'myPrice', title: 'Моя цена', num: true, render: (r) => this.myPriceCellHtml(r) },
         { colId: 'buyerNow', title: 'Цена покупателю сейчас', num: true, render: (r) => r.current.buyerPrice
             ? `${U.money(r.current.buyerPrice)}<div class="tiny muted">с учётом СПП${this.walletNote(r, 'now')}</div>`
             : '<span class="muted tiny">нет данных</span>' },
@@ -2407,9 +2374,34 @@ Views.repricer = {
       </div>
     `;
     UI.modal({ title: `Почему такая цена — ${r.title}`, content: body, size: 'md', buttons: [
-      { label: 'Открыть в разделе «Цены»', class: 'btn-ghost', onClick: () => { S.state.filters.q = String(r.nmID); App.go('prices'); } },
+      { label: 'Показать в таблице товаров', class: 'btn-ghost', onClick: () => { this.itemFilter.q = String(r.nmID); App.go('repricer'); } },
       { label: 'Закрыть', class: 'btn-primary' }
     ] });
+  },
+
+  /** Результат отправки цен в WB: принято ≠ применено, поэтому показываем подтверждение честно. */
+  showSendResult(res, sent) {
+    const details = (res && res.details) || [];
+    const ok = details.filter((d) => d.status === 3 && !d.error && !d.errorText).length;
+    const failed = details.filter((d) => d.error || d.errorText || (d.status && d.status !== 3));
+    const uploaded = res && res.sent !== undefined ? Number(res.sent) : sent;
+    const task = (res && res.task) || null;
+    UI.modal({
+      title: 'Результат загрузки цен',
+      content: `
+        <div class="grid g4" style="margin-bottom:12px">
+          <div class="card stat"><span class="label">Отправлено</span><span class="value">${uploaded}</span></div>
+          <div class="card stat"><span class="label">Без ошибок WB</span><span class="value pos">${ok}</span>${!details.length && uploaded ? '<span class="hint">Задача принята, применение ещё не подтверждено</span>' : ''}</div>
+          <div class="card stat"><span class="label">С ошибками</span><span class="value ${failed.length ? 'neg' : 'pos'}">${failed.length}</span></div>
+          <div class="card stat"><span class="label">Задача</span><span class="value">${task ? task.taskId : '—'}</span><span class="hint">${task ? task.statusText || '' : ''}</span></div>
+        </div>
+        ${(res && res.warnings && res.warnings.length) ? `<div class="alert warn" style="margin-bottom:10px"><b>Предупреждения (${res.warnings.length}):</b><br>${res.warnings.slice(0, 8).map((w) => U.esc(w.message)).join('<br>')}</div>` : ''}
+        ${failed.length ? `<h3>Ошибки по товарам</h3><table class="grid-table"><thead><tr><th>нм-код / размер</th><th>Артикул</th><th>Статус</th><th>Ошибка</th></tr></thead>
+          <tbody>${failed.slice(0, 60).map((f) => `<tr><td>${f.nmID || ''}${f.sizeID ? ' / #' + Number(f.sizeID) : ''}</td><td>${U.esc(f.vendorCode || '')}</td><td>${U.esc(f.statusText || f.status || '')}</td><td class="trunc">${U.esc(f.errorText || f.error || '')}</td></tr>`).join('')}</tbody></table>` : ''}
+        ${res && res.demo ? '<p class="hint">Демо-режим: изменения применены к локальным данным, в Wildberries ничего не отправлялось.</p>' : ''}
+      `,
+      buttons: [{ label: 'Готово', class: 'btn-primary' }]
+    });
   },
 
   async sendSelected(onlySelected) {
@@ -2466,8 +2458,7 @@ Views.repricer = {
             source: 'repricer-manual', nmIDs: list.map((r) => r.nmID)
           });
           btn.close();
-          if (Views.prices.showResult) Views.prices.showResult(res, list.length);
-          else App.toast('Цены отправлены', 'ok');
+          this.showSendResult(res, list.length);
           this.selection.clear();
           await S.loadGoods(true);
           S.invalidate();
@@ -2485,148 +2476,30 @@ Views.repricer = {
 
   // ══════════════════════ ВКЛАДКА: АКЦИИ ══════════════════════
 
-  // ══════════════════════ ВКЛАДКА: МАССОВЫЕ ПРАВИЛА ══════════════════════
+  // ══════════════════════ ВКЛАДКА: МАССОВЫЕ ПАРАМЕТРЫ ══════════════════════
 
   /**
-   * Массовые правила переценки. Сам движок живёт в общем модуле RULES (его же
-   * использует раздел «Цены и скидки»), поэтому типы правил, округление,
-   * минимальная цена и проверка карантина считаются одинаково.
+   * Массовое назначение параметров репрайсера: стратегия, пороги коридора
+   * (минимальная/максимальная цена) и себестоимость выбранным товарам.
    *
-   * Отправки в WB здесь принципиально нет: план пишется в черновики цен
-   * (prices:draft-save), а в маркетплейс цены уходят только из вкладки «Товары»
-   * кнопкой «Обновить цены (отправить)».
+   * Ручной массовой переценки здесь больше нет: цены не задаются руками ни
+   * поодиночке, ни правилом — их считает репрайсер по порогам и стратегиям,
+   * а в WB они уходят только из вкладки «Товары» после подтверждения.
    */
   async tabRules(host) {
-    const st = S.state;
-    if (!this.rulesRule) this.rulesRule = RULES.normalize(st.priceRule);
-    const rule = this.rulesRule;
-
     host.innerHTML = `
       <div class="card" style="margin-bottom:12px">
         <div class="spread wrap">
-          <h2 style="margin:0">Массовые правила переценки</h2>
-          <span class="row wrap" style="gap:6px">
-            ${UI.badge('движок RULES — общий с «Ценами и скидками»', 'info')}
-            ${UI.badge('в WB отсюда не отправляем', 'warn')}
-          </span>
+          <h2 style="margin:0">Назначить параметры всем выбранным</h2>
+          ${UI.badge('цены считает только репрайсер', 'info')}
         </div>
-        <p class="hint">Правило применяется к выбранной области, сначала показывается предпросмотр
-          (старые и новые цены, прибыль, маржа, риски), и только потом цены записываются
-          в черновик приложения. В Wildberries они уйдут из вкладки «Товары» после подтверждения.</p>
-        <div class="row wrap" style="margin-top:10px;gap:8px;align-items:flex-end">
-          <label class="field" style="width:230px">Область применения
-            <select id="rr-scope">
-              <option value="all">Все товары</option>
-              <option value="filtered">Под текущим фильтром</option>
-              <option value="selected">Выбранные в таблице</option>
-              <option value="loss">Убыточные</option>
-              <option value="low">С низкой маржой</option>
-              <option value="illiquid">Неликвид (90+ дней)</option>
-            </select>
-          </label>
-          <label class="field" style="width:300px">Правило
-            <select id="rr-type">
-              ${RULES.TYPES.map((t) => `<option value="${t.id}">${U.esc(t.label)}</option>`).join('')}
-            </select>
-          </label>
-          <label class="field" style="width:130px">Значение
-            <input id="rr-value" type="number" step="any" class="num" value="${rule.value}" title="${U.esc(RULES.valueTitle(rule.type))}" />
-          </label>
-          <label class="field" style="width:120px">Округление до, ₽
-            <input id="rr-round" type="number" step="1" min="0" class="num" value="${rule.roundTo || 0}" />
-          </label>
-          <label class="field" style="width:120px">Не ниже, ₽
-            <input id="rr-min" type="number" step="1" min="0" class="num" value="${rule.minPrice || 0}" />
-          </label>
-          <button class="btn btn-primary" id="rr-preview">Рассчитать предпросмотр</button>
-          <button class="btn btn-ok" id="rr-save" disabled title="Сохранить новые цены в данных приложения — в WB ничего не уходит">Записать в черновики цен</button>
-        </div>
-        <div id="rr-info" class="hint" style="margin-top:8px"></div>
-      </div>
-      <div id="rr-preview-host"></div>
-      <div class="card" style="margin-top:14px">
-        <h2 style="margin:0 0 6px">Назначить параметры всем выбранным</h2>
-        <p class="hint" style="margin:0">Стратегия, минимальная цена и себестоимость — то, что раньше было
-          отдельной вкладкой «Параметры товаров (массово)». Правки копятся и сохраняются одной кнопкой.</p>
+        <p class="hint" style="margin:6px 0 0">Стратегия, минимальный и максимальный пороги и себестоимость —
+          то, чем управляется цена товара. Задайте пороги здесь или в строке таблицы «Товары»,
+          затем нажмите «Пересчёт»: первый расчёт поставит цену на минимальный порог,
+          дальше стратегия будет двигать её внутри коридора. Правки копятся и сохраняются одной кнопкой.</p>
       </div>
       <div id="rr-strategies"></div>
     `;
-
-    const $ = (id) => host.querySelector(id);
-    $('#rr-type').value = rule.type;
-    $('#rr-type').onchange = (e) => {
-      rule.type = e.target.value;
-      $('#rr-value').title = RULES.valueTitle(rule.type);
-      this.rulesPlan = null;
-      $('#rr-save').disabled = true;
-    };
-    $('#rr-value').oninput = (e) => { rule.value = U.num(e.target.value); };
-    $('#rr-round').oninput = (e) => { rule.roundTo = U.num(e.target.value); };
-    $('#rr-min').oninput = (e) => { rule.minPrice = U.num(e.target.value); };
-
-    const info = (text) => { const el = $('#rr-info'); if (el) el.innerHTML = text; };
-
-    $('#rr-preview').onclick = () => {
-      const scope = $('#rr-scope').value;
-      const rows = scope === 'all' ? S.getRows() : RULES.scopeRows(scope, { editing: null });
-      const settings = Object.assign({}, st.settings, { maxPriceChangePct: st.settings.maxPriceChangePct });
-      const result = RULES.buildPlan({ rows, rule, edits: null, settings });
-      this.rulesPlan = result;
-      const box = $('#rr-preview-host');
-      box.innerHTML = `
-        <div class="grid g4" style="margin-bottom:10px">
-          <div class="card stat"><span class="label">Товаров в области</span><span class="value">${result.plan.length}</span></div>
-          <div class="card stat"><span class="label">Изменится цен</span><span class="value">${result.changed.length}</span></div>
-          <div class="card stat"><span class="label">С предупреждениями</span><span class="value ${result.risky.length ? 'warnc' : 'pos'}">${result.risky.length}</span></div>
-          <div class="card stat"><span class="label">Δ прибыли на единицу</span><span class="value ${U.profitClass(result.deltaProfit)}">${U.signed(result.deltaProfit)} ₽</span></div>
-        </div>
-        <div id="rr-table"></div>`;
-      const tbl = UI.table({
-        columns: [
-          { title: 'Товар', render: (p) => `<div class="rowtitle"><b class="trunc">${U.esc(p.title)}</b><span class="tiny muted">${p.nmID} · ${U.esc(p.vendorCode)}</span></div>` },
-          { title: 'Было: цена / скидка', num: true, render: (p) => `${U.money(p.oldSeller)} / ${U.pct(p.oldDisc, 0)}` },
-          { title: 'Станет: цена / скидка', num: true, render: (p) => `<b>${U.money(p.newSeller)}</b> / ${U.pct(p.newDisc, 0)}` },
-          { title: 'Изменение', num: true, render: (p) => `<span class="${p.changePct < 0 ? 'neg' : 'pos'}">${U.signed(p.changePct, 1)}%</span>` },
-          { title: 'Прибыль/шт', num: true, render: (p) => `<span class="muted">${U.money(p.oldProfit)}</span> → <b class="${U.profitClass(p.newProfit)}">${U.money(p.newProfit)}</b>` },
-          { title: 'Маржа', num: true, render: (p) => `<span class="muted">${U.pct(p.oldMargin)}</span> → <b class="${U.profitClass(p.newMargin)}">${U.pct(p.newMargin)}</b>` },
-          { title: 'Риски', render: (p) => p.warnings.length ? p.warnings.map((w) => UI.badge(w, /карантин|убыток/.test(w) ? 'danger' : 'warn')).join(' ') : UI.badge('ок', 'ok') }
-        ],
-        rows: result.plan.slice(0, 400),
-        empty: 'В выбранной области нет товаров'
-      });
-      box.querySelector('#rr-table').appendChild(tbl.el);
-      $('#rr-save').disabled = !result.changed.length;
-      info(result.changed.length
-        ? `Готово к записи: <b>${result.changed.length}</b> товаров. Нажмите «Записать в черновики цен» — в WB ничего не уйдёт.`
-        : 'Правило ничего не меняет: выберите другой тип или значение.');
-      App.toast('Предпросмотр готов: изменится ' + result.changed.length + ' товаров', 'ok', 4000);
-    };
-
-    $('#rr-save').onclick = async (e) => {
-      const plan = this.rulesPlan;
-      if (!plan || !plan.changed.length) { App.toast('Сначала рассчитайте предпросмотр', 'warn'); return; }
-      const btn = e.target;
-      btn.disabled = true;
-      const was = btn.textContent;
-      btn.textContent = 'Записываем…';
-      try {
-        const items = {};
-        plan.changed.forEach((p) => {
-          items[String(p.nmID)] = { basePrice: Math.round(p.newBase), discount: Math.round(p.newDisc), note: 'массовое правило' };
-        });
-        const res = await API.invoke('prices:draft-save', { items });
-        await S.loadDrafts();
-        info(`Записано в черновики: <b>${res.count}</b> товаров. В WB ничего не отправлено — отправка из вкладки «Товары».`);
-        App.toast('Черновики обновлены: ' + res.count + ' поз. В WB не отправлено.', 'ok', 7000);
-      } catch (err) {
-        App.toast(err.message, 'err', 8000);
-      } finally {
-        btn.textContent = was;
-        btn.disabled = false;
-      }
-    };
-
-    // массовое назначение стратегии/порога — прежняя вкладка «Параметры товаров (массово)»
     await this.tabStrategies(host.querySelector('#rr-strategies'));
   },
 

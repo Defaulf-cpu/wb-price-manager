@@ -89,7 +89,7 @@ function streamEvents(port, cookies) {
       const timer = setTimeout(() => { req.destroy(); reject(new Error('SSE event timeout')); }, 5000);
       res.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
-        if (buffer.includes('event: svc:log\n') && buffer.includes('Черновик цен сохранён')) {
+        if (buffer.includes('event: svc:info\n') && buffer.includes('data:refresh')) {
           clearTimeout(timer); req.destroy(); resolve(true);
         }
       });
@@ -316,10 +316,10 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 80));
     const invoke = await request(port, 'POST', '/api/invoke', {
       headers: { Cookie: cookieHeader(sessionCookies), 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-      body: JSON.stringify({ channel: 'prices:draft-save', args: [{ items: { '123456': { basePrice: 100, discount: 5 } } }] })
+      body: JSON.stringify({ channel: 'data:refresh-all', args: [{ facts: false }] })
     });
     check('вызов сервиса принят для SSE-проверки', invoke.status === 200 && JSON.parse(invoke.body).ok === true, 'status=' + invoke.status);
-    check('SSE доставляет событие svc:log', await eventPromise);
+    check('SSE доставляет событие svc:info', await eventPromise);
 
     // защита от кликджекинга: по умолчанию встраивание в iframe запрещено,
     // а --allow-framing снимает запрет (нужно для доверенного портала/предпросмотра)

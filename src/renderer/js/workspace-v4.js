@@ -5,7 +5,7 @@
   const rp = Views.repricer;
   const moscowDay = () => new Date(Date.now() + 10800000).toISOString().slice(0, 10);
   const copy = (v) => JSON.parse(JSON.stringify(v));
-  const merged = { myPrice: 'priceNow', buyerNow: 'priceNow', value: 'priceNow', buyerNext: 'priceNext', delta: 'priceNext', strategy: 'priceNext', status: 'priceNext', why: 'priceNext', sizes: 'info', cost: 'info', costDetail: 'priceNext', profit: 'priceNext', margin: 'priceNext', profitMonth: 'priceNext' };
+  const merged = { buyerNow: 'priceNow', value: 'priceNow', buyerNext: 'priceNext', delta: 'priceNext', strategy: 'priceNext', status: 'priceNext', why: 'priceNext', sizes: 'info', cost: 'info', costDetail: 'priceNext', profit: 'priceNext', margin: 'priceNext', profitMonth: 'priceNext' };
   rp.COLUMNS.forEach((c) => { if (merged[c.id]) { c.mergedInto = merged[c.id]; c.always = false; } });
   rp.COLUMNS.push({ id: 'other', title: 'Прочие расходы', group: 'other' }, { id: 'abc', title: 'ABC анализ', group: 'abc' });
   rp.GROUP_TITLES.other = 'Прочие расходы'; rp.GROUP_TITLES.abc = 'ABC анализ';
@@ -75,24 +75,23 @@
       ['Текущая цена с СПП, ₽', U.money(sppPrice)], ['% СПП', U.pct(w.sppPct)],
       ['Текущая цена по карте WB, ₽', U.money(walletPrice)], ['% СПП + карта', U.pct(combinedPct)],
       ['Текущая маржа, %', `<span class="${U.profitClass(c.marginPct)}">${U.pct(c.marginPct)}</span>`], ['Текущая маржа, ₽', `<span class="${U.profitClass(c.profit)}">${U.money(c.profit)}</span>`]
-    ])}<div class="tiny muted">База ${U.money(c.basePrice)} · скидка продавца ${U.pct(c.discount)} ${this.sizePriceNote(r)}</div><div class="tiny rp-spp-source" title="Источник СПП; скидка кошелька задаётся отдельно">${(c.costSources || {}).sppPct === 'official' && fact.sppOfficialAt ? 'СПП из ЛК: ' + U.esc(fact.sppOfficialSource === 'orders' ? 'заказ' : 'продажа') + ' · ' + U.date(fact.sppOfficialAt, true) + ' · не live-витрина' : 'Источник СПП: ' + U.esc(((c.costSources || {}).sppPct || 'настройки'))}</div><div class="tiny muted">*Карта WB — модель по настройке кошелька, не наблюдение WB.</div><div class="rp-draft-summary"><span class="tiny muted">Моя цена · локальный черновик</span><br>${this.myPriceCellHtml(r)}</div></div>`;
+    ])}<div class="tiny muted">База ${U.money(c.basePrice)} · скидка продавца ${U.pct(c.discount)} ${this.sizePriceNote(r)}</div><div class="tiny rp-spp-source" title="Источник СПП; скидка кошелька задаётся отдельно">${(c.costSources || {}).sppPct === 'official' && fact.sppOfficialAt ? 'СПП из ЛК: ' + U.esc(fact.sppOfficialSource === 'orders' ? 'заказ' : 'продажа') + ' · ' + U.date(fact.sppOfficialAt, true) + ' · не live-витрина' : 'Источник СПП: ' + U.esc(((c.costSources || {}).sppPct || 'настройки'))}</div><div class="tiny muted">*Карта WB — модель по настройке кошелька, не наблюдение WB.</div></div>`;
   };
   rp.nextPriceBlock = function (r) {
-    const d = (S.state.priceDrafts || {})[String(r.nmID)], c = r.current || {}, w = r.wallet || {};
+    const c = r.current || {}, w = r.wallet || {};
     const errors = this.rowErrors(r);
-    const next = d ? { ...r.proposed, basePrice: Number(d.basePrice), discount: Number(d.discount) || 0, sellerPrice: Number(d.sellerPrice) || Number(d.basePrice) * (1 - Number(d.discount || 0) / 100) } : r.proposed || {};
-    const raw = (S.state.items || []).find((i) => String(i.nmID) === String(r.nmID)) || {};
-    const unit = d ? EC.analyze(S.state.settings, raw, (S.state.overrides || {})[String(r.nmID)] || {}, { basePrice: next.basePrice, discountPct: next.discount }, (S.state.facts || {})[String(r.nmID)]).next : ((r.cost || {}).next || {});
-    if (d && unit) { next.profit = unit.profit; next.marginPct = unit.marginPct; }
+    const next = r.proposed || {};
+    const unit = (r.cost || {}).next || {};
     const nextIndex = this.valueStatus({ ...r, proposed: next });
+    const typeLabel = r.firstCalcSeeded ? 'Первый расчёт — минимальный порог' : (next.priceMode || r.strategyTitle || r.strategy || 'Стратегия');
     return `<div class="rp-price-block">${this.strategyControl(r)}${kv([
-      ['Индекс новой цены', U.esc(nextIndex.label)], ['Тип новой цены', U.esc(d ? 'Ручной черновик' : (next.priceMode || r.strategyTitle || r.strategy || 'Стратегия'))],
+      ['Индекс новой цены', U.esc(nextIndex.label)], ['Тип новой цены', U.esc(typeLabel)],
       ['Новая цена, ₽', U.money(next.sellerPrice)], ['Комиссия новой цены, ₽', U.money(unit.commission)],
       ['Новая цена с СПП, ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100))], ['Доставка новой цены, ₽', U.money(unit.logistics)],
       ['Новая цена по карте WB, ₽', U.money(U.num(next.sellerPrice) * (1 - U.num(w.sppPct) / 100) * (1 - U.num(w.walletPct) / 100))], ['Расходы новой цены, ₽', U.money(unit.totalCosts)],
       ['Эквайринг, ₽', U.money(unit.acquiring)], ['Новая маржа, %', `<span class="${U.profitClass(next.marginPct)}">${U.pct(next.marginPct)}</span>`],
       ['Новая маржа, ₽', `<span class="${U.profitClass(next.profit)}">${U.money(next.profit)}</span>`]
-    ])}<div class="tiny muted">База ${U.money(next.basePrice)} · скидка ${U.pct(next.discount)}${d ? ' · приоритет ручного черновика' : ''}</div>
+    ])}<div class="tiny muted">База ${U.money(next.basePrice)} · скидка ${U.pct(next.discount)} · коридор ${U.money((r.corridor || {}).min)} – ${U.money((r.corridor || {}).max)}</div>
       <div class="spread tiny"><span>Δ ${U.signed(U.num(next.sellerPrice) - U.num(c.sellerPrice))} ₽</span><button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button></div>
       ${r.boost ? `<div class="tiny ${r.boost.blocked ? 'neg' : 'muted'}">${U.esc(r.boost.reason || '')}</div>` : ''}
       ${errors.length ? '<div class="rp-validation neg tiny">Обновление заблокировано: ' + U.esc(errors.join('; ')) + '</div>' : (r.warnings || []).length ? `<div class="tiny warnc" title="${U.esc(r.warnings.join('\n'))}">⚠ ${r.warnings.length} предупреждений</div>` : UI.badge(r.needSend ? 'Предложено, не отправлено' : 'Без изменений')}

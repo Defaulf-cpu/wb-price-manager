@@ -79,7 +79,7 @@ Views.dashboard = {
       <div class="grid g2" style="margin-bottom:14px">
         <div class="card">
           <div class="card-head"><h2>Требует внимания</h2>
-            <button class="btn btn-ghost btn-sm" id="dash-goto-prices">Открыть цены</button>
+            <button class="btn btn-ghost btn-sm" id="dash-goto-prices">Открыть репрайсер</button>
           </div>
           <div class="col">
             <div class="alert ${lossRows.length ? 'danger' : 'ok'}">
@@ -132,11 +132,11 @@ Views.dashboard = {
           <button class="btn" data-act="target">Привести к целевой марже</button>
           <button class="btn btn-ghost" data-act="promos">Проверить вход в акции</button>
         </div>
-        <p class="hint" style="margin:10px 0 0">Действия открывают раздел «Цены» с уже отобранными товарами и правилом переценки — изменения применяются только после предпросмотра и подтверждения.</p>
+        <p class="hint" style="margin:10px 0 0">Действия открывают «Репрайсер» с нужным отбором товаров: цены там считаются по минимальному/максимальному порогам и стратегиям и уходят в WB только после подтверждения.</p>
       </div>
     `;
 
-    container.querySelector('#dash-goto-prices').onclick = () => App.go('prices');
+    const gotoPrices = container.querySelector('#dash-goto-prices'); if (gotoPrices) gotoPrices.onclick = () => App.go('repricer');
     const goLive = container.querySelector('#dash-golive');
     if (goLive) goLive.onclick = () => App.switchToLive({ refresh: true });
 
@@ -167,16 +167,12 @@ Views.dashboard = {
         const act = b.dataset.act;
         if (act === 'promos') return App.go('promos');
         if (act === 'repricer') return App.go('repricer');
-        st.filters.flag = act === 'loss' ? 'loss' : (act === 'illiquid' ? 'badturn' : 'all');
-        st.priceRule = act === 'loss'
-          ? { type: 'set-target-margin', value: U.num(s.targetMarginPct), roundTo: 10, minPrice: 0 }
-          : act === 'illiquid'
-            ? { type: 'delta-pct', value: -10, roundTo: 10, minPrice: 0 }
-            : { type: 'set-target-margin', value: U.num(s.targetMarginPct), roundTo: 10, minPrice: 0 };
-        if (act !== 'all') {
-          st.selection = new Set(S.filtered().map((r) => r.nmID));
+        // ручных правил переценки больше нет: открываем репрайсер с отбором по признаку
+        if (window.Views && Views.repricer) {
+          Views.repricer.itemFilter.seg = act === 'loss' ? 'loss' : 'all';
+          Views.repricer.itemFilter.tile = act === 'illiquid' ? 'badturn' : '';
         }
-        App.go('prices');
+        App.go('repricer');
       };
     });
 

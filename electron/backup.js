@@ -8,7 +8,7 @@ const {
   SETTINGS_FILE, COSTS_FILE, TASKS_FILE, REPRICER_FILE, COMPETITORS_FILE,
   ITEMCONFIGS_FILE, PRICES_HISTORY_FILE, REPRICER_RUNS_FILE, FACTCOSTS_FILE,
   PROMOEXITS_FILE, PROMONOMS_FILE, PRICEWATCH_FILE, STOCKS_FILE, STOCK_HISTORY_FILE,
-  PRICEDRAFTS_FILE, PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
+  PROPOSALS_FILE, RECALC_HISTORY_FILE, PROMOJOURNAL_FILE,
   SECRETS_FILE
 } = require('./config');
 
@@ -33,12 +33,15 @@ const DATASETS = Object.freeze([
   { key: 'priceWatch', file: PRICEWATCH_FILE, title: 'Наблюдения цен витрины', shape: 'object' },
   { key: 'stocks', file: STOCKS_FILE, title: 'Остатки по складам', shape: 'object' },
   { key: 'stockHistory', file: STOCK_HISTORY_FILE, title: 'История нулевых остатков', shape: 'object' },
-  { key: 'priceDrafts', file: PRICEDRAFTS_FILE, title: 'Черновики цен', shape: 'object' },
   { key: 'proposals', file: PROPOSALS_FILE, title: 'Предложение репрайсера', shape: 'object' },
   { key: 'recalcHistory', file: RECALC_HISTORY_FILE, title: 'История пересчёта по товарам', shape: 'object' },
   { key: 'promoJournal', file: PROMOJOURNAL_FILE, title: 'Журнал участия в акциях', shape: 'object' }
 ]);
 const DATASET_BY_KEY = new Map(DATASETS.map((item) => [item.key, item]));
+// Ручные цены удалены из приложения (v1.3.6): набор priceDrafts из старых копий
+// при импорте пропускается, а не роняет весь импорт и не воскрешает черновики.
+const REMOVED_DATASET_KEYS = new Set(['priceDrafts']);
+const REMOVED_LEGACY_NAMES = new Set(['pricedrafts']);
 const WB_SECRET_KEYS = Object.freeze(['single', 'universal', 'all', 'prices', 'statistics', 'content', 'finance', 'advert', 'analytics', 'marketplace', 'master']);
 const SAFE_TARGETS = new Set(DATASETS.map((item) => item.file).concat([SECRETS_FILE]));
 const SECRET_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
@@ -371,12 +374,17 @@ function createBackupManager(options) {
     const known = new Map(DATASETS.map((item) => [item.key.toLowerCase(), item]));
     const entries = new Map();
     for (const entry of old.manifest) {
+      if (isPlainObject(entry) && REMOVED_LEGACY_NAMES.has(entry.name) && entry.file === 'pricedrafts.json') {
+        entries.set(entry.name, entry); // удалённый набор: пропускаем ниже
+        continue;
+      }
       const item = isPlainObject(entry) && known.get(entry.name);
       if (!item || entry.file !== item.file || entries.has(entry.name)) throw new BackupError('Некорректное оглавление ранней резервной копии.', 'BAD_FILE');
       entries.set(entry.name, entry);
     }
     const data = {}, datasets = [];
     for (const [name, raw] of Object.entries(old.datasets)) {
+      if (REMOVED_LEGACY_NAMES.has(name)) continue; // ручных цен больше нет
       const item = known.get(name);
       if (!item || !entries.has(name)) throw new BackupError('Ранняя копия содержит неизвестный набор данных «' + name + '».', 'INCOMPATIBLE_FORMAT');
       if (raw === null) continue; // исходный J явно перечислял отсутствующие файлы
@@ -428,6 +436,10 @@ function createBackupManager(options) {
     if (!isPlainObject(document.data) || !isPlainObject(document.manifest) || !Array.isArray(document.manifest.datasets)) {
       throw new BackupError('Файл повреждён: отсутствует оглавление или наборы данных.', 'BAD_FILE');
     }
+    // старые копии могут содержать удалённый набор ручных цен — пропускаем его
+    document.manifest.datasets = document.manifest.datasets.filter(
+      (entry) => !(isPlainObject(entry) && REMOVED_DATASET_KEYS.has(entry.key)));
+    if (isPlainObject(document.data)) delete document.data.priceDrafts;
     const seen = new Set();
     for (const entry of document.manifest.datasets) {
       if (!isPlainObject(entry) || typeof entry.key !== 'string' || seen.has(entry.key)) throw new BackupError('Файл повреждён: некорректное оглавление наборов данных.', 'BAD_FILE');

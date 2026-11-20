@@ -94,17 +94,6 @@
       };
     });
   };
-  // Карточка товара находится и внутри РП. Её цена остаётся локальным черновиком.
-  const cardEcon = Views.itemcard.tabEcon;
-  Views.itemcard.tabEcon = function (host) {
-    cardEcon.call(this, host);
-    if (!host.querySelector('#ic-base')) return;
-    const nmID = this.nmID, drop = host.querySelector('#ic-drop');
-    if (drop) { const original = drop.onclick; drop.onclick = async () => { LocalDrafts.discard('card-price-' + nmID); await original(); }; }
-    host.querySelector('#ic-base').required = true; host.querySelector('#ic-base').min = '1'; host.querySelector('#ic-base').step = '1';
-    const discount = host.querySelector('#ic-disc'); discount.min = '0'; discount.max = '95'; discount.step = '1'; discount.required = true;
-    form(host, 'card-price-' + nmID, () => [{ channel: 'prices:draft-save', payload: { items: { [String(nmID)]: { basePrice: Number(host.querySelector('#ic-base').value), discount: Number(host.querySelector('#ic-disc').value), note: host.querySelector('#ic-note').value } } } }], 'ic-save', '#ic-base, #ic-disc, #ic-note', () => this.nmID === nmID && this.reloadCard());
-  };
   const cardCosts = Views.itemcard.tabCommissions;
   Views.itemcard.tabCommissions = function (host) {
     cardCosts.call(this, host); if (!host.querySelector('#ic-p-save')) return;

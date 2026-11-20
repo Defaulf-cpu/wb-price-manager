@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Карточка товара — открывается двойным кликом по строке в «Цены и скидки» или в «Репрайсере».
+ * Карточка товара — открывается двойным кликом по строке в «Репрайсере».
  *
  * Зачем отдельным модулем: всё про один артикул должно быть в одном окне, а не размазано
  * по разделам. Внутри — вкладки, чтобы не сваливать данные в одну простыню:
@@ -27,17 +27,14 @@ Views.itemcard = {
       content: UI.loading('Читаем данные товара из WB и кэша приложения…'),
       buttons: [
         /**
-         * Ссылка для тех, кто привык к старым разделам: карточка остаётся модальным
-         * окном, но товар можно открыть в «Ценах и скидках» — таблица отфильтруется
-         * по этому нм-коду.
+         * Карточка остаётся модальным окном, но товар можно показать в таблице
+         * «Товары» репрайсера — она отфильтруется по этому нм-коду.
          */
-        { label: 'Открыть в разделе', class: 'btn-ghost', onClick: async () => {
+        { label: 'Показать в репрайсере', class: 'btn-ghost', onClick: async () => {
             if (!await modal.close()) return false;
-            S.state.filters = S.state.filters || {};
-            S.state.filters.q = String(id);
-            S.state.filters.flag = 'all';
-            App.go('prices');
-            App.toast('Товар ' + id + ' отфильтрован в «Ценах и скидках»', 'ok', 4000);
+            if (window.Views && Views.repricer) Views.repricer.itemFilter.q = String(id);
+            App.go('repricer');
+            App.toast('Товар ' + id + ' показан в таблице «Товары»', 'ok', 4000);
           } },
         { label: 'Закрыть' }
       ]
@@ -77,7 +74,6 @@ Views.itemcard = {
     const it = d.item;
     const a = this.econ();
     const cur = a.current;
-    const draft = d.drafts || null;
     const prop = d.proposal || null;
     // сколько замеров витрины легло в медиану СПП — сразу видно, есть ли наблюдения
     const watchBadge = U.num((d.facts || {}).sppWatchSamples) > 0 ? U.num((d.facts || {}).sppWatchSamples) + ' замеров' : '';
@@ -87,7 +83,6 @@ Views.itemcard = {
       it.vendorCode ? UI.badge(it.vendorCode) : '',
       (it.categoryName || it.subjectName) ? UI.badge(it.categoryName || it.subjectName) : '',
       d.demo ? UI.badge('демо-данные', 'demo') : UI.badge('данные WB API', 'live'),
-      draft ? UI.badge('черновик цены сохранён', 'info') : '',
       prop ? UI.badge('есть предложение репрайсера', 'accent') : ''
     ].filter(Boolean).join(' ');
 
@@ -109,7 +104,7 @@ Views.itemcard = {
 
     const tabs = UI.tabs({
       tabs: [
-        { id: 'econ', label: 'Экономика и цена', badge: draft ? 'своя цена' : '' },
+        { id: 'econ', label: 'Экономика и цена' },
         { id: 'competitors', label: 'Конкуренты', badge: (d.competitors || []).length || '' },
         { id: 'watch', label: 'Цены на площадке', badge: watchBadge },
         { id: 'commissions', label: 'Комиссии и параметры' },
@@ -143,15 +138,14 @@ Views.itemcard = {
   // ───────────────────────── Экономика ─────────────────────────
 
   /**
-   * Вкладка «Экономика и цена» — объединена намеренно.
+   * Вкладка «Экономика и цена» — объединена намеренно: цена и экономика товара
+   * видны вместе, а не разнесены по разным окнам.
    *
-   * Раньше цена и экономика жили на разных вкладках: ввёл цену → сохранил → перешёл на
-   * «Экономику» → увидел, что ничего не изменилось. Теперь расчёт пересчитывается
-   * ЖИВЬЁМ на каждый ввод, и сразу видно, как цена влияет на прибыль, маржу и все статьи.
-   *
-   * Кнопка одна — «Сохранить»: она сохраняет цену в данных приложения (черновик) и
-   * НИКУДА не отправляет. В маркетплейс цены уходят только из раздела «Репрайсер»
-   * (или «Цены и скидки») — там, где видно весь список и есть предпросмотр.
+   * Ручной цены у товара больше нет: цену ставит только репрайсер — по
+   * минимальному/максимальному порогам и стратегии из настроек товара.
+   * Поэтому здесь цена только показывается (как сейчас на маркетплейсе и что
+   * предлагает репрайсер), а пороги правятся во вкладке «Акции» этой карточки
+   * и в таблице «Товары» репрайсера.
    */
   tabEcon(host) {
     const d = this.data;
@@ -159,16 +153,23 @@ Views.itemcard = {
     const facts = d.facts || null;
     const card = d.card || null;
     const st = d.stats || {};
-    const draft = d.drafts || null;
     const prop = d.proposal || null;
+    const icfg = d.itemConfig || {};
 
-    // цена на маркетплейсе — её нельзя терять, когда сохранена своя
+    // цена на маркетплейсе — единственная текущая цена товара
     const mpBase = U.num(it.price);
     const mpDisc = U.num(it.discount);
     const mpSeller = Math.round(mpBase * (1 - mpDisc / 100) * 100) / 100;
-    // своя цена: черновик, если он есть, иначе цена МП
-    const myBase = draft ? U.num(draft.basePrice) : mpBase;
-    const myDisc = draft ? U.num(draft.discount) : mpDisc;
+    const myBase = mpBase;
+    const myDisc = mpDisc;
+    // пороги коридора из настроек товара: первый расчёт ставит цену на минимум
+    const floorSet = U.num(icfg.minPrice) > 0 || U.num(icfg.minMarginRub) > 0 || U.num(icfg.minMarginPct) > 0;
+    const floorText = U.num(icfg.minPrice) > 0 ? U.money(icfg.minPrice)
+      : U.num(icfg.minMarginRub) > 0 ? 'по марже ' + U.money(icfg.minMarginRub)
+      : U.num(icfg.minMarginPct) > 0 ? 'по марже ' + U.pct(icfg.minMarginPct) : 'не задан';
+    const ceilText = U.num(icfg.maxPrice) > 0 ? U.money(icfg.maxPrice)
+      : U.num(icfg.maxMarginRub) > 0 ? 'по марже ' + U.money(icfg.maxMarginRub)
+      : U.num(icfg.maxMarginPct) > 0 ? 'по марже ' + U.pct(icfg.maxMarginPct) : 'не задан';
     // оборачиваемость: остаток на складах / темп продаж (тот же расчёт, что в репрайсере)
     const perDay = U.num(st.salesQty) > 0 ? U.num(st.salesQty) / 30 : U.num((d.overrides || {}).salesPerDay || 0);
     const turnoverDaysOf = (dd) => {
@@ -192,39 +193,32 @@ Views.itemcard = {
           <div class="alert info" style="margin-bottom:10px">
             <b>На маркетплейсе сейчас:</b> ${U.money(mpSeller)}
             <span class="tiny muted">(база ${U.money(mpBase)} · скидка ${U.pct(mpDisc, 1)})</span>
-            ${draft ? '<br><b class="pos">Сохранена своя цена</b> — она применяется во всех разделах, но в WB ещё не отправлена.' : ''}
           </div>
-          <div class="grid g3" style="gap:10px">
-            <label class="field">Базовая цена, ₽
-              <input type="number" class="num" id="ic-base" step="10" value="${myBase}" /></label>
-            <label class="field">Скидка, %
-              <input type="number" class="num" id="ic-disc" step="1" value="${myDisc}" /></label>
-            <label class="field">Цена со скидкой
-              <input type="number" class="num" id="ic-seller" readonly value="${Math.round(myBase * (1 - myDisc / 100) * 100) / 100}" /></label>
-          </div>
-          <label class="field" style="margin-top:10px">Пометка (для себя)
-            <input id="ic-note" value="${U.esc((draft && draft.note) || '')}" placeholder="например: цена под акцию 15.11" /></label>
-          <div class="row wrap" style="margin-top:12px;gap:8px">
-            <button class="btn btn-primary" id="ic-save">Сохранить</button>
-            ${draft ? '<button class="btn btn-ghost" id="ic-drop">Вернуть цену МП</button>' : ''}
-            <span class="hint" id="ic-save-status">${draft
-              ? 'Сохранено ' + U.date(draft.savedAt, true) + ' · в WB не отправлено'
-              : 'Изменения не сохранены'}</span>
-          </div>
-          <p class="hint" style="margin-top:8px">Кнопка «Сохранить» кладёт цену в данные приложения — она сразу
-            применяется в экономике, репрайсере и отчётах, переживает перезапуск и НЕ уходит в WB.
-            Отправляет цены в маркетплейс кнопка в разделе <b>«Репрайсер»</b> (там виден весь список и предпросмотр).</p>
+          ${UI.kv([
+            ['Базовая цена, ₽', U.money(mpBase)],
+            ['Скидка продавца', U.pct(mpDisc, 1)],
+            ['Цена со скидкой, ₽', '<b>' + U.money(mpSeller) + '</b>'],
+            ['Минимальный порог', floorText],
+            ['Максимальный порог', ceilText],
+            ['Первый расчёт репрайсера', !floorSet ? 'порог не задан — задайте минимум во вкладке «Акции»'
+              : icfg.floorSeededAt ? 'выполнен: цена уже вставала на минимальный порог'
+              : 'ещё не выполнен: первый пересчёт поставит цену на минимальный порог']
+          ])}
+          <p class="hint" style="margin-top:8px">Ручных цен в приложении нет: цену ставит только <b>репрайсер</b> —
+            по минимальному и максимальному порогам товара и выбранной стратегии, не выходя за коридор.
+            Пороги меняются во вкладке «Акции» этой карточки и в таблице «Товары» репрайсера,
+            а отправка в маркетплейс — кнопкой в разделе «Репрайсер».</p>
           ${prop ? `<div class="divider"></div>
             <b class="tiny">Что предлагает репрайсер</b>
             ${UI.kv([
-              ['Цена репрайсера', '<b>' + U.money(prop.sellerPrice) + '</b>' + (prop.manual ? ' <span class="tiny muted">(ваша сохранённая цена)</span>' : '')],
+              ['Цена репрайсера', '<b>' + U.money(prop.sellerPrice) + '</b>'],
               ['Изменение', `<span class="${U.num(prop.deltaPct) >= 0 ? 'pos' : 'neg'}">${U.signed(U.num(prop.deltaPct), 1)}%</span>`],
               ['Прибыль/шт', U.money(prop.profitNow) + ' → <b class="' + U.profitClass(prop.profitNext) + '">' + U.money(prop.profitNext) + '</b>'],
               ['Стратегия', U.esc(prop.strategyTitle || prop.strategy || '—')]
             ])}` : ''}
         </div>
         <div class="card">
-          <h3>Как цена меняет экономику</h3>
+          <h3>Экономика при текущей цене</h3>
           <div id="ic-live">${UI.loading('Считаем…')}</div>
         </div>
       </div>
@@ -281,43 +275,42 @@ Views.itemcard = {
       return EC.analyze(d.settings, item, ov, undefined, facts);
     };
 
-    /** Живой пересчёт: было (цена МП) → станет (то, что введено). */
+    /** Экономика при текущей цене маркетплейса и при цене предложения репрайсера. */
     const paintLive = () => {
-      const b = U.num(host.querySelector('#ic-base').value);
-      const dd = U.num(host.querySelector('#ic-disc').value);
-      const seller = Math.round(b * (1 - dd / 100) * 100) / 100;
-      host.querySelector('#ic-seller').value = seller;
-
       const was = analyzeAt(mpBase, mpDisc).current;
-      const now = analyzeAt(b, dd).current;
+      const nowSeller = prop ? U.num(prop.sellerPrice) : mpSeller;
+      const nowBase = prop ? U.num(prop.basePrice) : mpBase;
+      const nowDisc = prop ? U.num(prop.discount) : mpDisc;
+      const now = analyzeAt(nowBase, nowDisc).current;
       const dProfit = now.profit - was.profit;
       const dMargin = now.marginPct - was.marginPct;
-      const perDay = U.num(st.salesQty) / 30;
-      const dMonth = dProfit * perDay * 30;
+      const perDayLocal = U.num(st.salesQty) / 30;
+      const dMonth = dProfit * perDayLocal * 30;
 
       host.querySelector('#ic-live').innerHTML = `
         ${UI.kv([
-          ['Цена', U.money(was.revenue) + ' → <b>' + U.money(now.revenue) + '</b>'],
-          ['Цена покупателю (с СПП)', U.money(was.buyerPrice) + ' → <b>' + U.money(now.buyerPrice) + '</b>'],
-          ['Прибыль с единицы', `<span class="${U.profitClass(was.profit)}">${U.money(was.profit)}</span> →
-            <b class="${U.profitClass(now.profit)}">${U.money(now.profit)}</b>
-            <span class="${U.profitClass(dProfit)} tiny">(${U.signed(Math.round(dProfit))} ₽)</span>`],
-          ['Маржинальность', `<span class="${U.profitClass(was.marginPct)}">${U.pct(was.marginPct)}</span> →
-            <b class="${U.profitClass(now.marginPct)}">${U.pct(now.marginPct)}</b>
-            <span class="${U.profitClass(dMargin)} tiny">(${U.signed(dMargin, 1)} п.п.)</span>`],
-          ['Δ прибыли за месяц', perDay > 0
+          ['Цена', U.money(was.revenue) + (prop ? ' → <b>' + U.money(now.revenue) + '</b> <span class="tiny muted">(предложение репрайсера)</span>' : '')],
+          ['Цена покупателю (с СПП)', U.money(was.buyerPrice) + (prop ? ' → <b>' + U.money(now.buyerPrice) + '</b>' : '')],
+          ['Прибыль с единицы', `<span class="${U.profitClass(was.profit)}">${U.money(was.profit)}</span>` + (prop ?
+            ` → <b class="${U.profitClass(now.profit)}">${U.money(now.profit)}</b>
+            <span class="${U.profitClass(dProfit)} tiny">(${U.signed(Math.round(dProfit))} ₽)</span>` : '')],
+          ['Маржинальность', `<span class="${U.profitClass(was.marginPct)}">${U.pct(was.marginPct)}</span>` + (prop ?
+            ` → <b class="${U.profitClass(now.marginPct)}">${U.pct(now.marginPct)}</b>
+            <span class="${U.profitClass(dMargin)} tiny">(${U.signed(dMargin, 1)} п.п.)</span>` : '')],
+          ['Δ прибыли за месяц', !prop ? '<span class="muted tiny">предложения репрайсера пока нет — нажмите «Пересчёт» в репрайсере</span>'
+            : perDayLocal > 0
             ? `<b class="${U.profitClass(dMonth)}">${U.signed(Math.round(dMonth))} ₽</b>
-               <span class="tiny muted">при ${U.num(perDay * 30).toFixed(0)} продажах/мес</span>`
+               <span class="tiny muted">при ${U.num(perDayLocal * 30).toFixed(0)} продажах/мес</span>`
             : '<span class="muted tiny">нет данных о продажах — прогноз невозможен</span>'],
           ['Безубыточность', now.breakEvenPrice ? U.money(now.breakEvenPrice) : '—']
         ])}
         ${now.profit < 0 ? '<div class="alert danger" style="margin-top:10px">При этой цене товар уходит в минус.</div>' : ''}
-        ${Math.abs(seller - mpSeller) > 0.5 && mpSeller > 0 && seller < mpSeller / 3
+        ${prop && mpSeller > 0 && nowSeller < mpSeller / 3
           ? '<div class="alert warn" style="margin-top:10px">Цена падает более чем в 3 раза — WB отправит товар в карантин.</div>' : ''}`;
 
-      // полная смета обновляется вместе с живым блоком
-      const p = now;
-      const src = (analyzeAt(b, dd).params.costSources) || {};
+      // полная смета по текущей цене
+      const p = was;
+      const src = (analyzeAt(mpBase, mpDisc).params.costSources) || {};
       const srcBadge = (key) => {
         const map = { fact: 'факт WB', watch: 'витрина WB', manual: 'вручную', category: 'справочник', settings: 'настройки', formula: 'формула', none: '—' };
         const v = src[key] || 'none';
@@ -341,46 +334,7 @@ Views.itemcard = {
         ? '<div class="alert warn" style="margin-top:10px">Себестоимость не задана — прибыль и маржа недостоверны. Заполните во вкладке «Комиссии и параметры».</div>'
         : '');
     };
-
-    host.querySelector('#ic-base').oninput = U.debounce(paintLive, 120);
-    host.querySelector('#ic-disc').oninput = U.debounce(paintLive, 120);
     paintLive();
-
-    // одна кнопка: сохранить цену в данных приложения, никуда не отправляя
-    host.querySelector('#ic-save').onclick = async (e) => {
-      const btn = e.target;
-      const b = U.num(host.querySelector('#ic-base').value);
-      const dd = U.num(host.querySelector('#ic-disc').value);
-      if (!(b > 0)) { App.toast('Укажите базовую цену больше нуля', 'warn'); return; }
-      btn.disabled = true;
-      try {
-        await API.invoke('prices:draft-save', {
-          items: { [String(this.nmID)]: { basePrice: b, discount: dd, note: String(host.querySelector('#ic-note').value || '') } }
-        });
-        // цена должна сразу стать ценой товара во всех разделах
-        S.invalidate();
-        if (typeof S.loadDrafts === 'function') await S.loadDrafts();
-        await S.loadGoods(false);
-        App.toast('Цена сохранена: ' + U.money(Math.round(b * (1 - dd / 100) * 100) / 100) +
-          '. Применяется во всех разделах, в WB не отправлена.', 'ok', 8000);
-        this.data = await API.invoke('items:card', { nmID: this.nmID });
-        this.paint();
-      } catch (err) {
-        App.toast(err.message, 'err', 9000);
-        btn.disabled = false;
-      }
-    };
-
-    const drop = host.querySelector('#ic-drop');
-    if (drop) drop.onclick = async () => {
-      await API.invoke('prices:draft-clear', { nmIDs: [this.nmID] });
-      S.invalidate();
-      if (typeof S.loadDrafts === 'function') await S.loadDrafts();
-      await S.loadGoods(false);
-      App.toast('Своя цена удалена — снова работаем с ценой маркетплейса', 'ok', 6000);
-      this.data = await API.invoke('items:card', { nmID: this.nmID });
-      this.paint();
-    };
 
     // размеры подгружаем отдельно: это ещё один запрос к WB, а окно должно открыться сразу
     (async () => {

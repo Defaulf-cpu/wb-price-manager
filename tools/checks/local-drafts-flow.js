@@ -19,13 +19,13 @@ function create(storage = {}) {
   Object.entries(storage).forEach(([key, value]) => w.localStorage.setItem(key, value));
   let profile = 'default', epoch = 1, context = 'context-A', intercept = null;
   w.Views = { repricer: { results: [], pendingEdits: new Map(), invalidLocalInput: () => null } };
-  w.S = { state: { dataContext: context, priceEdits: new Map(), settings: {} }, invalidate() {}, reloadOverrides: async () => {}, loadDrafts: async () => { w.S.state.priceDrafts = plain(saved.drafts); } };
+  w.S = { state: { dataContext: context, settings: {} }, invalidate() {}, reloadOverrides: async () => {} };
   w.API = { activeProfileId: () => profile, generation: () => epoch, async invoke(channel, payload = {}) {
     calls.push({ channel, payload: plain(payload) });
     if (intercept) await intercept(channel, payload);
     if (channel === 'costs:get') return { items: plain(saved.costs) };
     if (channel === 'settings:save') { Object.assign(saved.settings, plain(payload)); return plain(saved.settings); }
-    const target = { 'costs:save': saved.costs, 'prices:draft-save': saved.drafts, 'repricer:item-configs:save': saved.configs, 'repricer:competitors:save': saved.competitors }[channel];
+    const target = { 'costs:save': saved.costs, 'repricer:item-configs:save': saved.configs, 'repricer:competitors:save': saved.competitors }[channel];
     if (target) for (const [key, value] of Object.entries(payload.items || {})) target[key] = value === null ? null : { ...target[key], ...plain(value) };
     return { ok: true };
   } };

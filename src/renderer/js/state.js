@@ -10,8 +10,6 @@ window.S = (function () {
     settings: null,
     items: [],           // товары из WB / демо
     overrides: {},       // nmID → себестоимость и расходы (пользовательские или демо)
-    priceEdits: new Map(), // nmID → { basePrice, discount } — ручной ввод цен (переживает перерисовки)
-    priceDrafts: {},       // nmID → { basePrice, discount, sellerPrice, note, savedAt } — сохранено БЕЗ отправки в WB
     stats: [],           // nmID → продажи/заказы за 30 дней
     statsByNm: {},
     facts: {},           // nmID → фактические расходы из отчёта о реализации WB
@@ -26,10 +24,6 @@ window.S = (function () {
     selection: new Set(),
     filters: { q: '', category: '', brand: '', flag: 'all' },
     sort: { key: 'profit', dir: 'asc' },
-    // По умолчанию правило ВЫКЛЮЧЕНО: массовая переценка должна быть осознанным действием.
-    // Раньше здесь стояло «−5% к итоговой цене», и это значение молча пересчитывало
-    // каждую строку при отправке — введённые вручную цены «не сохранялись».
-    priceRule: { type: 'none', value: 0, roundTo: 0, minPrice: 0 },
     promoSelected: null,
     promoRows: [],
     promoTab: 'candidates',
@@ -54,7 +48,7 @@ window.S = (function () {
     const changed = state.dataContext && info.dataContext && state.dataContext !== info.dataContext;
     if (changed) {
       API.invalidateProfile();
-      Object.assign(state, { items: [], overrides: {}, stats: [], statsByNm: {}, facts: {}, cards: [], promos: [], costs: {}, priceDrafts: {}, priceEdits: new Map(), selection: new Set() });
+      Object.assign(state, { items: [], overrides: {}, stats: [], statsByNm: {}, facts: {}, cards: [], promos: [], costs: {}, selection: new Set() });
       invalidateProductViews(true);
     }
     state.dataContext = info.dataContext || state.dataContext;
@@ -102,11 +96,6 @@ window.S = (function () {
       state.demo = res.demo;
       state.goodsLoadedAt = res.fromCache ? res.cachedAt : new Date().toISOString();
       state.goodsSource = res.source;
-      /**
-       * Черновики грузим вместе с товарами: сохранённая вручную цена должна применяться
-       * к экономике сразу во всех разделах, а не только там, где её ввели.
-       */
-      await loadDrafts();
       return res;
     } finally {
       state.loading = false;
@@ -180,27 +169,10 @@ window.S = (function () {
 
   /**
    * Перечитать overrides (себестоимость/расходы) с сервера без похода в WB.
-   * Таблица «Цены и скидки» строится именно из overrides, а не из state.costs,
+   * Таблицы строятся именно из overrides, а не из state.costs,
    * поэтому после сохранения себестоимости их обязательно нужно обновить —
    * иначе введённое значение не появлялось в «Ценах» до полной перезагрузки товаров.
    */
-  /**
-   * Черновики цен — сохранённые вручную цены, которые ещё НЕ отправлены в WB.
-   * Грузятся в общее состояние, потому что применяться должны во всех разделах
-   * («Цены и скидки», «Экономика», «Репрайсер», «Отчёты», карточка товара),
-   * а не только там, где их ввели.
-   */
-  async function loadDrafts() {
-    try {
-      const res = await API.invoke('prices:draft-load');
-      state.priceDrafts = (res && res.items) || {};
-    } catch (e) {
-      state.priceDrafts = state.priceDrafts || {};
-    }
-    invalidate();
-    return state.priceDrafts;
-  }
-
   async function reloadOverrides() {
     const res = await API.invoke('costs:overrides');
     if (res && res.overrides) state.overrides = res.overrides;
@@ -224,36 +196,10 @@ window.S = (function () {
     return EC.analyze(state.settings, item, ov, target);
   }
 
-  /**
-   * Товар с учётом сохранённой вручную цены (черновика).
-   *
-   * Зачем: пользователь вводит цену в карточке товара или в «Цены и скидки», нажимает
-   * «Сохранить» — и эта цена должна сразу стать ценой товара ВО ВСЕХ разделах
-   * (экономика, репрайсер, отчёты), а не лежать мёртвым грузом до отправки в WB.
-   * Цена маркетплейса при этом не теряется: она остаётся в `mpPrice`/`mpDiscount`,
-   * чтобы интерфейс показывал «на МП сейчас» и «моя цена» раздельно.
-   *
-   * @returns {{item: object, draft: object|null}}
-   */
-  function withDraft(item) {
-    const d = (state.priceDrafts || {})[String(item.nmID)];
-    if (!d || !(Number(d.basePrice) > 0)) return { item, draft: null };
-    return {
-      item: Object.assign({}, item, {
-        price: Number(d.basePrice),
-        discount: Number(d.discount) || 0
-      }),
-      draft: d
-    };
-  }
-
   /** Строки для главной таблицы: товар + экономика + продажи. */
   function rows() {
-    return state.items.map((rawItem) => {
-      const key = String(rawItem.nmID);
-      const eff = withDraft(rawItem);
-      const item = eff.item;
-      const draft = eff.draft;
+    return state.items.map((item) => {
+      const key = String(item.nmID);
       const rawOv = state.overrides[key] || {};
       const fact = state.facts[key] || null;
       // фактические расходы из отчёта WB важнее демо-значений, но не важнее ручных настроек
@@ -277,12 +223,10 @@ window.S = (function () {
         discount: U.num(item.discount),
         sellerPrice: a.current.revenue,
         buyerPrice: a.current.buyerPrice,
-        // цена на маркетплейсе (из кабинета WB) — её нельзя терять, когда задана своя
-        mpBasePrice: U.num(rawItem.price),
-        mpDiscount: U.num(rawItem.discount),
-        mpSellerPrice: Math.round(U.num(rawItem.price) * (1 - U.num(rawItem.discount) / 100) * 100) / 100,
-        draft: draft || null,
-        hasDraft: !!draft,
+        // цена на маркетплейсе (из кабинета WB) — единственная текущая цена товара
+        mpBasePrice: U.num(item.price),
+        mpDiscount: U.num(item.discount),
+        mpSellerPrice: Math.round(U.num(item.price) * (1 - U.num(item.discount) / 100) * 100) / 100,
         spp: a.params.sppPct,
         commission: a.params.commissionPct,
         costPrice: a.params.costPriceRub,
@@ -362,7 +306,6 @@ window.S = (function () {
       case 'revenue30': list = list.filter((r) => U.num(r.revenue30) > 0); break;
       case 'profit30': list = list.filter((r) => U.num(r.profit30) > 0); break;
       case 'profit30neg': list = list.filter((r) => U.num(r.profit30) < 0); break;
-      case 'draft': list = list.filter((r) => !!(state.priceDrafts || {})[String(r.nmID)]); break;
       case 'promo': list = list.filter((r) => r.item.inPromo); break;
       case 'badturn': list = list.filter((r) => r.isBadTurnover || (r.turnoverDays > 90 && r.stock > 0)); break;
       case 'selected': list = list.filter((r) => state.selection.has(r.nmID)); break;
@@ -401,8 +344,8 @@ window.S = (function () {
 
   return {
     state, resetProfile, setEconomics, loadAppState, loadGoods, loadPromos, saveSettings, saveCosts,
-    reloadOverrides, loadDrafts, loadFacts, refreshFacts, loadDeferred, loadStatsState,
-    reloadAfterDeferred, analyze, rows, getRows, withDraft, invalidate, categories, brands,
+    reloadOverrides, loadFacts, refreshFacts, loadDeferred, loadStatsState,
+    reloadAfterDeferred, analyze, rows, getRows, invalidate, categories, brands,
     filtered, selectedRows, totals
   };
 })();

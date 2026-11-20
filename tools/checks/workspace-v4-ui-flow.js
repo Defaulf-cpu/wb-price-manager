@@ -133,12 +133,14 @@ async function main() {
     assert.equal(store.loadCosts().items[nm].costEntered, 42); assert.equal(store.loadCosts().items[nm].costPriceRub, 546); assert.equal(store.loadCosts().items[nm].currency, 'CNY');
     assert.equal((await service.handlers['items:card']({ nmID: Number(nm) })).overrides.costPriceRub, 546);
   });
-  await check('цена карточки сохраняется по кнопке, Escape лишь закрывает, товар WB остаётся с прежней ценой', async () => {
-    await w.Views.itemcard.open(Number(nm)); input('#ic-base', 3100); input('#ic-note', 'Локальный черновик');
-    assert.equal(store.loadPriceDrafts()[nm], undefined); doc.querySelector('#ic-save').click(); await until(() => store.loadPriceDrafts()[nm] && !w.API.pending(), 'явное сохранение цены карточки');
+  await check('карточка товара: цены руками нет — только цена WB, пороги и предложение репрайсера', async () => {
+    await w.Views.itemcard.open(Number(nm));
+    assert.equal(doc.querySelector('#ic-base'), null); assert.equal(doc.querySelector('#ic-save'), null);
+    assert.equal(store.loadPriceDrafts, undefined);
+    assert.match(doc.querySelector('#modal-root .modal').textContent, /Ручных цен в приложении нет/);
     doc.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await until(() => !doc.querySelector('#modal-root .modal'), 'Escape карточки');
-    assert.equal(store.loadPriceDrafts()[nm].basePrice, 3100); assert.equal(goods[0].price, 3000);
+    assert.equal(goods[0].price, 3000);
   });
   await check('конкурент сохраняется по «Сохранить и закрыть», последнее поле читается даже без потери фокуса', async () => {
     rp.openCompetitors(Number(nm)); const box = doc.querySelector('#modal-root .modal');

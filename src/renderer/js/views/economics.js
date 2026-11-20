@@ -414,22 +414,15 @@ Views.economics = {
             <div style="padding:10px 16px 16px">${deltaTable(worst)}</div></div>
         </div>
         <div class="row wrap" style="margin-top:12px">
-          <button class="btn" id="sc-apply">Применить сценарий к ценам</button>
-          <span class="hint">Откроет раздел «Цены» с этим правилом — перед отправкой в WB будет предпросмотр.</span>
+          <button class="btn" id="sc-apply">Открыть сценарий в репрайсере</button>
+          <span class="hint">Сценарий — только модель «что будет, если цены сдвинтся». Цены ставит репрайсер: задайте пороги минимумов с этим сдвигом и пересчитайте.</span>
         </div>
       `;
 
       host.querySelector('#sc-apply').onclick = () => {
-        const stt = S.state;
-        stt.priceRule = dp !== 0
-          ? { type: 'delta-pct', value: dp, roundTo: 10, minPrice: 0 }
-          : { type: 'delta-discount', value: dd, roundTo: 0, minPrice: 0 };
-        if (dp === 0 && dd !== 0) {
-          // правило «изменить скидку на N п.п.» реализуется как set-discount относительно текущей
-          stt.priceRule = { type: 'delta-discount', value: dd, roundTo: 0, minPrice: 0 };
-        }
-        App.toast('Правило перенесено в раздел «Цены»', 'ok');
-        App.go('prices');
+        if (window.Views && Views.repricer) Views.repricer.tab = 'rules';
+        App.toast('Откройте «Массовые параметры» и задайте пороги: репрайсер сделает остальное', 'ok', 8000);
+        App.go('repricer');
       };
 
       function deltaTable(list) {

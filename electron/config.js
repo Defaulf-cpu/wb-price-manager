@@ -15,8 +15,6 @@ const TASKS_FILE = 'tasks.json';
 const SECRETS_FILE = 'secrets.enc';
 const FACTCOSTS_FILE = 'factcosts.json';
 const PROMOEXITS_FILE = 'promoexits.json';
-/** Черновики цен: то, что пользователь ввёл руками, но ещё НЕ отправил в WB. */
-const PRICEDRAFTS_FILE = 'pricedrafts.json';
 /** Предложения репрайсера: фаза «показать» хранится отдельно от фактических цен. */
 const PROPOSALS_FILE = 'repricer-proposals.json';
 /** История пересчёта по конкретному артикулу (что предложил РП и что отправили). */
@@ -151,7 +149,6 @@ module.exports = {
   SECRETS_FILE,
   FACTCOSTS_FILE,
   PROMOEXITS_FILE,
-  PRICEDRAFTS_FILE,
   PROPOSALS_FILE,
   RECALC_HISTORY_FILE,
   PROMOJOURNAL_FILE,

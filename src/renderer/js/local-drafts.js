@@ -2,7 +2,7 @@
 
 /** Памятные черновики локальных правок. Ввод ничего не записывает и не отправляет: запись происходит только по явному нажатию «Сохранить». Ни отправка WB, ни ключи, ни переключение режима сюда не допускаются. */
 window.LocalDrafts = (function () {
-  const ALLOWED = new Set(['costs:save', 'repricer:item-configs:save', 'prices:draft-save', 'repricer:competitors:save', 'strategies:template', 'repricer:save', 'settings:save']);
+  const ALLOWED = new Set(['costs:save', 'repricer:item-configs:save', 'repricer:competitors:save', 'strategies:template', 'repricer:save', 'settings:save']);
   const COST_FIELDS = new Set(('costPriceRub costEntered currency packagingRub commissionPct logisticsRub storageRub acceptRub adPct adRub sppPct volumeLiters stock salesPerDay taxMode taxRatePct otherPct otherRub note targetMarginPct acquiringPct returnPct').split(' '));
   const ITEM_FIELDS = new Set(('strategy minPrice maxPrice basePrice basePriceTarget targetMarginPct targetMarginRub minMarginPct minMarginRub maxMarginPct maxMarginRub allowNegativeMargin allowSend tag rrp targetDiscountPct planQtyMonth planSensitivityPct targetTurnoverDays oosUpliftPct promoUpliftPct liquidationTurnoverDays liquidationDiscountPct elasticityPct oosProtection beautifulPrice competitorMode competitorId competitorOffsetMode competitorOffsetRub competitorOffsetPct sizePriceMode sizePrices sppMode boost restartBoost').split(' '));
   const SETTINGS_FIELDS = new Set(('shopName costRates taxMode taxRate taxVatRate taxInsuranceEnabled taxAnnualRevenue ipFixedContribution ipExtraContributionCap ipHasEmployees ipDeductContributions').split(' '));
@@ -63,10 +63,6 @@ window.LocalDrafts = (function () {
       }
       if (op.channel === 'costs:save') itemMap(op.payload, (v) => { if (v !== null) allowedFields(v, COST_FIELDS); });
       if (op.channel === 'repricer:item-configs:save') itemMap(op.payload, (v) => { if (v !== null) allowedFields(v, ITEM_FIELDS); });
-      if (op.channel === 'prices:draft-save') itemMap(op.payload, (v) => {
-        allowedFields(v, new Set(['basePrice', 'discount', 'note']));
-        if (!(Number(v.basePrice) > 0) || !Number.isFinite(Number(v.basePrice)) || v.discount === undefined || !Number.isFinite(Number(v.discount)) || Number(v.discount) < 0 || Number(v.discount) > 95) throw new Error('Укажите корректную базовую цену и скидку.');
-      });
       if (op.channel === 'repricer:competitors:save') itemMap(op.payload, (v) => { if (v !== null && (!Array.isArray(v) || v.length > 1000)) throw new Error('Некорректный список конкурентов.'); });
       if (op.channel === 'strategies:template') {
         allowedFields(op.payload, new Set(['strategy', 'values']));
@@ -126,15 +122,6 @@ window.LocalDrafts = (function () {
     if (!current(record)) return;
     if (channel === 'settings:save') { S.state.settings = result; S.invalidate(); }
     if (channel === 'costs:save') { const costs = await API.invoke('costs:get'); if (!current(record)) return; S.state.costs = costs.items || {}; await S.reloadOverrides(); }
-    if (channel === 'prices:draft-save') {
-      await S.loadDrafts(); if (!current(record)) return;
-      const operation = record.operations.find((o) => o.channel === channel);
-      for (const [nm, value] of Object.entries(operation.payload.items || {})) {
-        const map = S.state.priceEdits, old = map.get(Number(nm)) || map.get(nm);
-        if (old && Number(old.basePrice) === Number(value.basePrice) && Number(old.discount) === Number(value.discount)) { map.delete(Number(nm)); map.delete(nm); }
-      }
-      S.invalidate();
-    }
     if (Views.repricer) { Views.repricer.results = []; Views.repricer.summary = null; }
   }
   function setStatus(form, text, error) {
@@ -157,7 +144,7 @@ window.LocalDrafts = (function () {
       const paths = form.touched[i] || (form.touched[i] = new Map());
       changedPaths(form.last[i]?.payload, op.payload).forEach((path) => paths.set(JSON.stringify(path), path));
       if (!paths.size) return;
-      if (op.channel === 'prices:draft-save' || op.channel === 'strategies:template' || op.channel === 'repricer:competitors:save') { output.push(clone(op)); return; }
+      if (op.channel === 'strategies:template' || op.channel === 'repricer:competitors:save') { output.push(clone(op)); return; }
       const payload = {}; for (const path of paths.values()) put(payload, path, at(op.payload, path));
       output.push({ channel: op.channel, payload });
     });

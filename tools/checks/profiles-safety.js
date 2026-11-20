@@ -316,7 +316,6 @@ module.exports = async function runSafety(check) {
       await sleep(80);
       check('L UI: запуск с несколькими профилями читает A', w.S.state.appState.activeProfileId === 'default' && w.S.state.costs['1001'].costPriceRub === 100);
       check('L UI: переключатель в шапке содержит оба кабинета', doc.querySelectorAll('.profile-switcher option').length === 2);
-      w.S.state.priceEdits.set(1001, { basePrice: 777 });
       w.S.state.selection.add(1001); w.S.state.filters.q = 'Чужой фильтр';
       w.Views.repricer.pendingEdits.set(1001, { config: { tag: 'Локально A' }, cost: {} }); w.Views.repricer.results = [{ nmID: 1001 }]; w.Views.repricer.rstate = { from: 'A' };
       w.Views.reports.period = { dateFrom: '2025-01-01', dateTo: '2025-02-01' };
@@ -324,10 +323,10 @@ module.exports = async function runSafety(check) {
       const ask = await w.App.switchProfile(bid);
       check('L UI: несохранённые правки требуют явного решения', ask === false && /несохранённые изменения/.test(doc.querySelector('#modal-root .modal').textContent) && hub.activeId() === 'default');
       doc.querySelector('#modal-root .modal-close').click();
-      check('L UI: отмена переключения сохраняет только памятные правки A, но не записывает параметры', w.S.state.priceEdits.get(1001).basePrice === 777 && (w.Views.repricer.pendingEdits.get(1001) || w.Views.repricer.pendingEdits.get('1001')).config.tag === 'Локально A' && (hub.getActiveStore().loadItemConfigs()['1001'] || {}).tag === undefined);
+      check('L UI: отмена переключения сохраняет только памятные правки A, но не записывает параметры', w.S.state.priceEdits === undefined && (w.Views.repricer.pendingEdits.get(1001) || w.Views.repricer.pendingEdits.get('1001')).config.tag === 'Локально A' && (hub.getActiveStore().loadItemConfigs()['1001'] || {}).tag === undefined);
       const switched = await w.App.switchProfile(bid, true);
       check('L UI: подтверждённое переключение читает B', switched && hub.activeId() === bid && w.S.state.costs['1001'].costPriceRub === 600 && w.API.activeProfileId() === bid);
-      check('L UI: ручные правки, выделение и фильтры A не попали в B', !w.S.state.priceEdits.size && !w.S.state.selection.size && w.S.state.filters.q === '');
+      check('L UI: ручные правки, выделение и фильтры A не попали в B', w.S.state.priceEdits === undefined && !w.S.state.selection.size && w.S.state.filters.q === '');
       check('L UI: кэши репрайсера, отчётов и акций сброшены', !w.Views.repricer.pendingEdits.size && !w.Views.repricer.results.length && w.Views.repricer.rstate === null && w.Views.reports.period === null && !w.Views.promos.promoRows);
       let received = 0; w.API.on('test-profile', () => received++);
       stream.listeners['svc:test-profile']({ data: JSON.stringify({ profileId: 'default' }) });

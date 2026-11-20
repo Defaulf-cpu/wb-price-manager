@@ -112,13 +112,13 @@ function abc(archive, nmIDs, profitForTotals, now = Date.now()) {
   }
   return out;
 }
-function issuesFor(r, hasDraft = false) {
+function issuesFor(r) {
   const issues = [], add = (code, message, level = 'critical') => { if (!issues.some((i) => i.message === message)) issues.push({ code, message, level }); };
   if (r.error) { add('CALC_ERROR', String(r.error)); return issues; }
   const cur = r.current || {}, next = r.proposed || {}, cost = r.cost || {}, corridor = r.corridor || {};
   if (cost.error || r.costError) add('COST_CURRENCY', String(cost.error || r.costError));
   if (!(Number(cur.costPriceRub) > 2)) add('COST_MISSING', 'себестоимость должна быть больше 2 ₽');
-  if (!(Number(cur.basePrice) > 0) && !hasDraft) add('BASE_MISSING', 'базовая цена в WB не задана — сохраните свою цену или обновите данные из кабинета');
+  if (!(Number(cur.basePrice) > 0)) add('BASE_MISSING', 'базовая цена в WB не задана — обновите данные из кабинета');
   if (!(Number(corridor.min) > 0)) add('MIN_MISSING', 'Не задан минимальный порог цены');
   if (Number(corridor.min) > Number(corridor.max) + .01) add('CORRIDOR', 'Минимальная цена выше максимальной');
   if (Number(r.maxPrice) > 0 && finite(next.sellerPrice) && Number(next.sellerPrice) > Number(r.maxPrice) + .011) add('MAX_PRICE', 'Новая цена выше потолка карточки maxPrice ' + Math.round(Number(r.maxPrice)) + ' ₽');
@@ -128,7 +128,6 @@ function issuesFor(r, hasDraft = false) {
   if (!finite(next.profit) || !finite(next.marginPct)) add('ECONOMICS_INVALID', 'Невозможно достоверно рассчитать прибыль и маржу');
   if (r.boost && r.boost.blocked) add('BOOST_BLOCKED', r.boost.reason || 'Лесенка приостановлена: небезопасные условия');
   if (r.boost && r.boost.warning) add('BOOST_WARNING', r.boost.warning, 'warning');
-  if (r.boost && hasDraft) add('BOOST_MANUAL_PRICE', 'Для работы лесенки уберите ручной черновик цены или выберите другую стратегию');
   if (Number(next.profit) < -.005 && !r.negativeMarginAllowed) add('LOSS_GUARD', 'Новая цена даёт убыток при запрете отрицательной маржи');
   (r.warnings || []).forEach((message) => add('RP_WARNING', String(message), 'warning'));
   return issues;

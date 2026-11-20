@@ -72,7 +72,7 @@ window.App = (function () {
     }
   }
   function hasUnsavedProfileEdits() {
-    return (formDirty && !['repricer', 'strategies'].includes(S.state.view) && !(S.state.view === 'settings' && Views.settings.tab !== 'general')) || !!(window.LocalDrafts && LocalDrafts.hasWork()) || !!(S.state.priceEdits && S.state.priceEdits.size) ||
+    return (formDirty && !['repricer', 'strategies'].includes(S.state.view) && !(S.state.view === 'settings' && Views.settings.tab !== 'general')) || !!(window.LocalDrafts && LocalDrafts.hasWork()) ||
       !!(Views.repricer && Views.repricer.pendingEdits && Views.repricer.pendingEdits.size);
   }
 
@@ -179,7 +179,7 @@ window.App = (function () {
     const rows = S.getRows();
     const loss = rows.filter((r) => r.profit < 0).length;
     const noCogs = rows.filter((r) => !r.costPrice || r.cogsSource !== 'user').length;
-    setCount('prices', loss ? loss + ' убыт.' : '');
+    setCount('repricer', loss ? loss + ' убыт.' : '');
     setCount('costs', noCogs ? noCogs : '');
     setCount('promos', S.state.promos.length ? S.state.promos.length : '');
   }
@@ -207,8 +207,10 @@ window.App = (function () {
     if (switchingProfile) return;
     if (id === 'promos') Views.promos.tab = options && options.tab || (options && options.keepTab ? Views.promos.tab : 'calendar');
     if (id === 'settings') Views.settings.tab = options && options.tab || (options && options.keepTab ? Views.settings.tab : 'general');
-    const embedded = { prices: 'price-tools', economics: 'economics', costs: 'costs' };
+    const embedded = { economics: 'economics', costs: 'costs' };
     if (embedded[id]) { Views.repricer.tab = embedded[id]; id = 'repricer'; }
+    // раздела ручных цен больше нет: старые ссылки ведут в таблицу товаров репрайсера
+    else if (id === 'prices') { Views.repricer.tab = 'prices'; id = 'repricer'; }
     else if (id === 'repricer' && !(options && options.keepTab)) Views.repricer.tab = 'prices';
     const view = Views[id];
     if (!view) { toast('Раздел не найден: ' + id, 'err'); return; }
@@ -424,7 +426,6 @@ window.App = (function () {
     }
     if (window.LocalDrafts) LocalDrafts.discardAll();
     API.beginProfileChange();
-    if (Views.prices && Views.prices._clickTimer) { clearTimeout(Views.prices._clickTimer); Views.prices._clickTimer = null; }
     switchingProfile = true;
     const host = document.getElementById('view');
     host.inert = true;
@@ -466,7 +467,7 @@ window.App = (function () {
       host.appendChild(b);
       return b;
     };
-    if (id === 'repricer' || id === 'prices' || id === 'dashboard' || id === 'promos' || id === 'costs' || id === 'economics') {
+    if (id === 'repricer' || id === 'dashboard' || id === 'promos' || id === 'costs' || id === 'economics') {
       mk('Обновить из WB', '', async (e) => {
         e.target.disabled = true;
         try { await refreshAllData({ facts: true }); }
@@ -474,7 +475,7 @@ window.App = (function () {
         finally { e.target.disabled = false; }
       });
     }
-    if (id === 'economics') mk('Открыть цены', 'btn-ghost', () => go('prices'));
+    if (id === 'economics') mk('Открыть репрайсер', 'btn-ghost', () => go('repricer'));
     mk('Справка', 'btn-ghost', showHelp);
     // в веб-версии (tools/web-server.js) нужна видимая кнопка выхода: сессия живёт 12 часов,
     // а компьютер может быть чужим. В Electron и в dev-сервере кнопки нет — там нет и сессии.
@@ -494,9 +495,10 @@ window.App = (function () {
           <div class="alert info"><b>Шаг 1 — себестоимость.</b> Заполните её в разделе «Себестоимость»: вручную, массовой подстановкой
             по категории или импортом CSV (там же есть шаблон). Править параметры одного товара удобнее в репрайсере:
             двойной клик по строке → вкладка «Комиссии и параметры».</div>
-          <div class="alert info"><b>Шаг 2 — цены.</b> В разделе «Цены и скидки» выделите товары (или выберите правило отбора: убыточные, неликвид, низкая маржа),
-            задайте правило изменения — «−5% к итоговой цене», «цена под маржу 20%», «установить скидку 35%» — и нажмите «Рассчитать предпросмотр».
-            Приложение покажет старые и новые цены, прибыль, маржу и все риски. Только после подтверждения данные уходят в WB.</div>
+          <div class="alert info"><b>Шаг 2 — цены.</b> Цены ставит только репрайсер: задайте товару минимальный и максимальный
+            пороги (блоки «Мин цена (в акции)» и «Цена (вне акции)» в таблице «Товары») и стратегию. Первый расчёт поставит цену
+            на минимальный порог, дальше стратегия будет двигать её внутри коридора. Ручных цен в приложении нет — поэтому
+            в предложении и в истории всегда видна именно цена репрайсера.</div>
           <div class="alert info"><b>Шаг 3 — акции.</b> В разделе «Акции WB» виден календарь акций, требуемая скидка и расчёт: какие товары можно ввести
             безопасно, какие уйдут в минус. <b>Состав акции берётся из файла кабинета WB</b> — по API его нет (метод отвечает
             <span class="mono">HTTP 422</span>): кнопка «Перейти к акции» открывает кабинет, там «Перейти к товарам для акции» →
