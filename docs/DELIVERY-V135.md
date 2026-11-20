@@ -51,6 +51,10 @@
 
 ## Артефакты и версия
 
-- Версия проекта: 1.3.5; коммит и тег v1.3.5 — в конце этого отчёта.
-- Рядом с проектом: `wb-price-manager-v1.3.5.bundle` (полный Git),
-  `wb-price-manager-v1.3.5-source.zip` (файлы исходников), `wb-price-manager-v1.3.5.sha256`.
+- Версия проекта: 1.3.5; коммит `3c069747b3cc1846ee979ece9469e0899397c1bc`,
+  тег `v1.3.5` (push в GitHub подтверждён).
+- Рядом с проектом: `wb-price-manager-v1.3.5.bundle` (полный Git,
+  SHA-256 `6f58b1794b2f920b7265686adfacacf36286d8c3d2bbfc3cc74306246386e739`),
+  `wb-price-manager-v1.3.5-source.zip` (142 записи,
+  SHA-256 `09c6608a9b873fd37bf203e3be01c1cb51231a4c906c7ef4b895e53c9d521d19`),
+  `wb-price-manager-v1.3.5.sha256`.
