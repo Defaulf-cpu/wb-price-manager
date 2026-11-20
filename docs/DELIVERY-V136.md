@@ -48,3 +48,12 @@
 `npm test` — exit 0 (2046 проверок).
 
 Исправлены по ходу: триггер SSE в `web-server-flow` (слово «готово» из `repricer:item-configs:save` убрано вместе с ручными черновиками), стаб `prices:draft-save` в `local-drafts-flow`, дублированный блок в `uitest`. Версия 1.3.6 во всех местах (`tools/version` 296/296).
+
+## Артефакты
+
+- Коммит `002b5d6`, тег `v1.3.6`, отправлены в `origin/main`.
+- Рядом с проектом: `wb-price-manager-v1.3.6.bundle` (полный Git,
+  SHA-256 `a008d7bc5be008b4e297e923a60b1dc630ca22590961e1c44472f52e69c2c1af`),
+  `wb-price-manager-v1.3.6-source.zip` (141 запись,
+  SHA-256 `da534bfb4ec9e68d2ae99277dff943c0351c035edfc25d0a7cb3839cf9456678`),
+  `wb-price-manager-v1.3.6.sha256`.
