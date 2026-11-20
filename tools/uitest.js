@@ -107,7 +107,7 @@ async function run() {
   // Проверки и размер страницы не меняются, GC нужен для CI с 2 ГБ памяти.
   let waitCount = 0;
   const wait = (ms) => new Promise((r) => setTimeout(() => {
-    if (++waitCount % 8 === 0 && global.gc) global.gc();
+    if (++waitCount % 2 === 0 && global.gc) global.gc();
     r();
   }, ms));
 

@@ -585,7 +585,7 @@ Views.repricer = {
     { id: 'status', title: 'Статус', group: 'next' },
     { id: 'why', title: '', always: true, group: 'next' },
     // ── блок «Мин цена (в акции)» ──
-    { id: 'floor', title: 'Мин цена / базовая', group: 'minpromo' },
+    { id: 'floor', title: 'Мин цена (в акции)', group: 'minpromo' },
     { id: 'promoMin', title: 'Мин цена в акции', group: 'minpromo' },
     { id: 'promos', title: 'Акции', group: 'minpromo' },
     // ── блок «Цена (вне акции)» ──
@@ -941,6 +941,96 @@ Views.repricer = {
     else if (!p.inPromo) out.push('товар вне акции');
     if (U.num(p.holdDiscountMax) > 0) out.push(`удержание: скидка ниже ${U.pct(p.holdDiscountMax, 0)}`);
     return `<div class="tiny rp-wrap">${out.join(' · ')}</div>`;
+  },
+
+  /**
+   * Прибыль и Маржа при произвольной цене — линейно из слагаемых результата:
+   * profit = цена × (1 − %расходов) − постоянные расходы. Точно по структуре
+   * юнит-экономики и без тяжёлого пересчёта параметров по каждой строке.
+   */
+  blockUnit(r, price) {
+    const s = (r.cost && (r.cost.next || r.cost.now)) || {};
+    const pct = U.num(s.pctCosts), fixed = U.num(s.fixedCosts);
+    const profit = price * (1 - pct / 100) - fixed;
+    return { profit, marginPct: price > 0 ? (profit / price) * 100 : 0 };
+  },
+
+  /**
+   * Блок «Мин цена (в акции)» как в INDEEPA: слева расчётные значения,
+   * справа ввод цифрами. Расчётная мин. цена — действующий пол коридора
+   * из результата пересчёта; при вводе слева всё пересчитывается сразу.
+   */
+  minPriceBlockHtml(r) {
+    const cfg = this.rowConfig(r.nmID);
+    const spp = U.num((r.wallet || {}).sppPct);
+    const floor = U.num(r.corridor && r.corridor.min);
+    const unit = floor > 0 ? this.blockUnit(r, floor) : null;
+    const v = (x) => x === undefined || x === null || x === '' ? '' : x;
+    return `<div class="rp-minblock" data-block="min"><div class="mb-grid">
+      <span class="mb-calc">Расчётная мин. цена, ₽ <b class="mb-min-calc">${floor > 0 ? U.money(floor) : 'не задан'}</b></span>
+      <label class="mb-inp">Мин. цена, ₽ *<input type="number" step="1" class="num rp-minprice mb-min-price" data-nm="${r.nmID}" value="${v(cfg.minPrice)}" placeholder="не ниже этой цены" /></label>
+      <span class="mb-calc">Расчётная мин. цена с СПП, ₽ <b class="mb-min-spp">${floor > 0 ? U.money(floor * (1 - spp / 100)) : '—'}</b></span>
+      <label class="mb-inp">Мин. марж., % *<input type="number" step="0.5" class="num rp-minmarginpct mb-min-mpct" data-nm="${r.nmID}" value="${v(cfg.minMarginPct)}" placeholder="пол по марже" /></label>
+      <span class="mb-calc">Марж. расчётной мин. цены, % <b class="mb-min-mpct-val">${unit ? U.pct(unit.marginPct) : '—'}</b></span>
+      <label class="mb-inp">Мин. марж., ₽ *<input type="number" step="1" class="num rp-minmarginrub mb-min-mrub" data-nm="${r.nmID}" value="${v(cfg.minMarginRub)}" placeholder="пол по прибыли" /></label>
+      <span class="mb-calc">Марж. расчётной мин. цены, ₽ <b class="mb-min-mrub-val">${unit ? U.money(unit.profit) : '—'}</b></span>
+      <span class="mb-calc">Прогнозный индекс мин. цены <b>Без индекса</b></span>
+    </div></div>`;
+  },
+
+  /** Блок «Цена (вне акции)» как в INDEEPA: обычная цена товара и её Маржа. */
+  basePriceBlockHtml(r) {
+    const cfg = this.rowConfig(r.nmID);
+    const spp = U.num((r.wallet || {}).sppPct);
+    const base = U.num(cfg.basePriceTarget) > 0 ? U.num(cfg.basePriceTarget) : U.num(r.current && r.current.sellerPrice);
+    const unit = base > 0 ? this.blockUnit(r, base) : null;
+    const v = (x) => x === undefined || x === null || x === '' ? '' : x;
+    const restore = this.restoreCellHtml(r);
+    return `<div class="rp-baseblock" data-block="base"><div class="mb-grid">
+      <span class="mb-calc">Расчётная базовая цена, ₽ <b class="mb-base-calc">${base > 0 ? U.money(base) : '—'}</b></span>
+      <label class="mb-inp">Базовая цена, ₽ *<input type="number" step="1" class="num rp-baseprice mb-base-price" data-nm="${r.nmID}" value="${v(cfg.basePriceTarget)}" placeholder="обычная цена" /></label>
+      <span class="mb-calc">Расчётная базовая цена с СПП, ₽ <b class="mb-base-spp">${base > 0 ? U.money(base * (1 - spp / 100)) : '—'}</b></span>
+      <label class="mb-inp">Базовая марж., % *<input type="number" step="0.5" class="num rp-targetmarginpct mb-base-mpct" data-nm="${r.nmID}" value="${v(cfg.targetMarginPct)}" placeholder="целевая маржа" /></label>
+      <span class="mb-calc">Марж. расчётной базовой цены, % <b class="mb-base-mpct-val">${unit ? U.pct(unit.marginPct) : '—'}</b></span>
+      <label class="mb-inp">Базовая марж., ₽ *<input type="number" step="1" class="num rp-targetmarginrub mb-base-mrub" data-nm="${r.nmID}" value="${v(cfg.targetMarginRub)}" placeholder="прибыль с единицы" /></label>
+      <span class="mb-calc">Марж. расчётной базовой цены, ₽ <b class="mb-base-mrub-val">${unit ? U.money(unit.profit) : '—'}</b></span>
+      <span class="mb-calc">Прогнозный индекс базовой цены <b>Без индекса</b></span>
+    </div><div class="tiny muted" style="margin-top:4px">${restore}</div></div>`;
+  },
+
+  /** Живой пересчёт левых значений блоков цены при вводе справа (без сохранения). */
+  updatePriceBlock(inp) {
+    const wrap = inp.closest('.rp-minblock, .rp-baseblock');
+    if (!wrap) return;
+    const r = this.results.find((x) => String(x.nmID) === String(inp.getAttribute('data-nm')));
+    if (!r) return;
+    clearTimeout(wrap._mbTimer);
+    wrap._mbTimer = setTimeout(() => {
+      const spp = U.num((r.wallet || {}).sppPct);
+      const getVal = (cls) => { const el = wrap.querySelector(cls); return el && el.value !== '' ? U.num(el.value) : null; };
+      const priceFor = (get, target) => {
+        let lo = 1, hi = Math.max(100000, U.num(r.current.sellerPrice) * 4);
+        if (get(this.blockUnit(r, hi)) < target) return null;
+        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (get(this.blockUnit(r, mid)) >= target) hi = mid; else lo = mid; }
+        return hi;
+      };
+      const set = (cls, text) => { const el = wrap.querySelector(cls); if (el) el.textContent = text; };
+      if (wrap.dataset.block === 'min') {
+        const parts = [getVal('.mb-min-price'), getVal('.mb-min-mpct') > 0 ? priceFor((u) => u.marginPct, getVal('.mb-min-mpct')) : null, getVal('.mb-min-mrub') > 0 ? priceFor((u) => u.profit, getVal('.mb-min-mrub')) : null].filter((x) => x > 0);
+        const floor = parts.length ? Math.max(...parts) : null;
+        set('.mb-min-calc', floor ? U.money(floor) : 'не задан');
+        set('.mb-min-spp', floor ? U.money(floor * (1 - spp / 100)) : '—');
+        set('.mb-min-mpct-val', floor ? U.pct(this.blockUnit(r, floor).marginPct) : '—');
+        set('.mb-min-mrub-val', floor ? U.money(this.blockUnit(r, floor).profit) : '—');
+      } else {
+        const parts = [getVal('.mb-base-price'), getVal('.mb-base-mpct') > 0 ? priceFor((u) => u.marginPct, getVal('.mb-base-mpct')) : null, getVal('.mb-base-mrub') > 0 ? priceFor((u) => u.profit, getVal('.mb-base-mrub')) : null].filter((x) => x > 0);
+        const base = parts.length ? Math.max(...parts) : U.num(r.current.sellerPrice);
+        set('.mb-base-calc', base ? U.money(base) : '—');
+        set('.mb-base-spp', base ? U.money(base * (1 - spp / 100)) : '—');
+        set('.mb-base-mpct-val', base ? U.pct(this.blockUnit(r, base).marginPct) : '—');
+        set('.mb-base-mrub-val', base ? U.money(this.blockUnit(r, base).profit) : '—');
+      }
+    }, 120);
   },
 
   /**
@@ -1927,17 +2017,11 @@ Views.repricer = {
           } },
         { colId: 'why', title: '', render: (r) => `<button class="btn btn-xs btn-ghost" data-why="${r.nmID}" data-dirty-nm="${r.nmID}">почему</button>` },
         // ══ блок «Мин цена (в акции)» ══
-        { colId: 'floor', title: 'Мин цена / базовая', num: true, render: (r) => {
-            const cfg = this.rowConfig(r.nmID);
-            return `<input type="number" step="10" class="num rp-minprice" data-nm="${r.nmID}" value="${cfg.minPrice || ''}"
-                placeholder="${U.num(r.corridor.min)}" style="width:96px" title="Минимальная цена: ниже неё репрайсер не опустится" />
-              <div><input type="number" step="10" min="0" class="num rp-baseprice" data-nm="${r.nmID}" value="${cfg.basePriceTarget || ''}" placeholder="${U.num(r.current.basePrice)}" style="width:96px" title="Базовая цена — верхний порог" /></div>
-              <div class="tiny muted">Мин цена / Базовая цена<br>${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</div>`;
-          } },
+        { colId: 'floor', title: 'Мин цена (в акции)', num: true, render: (r) => this.minPriceBlockHtml(r) },
         { colId: 'promoMin', title: 'Мин цена в акции', num: true, render: (r) => this.promoMinCellHtml(r) },
         { colId: 'promos', title: 'Акции', render: (r) => this.promoCellHtml(r) },
         // ══ блок «Цена (вне акции)» ══
-        { colId: 'restore', title: 'Цена вне акции', num: true, render: (r) => this.restoreCellHtml(r) },
+        { colId: 'restore', title: 'Цена (вне акции)', num: true, render: (r) => this.basePriceBlockHtml(r) },
         { colId: 'corridor', title: 'Коридор', num: true, render: (r) => `<span class="tiny muted">${U.money(r.corridor.min)} … ${U.money(r.corridor.max)}</span>` },
         // ══ блок «Себестоимость и экономика» ══
         { colId: 'cost', title: 'Себестоимость', num: true, render: (r) => this.costCellHtml(r) },
@@ -2022,8 +2106,9 @@ Views.repricer = {
      * Изменения КОПЯТСЯ и применяются одной кнопкой «Сохранить» (как «Отменить/Сохранить»
      * в INDEEPA): один пересчёт на пачку правок вместо пересчёта на каждую ячейку.
      */
-    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-baseprice, .rp-plan, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku, .rp-use-sku, .rp-off-logic, .rp-allowsend, .rp-tag').forEach((inp) => {
+    host.querySelectorAll('.rp-strategy, .rp-minprice, .rp-baseprice, .rp-minmarginpct, .rp-minmarginrub, .rp-targetmarginpct, .rp-targetmarginrub, .rp-plan, .rp-off-mode, .rp-off-val, .rp-off-type, .rp-off-sku, .rp-use-sku, .rp-off-logic, .rp-allowsend, .rp-tag').forEach((inp) => {
       inp.onclick = (e) => e.stopPropagation();
+      inp.oninput = () => this.updatePriceBlock(inp);
       inp.onchange = () => {
         const nm = inp.getAttribute('data-nm');
         const patch = {};
@@ -2038,6 +2123,14 @@ Views.repricer = {
         else if (inp.classList.contains('rp-minprice')) {
           const v = U.num(inp.value);
           patch.minPrice = v > 0 ? v : null;
+        } else if (inp.classList.contains('rp-minmarginpct')) {
+          patch.minMarginPct = inp.value === '' ? null : U.num(inp.value);
+        } else if (inp.classList.contains('rp-minmarginrub')) {
+          patch.minMarginRub = inp.value === '' ? null : U.num(inp.value);
+        } else if (inp.classList.contains('rp-targetmarginpct')) {
+          patch.targetMarginPct = inp.value === '' ? null : U.num(inp.value);
+        } else if (inp.classList.contains('rp-targetmarginrub')) {
+          patch.targetMarginRub = inp.value === '' ? null : U.num(inp.value);
         } else if (inp.classList.contains('rp-plan')) {
           patch.planQtyMonth = Math.max(0, Math.round(U.num(inp.value)));
         } else if (inp.classList.contains('rp-baseprice')) {
