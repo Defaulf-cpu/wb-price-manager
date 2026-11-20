@@ -127,7 +127,7 @@ Views.costs = {
 
     const grid = UI.table({
       columns: [
-        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)} · ${U.esc(r.category)}</span></div>` },
+        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${UI.idsPair(r)} · ${U.esc(r.category)}</span></div>` },
         { title: 'Цена WB', num: true, render: (r) => U.money(r.sellerPrice) },
         { title: 'Себестоимость / валюта', num: true, render: (r) => {
           const box = document.createElement('div'); box.appendChild(input(r, 'costEntered', val(r, 'costEntered')));
@@ -260,7 +260,7 @@ Views.costs = {
         <input type="number" step="${step || 'any'}" class="num" id="ce-${key}" value="${(key === 'costPriceRub' ? shownCost : c[key]) === undefined || (key === 'costPriceRub' ? shownCost : c[key]) === null ? '' : (key === 'costPriceRub' ? shownCost : c[key])}" placeholder="${hint || ''}" />
       </label>`;
     body.innerHTML = `
-      <div class="row wrap" style="margin-bottom:12px">${UI.badge('нм-код ' + nmID)} ${UI.badge(r.vendorCode)} ${UI.badge(r.category)}</div>
+      <div class="row wrap" style="margin-bottom:12px"><span class="badge">нм-код ${UI.idValue(nmID, { label: 'артикул WB (нм-код)', wb: true })}</span> <span class="badge">${UI.idValue(r.vendorCode, { label: 'артикул поставщика' })}</span> ${UI.badge(r.category)}</div>
       <div class="grid g2" style="gap:10px">
         ${fld('costPriceRub', 'Себестоимость (закупка) в выбранной валюте', 'например 620')}
         <label class="field">Валюта закупки<select id="ce-currency">${[...new Set(['RUB', ...Object.keys(st.settings.costRates || {}), c.currency || 'RUB'])].map((code) => `<option value="${U.esc(code)}" ${code === (c.currency || 'RUB') ? 'selected' : ''}>${U.esc(code)}</option>`).join('')}</select></label>

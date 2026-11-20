@@ -192,6 +192,17 @@ select { cursor: pointer; }
   background: var(--bg-3); color: var(--muted); border: 1px solid var(--line);
   white-space: nowrap;
 }
+/* Кнопки рядом с артикулом/SKU/баркодом: появляются при наведении на значение */
+.idline { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; }
+.idbtn {
+  opacity: 0; border: 1px solid transparent; background: transparent; color: var(--accent);
+  cursor: pointer; font-size: 11px; line-height: 1; padding: 1px 3px; border-radius: 4px;
+  transition: opacity .12s ease, background .12s ease, border-color .12s ease;
+}
+.idline:hover .idbtn, .idline:focus-within .idbtn, .idbtn:focus-visible { opacity: 1; }
+.idbtn:hover { background: var(--accent-soft); border-color: rgba(160,60,255,.35); }
+.idbtn.copied { opacity: 1; color: #35c26e; }
+@media (hover: none) { .idbtn { opacity: .55; } }
 .badge-demo { background: rgba(245,166,35,.15); color: #f7c56b; border-color: rgba(245,166,35,.35); }
 .badge-live { background: rgba(46,204,113,.15); color: #7ee2a8; border-color: rgba(46,204,113,.35); }
 .badge-ok { background: rgba(46,204,113,.14); color: #7ee2a8; border-color: rgba(46,204,113,.3); }

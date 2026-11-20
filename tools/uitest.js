@@ -189,6 +189,42 @@ async function run() {
   const lossRows = rows.filter((r) => r.profit < 0);
   check('в демо-магазине есть убыточные товары', lossRows.length > 0, lossRows.length + ' шт');
 
+  // ── копирование артикула/SKU и переход в карточку WB ──
+  {
+    check('идентификаторы: UI строит прямую ссылку на карточку WB',
+      window.UI.wbCardUrl(1316609739) === 'https://www.wildberries.ru/catalog/1316609739/detail.aspx');
+    const copyBtn = doc.querySelector('#rp-grid [data-copy-value]');
+    const wbBtn = doc.querySelector('#rp-grid [data-wb-open]');
+    check('идентификаторы: в таблице товаров есть кнопки копирования и перехода на WB', !!copyBtn && !!wbBtn,
+      copyBtn ? 'копируется ' + copyBtn.dataset.copyValue : 'нет кнопок');
+    check('идентификаторы: кнопка ↗ относится к тому же нм-коду, что и кнопка копирования',
+      !!wbBtn && !!copyBtn && wbBtn.dataset.wbOpen === copyBtn.dataset.copyValue,
+      wbBtn ? 'nm ' + wbBtn.dataset.wbOpen : 'нет кнопки');
+    let clipOk = false, copied = null;
+    try {
+      Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (t) => { copied = t; } } });
+      clipOk = true;
+    } catch (e) { /* в jsdom нет буфера — клик не проверяем */ }
+    if (copyBtn && clipOk) {
+      copyBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      await wait(150);
+      check('идентификаторы: клик копирует артикул WB в буфер обмена', copied === copyBtn.dataset.copyValue, String(copied));
+      check('идентификаторы: после копирования кнопка показывает галочку', copyBtn.textContent === '✓', copyBtn.textContent);
+    }
+    if (wbBtn) {
+      let opened = null;
+      const origOpen = window.API.openExternal;
+      window.API.openExternal = (u) => { opened = u; };
+      wbBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      await wait(50);
+      window.API.openExternal = origOpen;
+      check('идентификаторы: кнопка ↗ открывает карточку товара на витрине WB',
+        opened === 'https://www.wildberries.ru/catalog/' + wbBtn.dataset.wbOpen + '/detail.aspx', String(opened));
+    }
+    const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+    check('идентификаторы: кнопки появляются при наведении на артикул', /\.idline:hover \.idbtn/.test(cssSrc) && /\.idbtn/.test(cssSrc));
+  }
+
   // пересчёт: первый расчёт ставит цены на минимальные пороги, дальше — стратегии
   const calcBtn0 = doc.querySelector('#rp-calc');
   check('кнопка пересчёта на месте', !!calcBtn0);

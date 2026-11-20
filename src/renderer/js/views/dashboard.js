@@ -181,7 +181,7 @@ Views.dashboard = {
       return `<table class="grid-table">
         <thead><tr><th>Товар</th><th class="num">Цена</th><th class="num">Прибыль/шт</th><th class="num">Маржа</th><th class="num">Прибыль 30 дн</th></tr></thead>
         <tbody>${list.map((r) => `<tr>
-          <td><div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)}</span></div></td>
+          <td><div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${UI.idsPair(r)}</span></div></td>
           <td class="num">${U.money(r.sellerPrice)}</td>
           <td class="num ${U.profitClass(r.profit)}">${U.money(r.profit)}</td>
           <td class="num ${U.profitClass(r.margin)}">${U.pct(r.margin)}</td>

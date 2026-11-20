@@ -386,5 +386,94 @@ window.UI = (function () {
     return `<input type="number" class="num" value="${value === undefined || value === null || value === '' ? '' : value}" step="any" ${attrs || ''} />`;
   }
 
-  return { toast, modal, confirmDialog, loading, table, badge, flagBadges, kv, bar, moneyInput, tabs };
+  // ─────────── Идентификаторы товара: копирование и карточка WB ───────────
+  /** Прямая ссылка на карточку товара на витрине WB по нм-коду. */
+  function wbCardUrl(nmID) {
+    return 'https://www.wildberries.ru/catalog/' + encodeURIComponent(String(nmID)) + '/detail.aspx';
+  }
+
+  /** Копирование в буфер: Clipboard API, а для веб-режима по http — запасной путь через textarea. */
+  async function copyText(value) {
+    const text = String(value === undefined || value === null ? '' : value);
+    if (!text) return false;
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* запасной путь ниже */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return !!ok;
+    } catch (e) { return false; }
+  }
+
+  function copyButton(value, label) {
+    if (value === undefined || value === null || String(value) === '') return '';
+    const name = label || 'значение';
+    return `<button type="button" class="idbtn" data-copy-value="${esc(value)}" data-copy-label="${esc(name)}" title="Копировать: ${esc(name)}" aria-label="Копировать: ${esc(name)}">⧉</button>`;
+  }
+
+  function wbButton(nmID) {
+    if (nmID === undefined || nmID === null || String(nmID) === '') return '';
+    return `<button type="button" class="idbtn" data-wb-open="${esc(nmID)}" title="Открыть карточку товара на Wildberries" aria-label="Открыть карточку товара на Wildberries">↗</button>`;
+  }
+
+  /**
+   * Значение идентификатора с кнопками, которые появляются при наведении:
+   * скопировать, а при wb:true — ещё и перейти в карточку товара на WB.
+   */
+  function idValue(value, opts) {
+    const o = opts || {};
+    if (value === undefined || value === null || String(value) === '') return '<span class="muted">—</span>';
+    return `<span class="idline"><span class="idval">${esc(value)}</span>${copyButton(value, o.label)}${o.wb ? wbButton(value) : ''}</span>`;
+  }
+
+  /** Компактная пара «артикул WB · артикул поставщика» для таблиц товаров. */
+  function idsPair(row) {
+    const r = row || {};
+    const parts = [];
+    if (r.nmID !== undefined && r.nmID !== null && String(r.nmID) !== '') parts.push(idValue(r.nmID, { label: 'артикул WB (нм-код)', wb: true }));
+    if (r.vendorCode) parts.push(idValue(r.vendorCode, { label: 'артикул поставщика' }));
+    return parts.join('<span class="muted"> · </span>');
+  }
+
+  // Один общий обработчик на всё приложение (перехват — чтобы клик по кнопке
+  // не открывал карточку товара и не срабатывал клик по строке таблицы).
+  if (typeof document !== 'undefined' && document.addEventListener && !window.__idActionsBound) {
+    window.__idActionsBound = true;
+    document.addEventListener('click', async (event) => {
+      const t = event.target;
+      if (!t || !t.closest) return;
+      const cp = t.closest('[data-copy-value]');
+      if (cp) {
+        event.preventDefault();
+        event.stopPropagation();
+        const ok = await copyText(cp.dataset.copyValue);
+        if (ok) {
+          const old = cp.textContent;
+          cp.textContent = '✓';
+          cp.classList.add('copied');
+          setTimeout(() => { cp.textContent = old; cp.classList.remove('copied'); }, 1200);
+          toast('Скопировано: ' + cp.dataset.copyValue + (cp.dataset.copyLabel ? ' (' + cp.dataset.copyLabel + ')' : ''), 'ok');
+        } else {
+          toast('Не удалось скопировать автоматически — выделите значение вручную.', 'warn');
+        }
+        return;
+      }
+      const wb = t.closest('[data-wb-open]');
+      if (wb) {
+        event.preventDefault();
+        event.stopPropagation();
+        const url = wbCardUrl(wb.dataset.wbOpen);
+        if (window.API && window.API.openExternal) window.API.openExternal(url);
+        else window.open(url, '_blank', 'noopener');
+      }
+    }, true);
+  }
+
+  return { toast, modal, confirmDialog, loading, table, badge, flagBadges, kv, bar, moneyInput, tabs, wbCardUrl, copyText, copyButton, wbButton, idValue, idsPair };
 })();

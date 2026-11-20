@@ -428,7 +428,7 @@ Views.economics = {
       function deltaTable(list) {
         return `<table class="grid-table"><thead><tr><th>Товар</th><th class="num">Цена</th><th class="num">Скидка</th><th class="num">Прибыль/шт</th><th class="num">Δ за 30 дн</th></tr></thead>
           <tbody>${list.map((x) => `<tr>
-            <td><div class="rowtitle"><b class="trunc">${U.esc(x.r.title)}</b><span class="tiny muted">${x.r.nmID}</span></div></td>
+            <td><div class="rowtitle"><b class="trunc">${U.esc(x.r.title)}</b><span class="tiny muted">${UI.idValue(x.r.nmID, { label: 'артикул WB (нм-код)', wb: true })}</span></div></td>
             <td class="num">${U.money(x.r.sellerPrice)} → <b>${U.money(x.next.revenue)}</b></td>
             <td class="num">${U.pct(x.r.discount, 0)} → ${U.pct(x.next.discountPct, 0)}</td>
             <td class="num ${U.profitClass(x.next.profit)}">${U.money(x.next.profit)}</td>

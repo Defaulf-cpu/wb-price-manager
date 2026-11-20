@@ -849,8 +849,8 @@ Views.repricer = {
     return `<div class="rp-product-block">
       <div class="rp-product-identity">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
         <div class="rowtitle"><button type="button" class="rp-product-title" data-item-card="${r.nmID}" title="${U.esc(title)}">${U.esc(title)}</button>
-          <span class="tiny"><span class="muted">SKU / nmID</span> <b>${r.nmID}</b></span>
-          <span class="tiny"><span class="muted">Арт.</span> ${U.esc(r.vendorCode || item.vendorCode || '—')}</span>
+          <span class="tiny"><span class="muted">SKU / nmID</span> <b>${UI.idValue(r.nmID, { label: 'артикул WB (нм-код)', wb: true })}</b></span>
+          <span class="tiny"><span class="muted">Арт.</span> ${UI.idValue(r.vendorCode || item.vendorCode || '', { label: 'артикул поставщика' })}</span>
           <span class="tiny muted">${U.esc(item.brand || card.brand || 'Бренд не указан')}</span></div></div>
       <div class="rp-product-barcode tiny"><span class="muted">Баркод</span> ${this.barcodeCellHtml(r)}</div>
       <div class="rp-product-controls"><span data-field-id="allowSend">${this.sendControlHtml(r)}</span><span data-field-id="tag">${this.tagControlHtml(r)}</span></div>
@@ -1970,7 +1970,7 @@ Views.repricer = {
         { colId: 'item', title: 'Товар', cls: 'rp-product', render: (r) => this.productCellHtml(r) },
         { colId: 'vendorCode', title: 'Артикул продавца', render: (r) => {
             const item = this.itemsByNm.get(String(r.nmID)) || {};
-            return `<div class="tiny rp-wrap"><b>${U.esc(r.vendorCode || item.vendorCode || '—')}</b> · нм-код ${r.nmID}${item.brand ? ' · ' + U.esc(item.brand) : ''}</div>`;
+            return `<div class="tiny rp-wrap"><b>${UI.idValue(r.vendorCode || item.vendorCode || '', { label: 'артикул поставщика' })}</b> · нм-код ${UI.idValue(r.nmID, { label: 'артикул WB (нм-код)', wb: true })}${item.brand ? ' · ' + U.esc(item.brand) : ''}</div>`;
           } },
         { colId: 'barcode', title: 'Баркод', render: (r) => this.barcodeCellHtml(r) },
         { colId: 'allowSend', title: 'Отправка в WB', render: (r) => this.sendControlHtml(r) },
@@ -2965,7 +2965,7 @@ Views.repricer = {
             const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
             const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
             return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
-              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
+              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${UI.idValue(r.nmID, { label: 'артикул WB (нм-код)', wb: true })} · ${UI.idValue(r.vendorCode, { label: 'артикул поставщика' })}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
           } },
         { title: 'Цена сейчас', num: true, render: (r) => `${U.money(r.current.sellerPrice)}<div class="tiny muted">маржа ${U.pct(r.current.marginPct)}</div>` },
         { title: 'Решения по акциям', render: (r) => (r.actions || []).slice(0, 3).map((a) =>
@@ -3311,7 +3311,7 @@ Views.repricer = {
 
     const grid = UI.table({
       columns: [
-        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)} · ${U.esc(r.category)}</span></div>` },
+        { title: 'Товар', render: (r) => `<div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">${UI.idsPair(r)} · ${U.esc(r.category)}</span></div>` },
         { title: 'Стратегия', render: (r) => sel(r, (configs[String(r.nmID)] || {}).strategy) },
         { title: 'Цена сейчас', num: true, render: (r) => `${U.money(r.sellerPrice)}<div class="tiny muted">база ${U.money(r.basePrice)} · скидка ${U.pct(r.discount, 0)}</div>` },
         { title: 'Себестоимость', num: true, render: (r) => {
@@ -3706,7 +3706,7 @@ Views.repricer = {
             const raw = item.photo || item.photoUrl || (item.photos && item.photos[0]);
             const photo = typeof raw === 'string' ? raw : raw && (raw.small || raw.big);
             return `<div class="row">${photo && /^https:\/\//i.test(photo) ? `<img class="rp-photo" src="${U.esc(photo)}" loading="lazy" alt="" />` : '<span class="rp-photo muted" aria-label="Нет фото">▧</span>'}
-              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${r.nmID} · ${U.esc(r.vendorCode)}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
+              <div class="rowtitle"><b class="trunc">${U.esc(r.title)}</b><span class="tiny muted">SKU ${UI.idValue(r.nmID, { label: 'артикул WB (нм-код)', wb: true })} · ${UI.idValue(r.vendorCode, { label: 'артикул поставщика' })}</span><span class="tiny muted">${U.esc(item.brand || 'Бренд не указан')}</span></div></div>`;
           } },
           { title: 'Ваша цена (покупателю)', num: true, render: (r) => U.money(r.buyerPrice) },
           { title: 'Конкурентов', num: true, render: (r) => (comps[String(r.nmID)] || []).length },

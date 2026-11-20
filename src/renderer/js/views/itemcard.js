@@ -79,8 +79,8 @@ Views.itemcard = {
     const watchBadge = U.num((d.facts || {}).sppWatchSamples) > 0 ? U.num((d.facts || {}).sppWatchSamples) + ' замеров' : '';
 
     const badges = [
-      UI.badge('нм-код ' + it.nmID),
-      it.vendorCode ? UI.badge(it.vendorCode) : '',
+      `<span class="badge">нм-код ${UI.idValue(it.nmID, { label: 'артикул WB (нм-код)', wb: true })}</span>`,
+      it.vendorCode ? `<span class="badge">${UI.idValue(it.vendorCode, { label: 'артикул поставщика' })}</span>` : '',
       (it.categoryName || it.subjectName) ? UI.badge(it.categoryName || it.subjectName) : '',
       d.demo ? UI.badge('демо-данные', 'demo') : UI.badge('данные WB API', 'live'),
       prop ? UI.badge('есть предложение репрайсера', 'accent') : ''

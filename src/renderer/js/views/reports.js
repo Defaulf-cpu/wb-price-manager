@@ -413,7 +413,7 @@ Views.reports = {
       columns: [
         { title: 'Товар', key: 'title', width: '280px', render: (r) => `<div class="rowtitle">
             <b class="trunc" title="${U.esc(r.title)}">${U.esc(r.title || '—')}</b>
-            <span class="tiny muted">${r.nmID} · ${U.esc(r.vendorCode)}</span></div>` },
+            <span class="tiny muted">${UI.idsPair(r)}</span></div>` },
         { title: 'Продажи', key: 'salesQty', num: true, render: (r) => U.fmt(r.salesQty) },
         { title: 'Возвр. %', key: 'returnSharePct', num: true, render: (r) => r.returnSharePct ? `<span class="${r.returnSharePct > 15 ? 'warnc' : 'muted'}">${U.pct(r.returnSharePct, 0)}</span>` : '—' },
         { title: 'Выручка', key: 'revenue', num: true, render: (r) => U.money(r.revenue) },
