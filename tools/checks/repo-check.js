@@ -61,7 +61,6 @@ const REQUIRED = [
   'src/renderer/js/ui.js',
   'src/renderer/js/util.js',
   'src/renderer/js/views/dashboard.js',
-  'src/renderer/js/views/prices.js',
   'src/renderer/js/views/repricer.js',
   'src/renderer/js/views/itemcard.js',
   'src/renderer/js/views/promos.js',
@@ -123,6 +122,19 @@ const notLinked = REQUIRED
   .filter((f) => !html.includes('./' + f.replace('src/renderer/', '')));
 check('index.html подключает все скрипты', notLinked.length === 0,
   notLinked.length ? 'не подключены: ' + notLinked.join(', ') : 'все подключены');
+
+// 4б) файлов, удалённых из проекта в новых версиях, на диске быть не должно.
+// Если такой файл есть — новую версию распаковали поверх старой папки, и копия
+// рассинхронизирована: индекс уже файл не подключает, а он всё ещё лежит рядом.
+const REMOVED_FILES = [
+  'src/renderer/js/views/prices.js', // раздел ручных цен удалён в v1.3.6
+  'src/renderer/js/rules.js' // обработчики ручных цен удалены в v1.3.6
+];
+const staleFiles = REMOVED_FILES.filter((f) => fs.existsSync(path.join(ROOT, f)));
+check('нет устаревших файлов от старых версий', staleFiles.length === 0,
+  staleFiles.length
+    ? 'остались от старой версии, удалите их (или распакуйте проект в новую пустую папку): ' + staleFiles.join(', ')
+    : 'чисто');
 
 // 5) синтаксис каждого JS-файла
 const jsFiles = [];
@@ -193,6 +205,11 @@ console.log('\nВсего проверок: ' + (pass + fail) + ', пройде�
 if (problems.length) {
   console.log('\nЧто не так:');
   problems.forEach((p) => console.log('  ✗ ' + p));
+  if (staleFiles.length) {
+    console.log('\nКак починить: удалите устаревшие файлы из списка выше прямо в этой папке —');
+    console.log('они остались от старой версии. Данные кабинета хранятся вне папки проекта');
+    console.log('(в %APPDATA%), поэтому удаление безопасно. Затем повторите запуск.');
+  }
   console.log('\nКак починить: скопируйте проект заново ЦЕЛИКОМ (или git clone из репозитория),');
   console.log('затем npm install и npm test. Частичное копирование приводит к рассинхрону');
   console.log('electron/preload.js и electron/service.js — интерфейс сообщает «Неизвестный канал».');
