@@ -14,6 +14,9 @@ const { APP_NAME } = require('./config');
 let win = null;
 let service = null;
 let updateManager = null;
+// События интерфейсу до загрузки окна складываем в очередь (см. send ниже).
+let rendererReady = false;
+const pendingSends = [];
 
 const DEV = process.argv.includes('--dev');
 
@@ -134,7 +137,9 @@ function createWindow() {
   win.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith('file://')) { e.preventDefault(); openExternalSafe(url); }
   });
-  win.on('closed', () => { win = null; });
+  win.webContents.on('did-start-loading', () => { rendererReady = false; });
+  win.webContents.on('did-finish-load', () => { rendererReady = true; flushSends(); });
+  win.on('closed', () => { rendererReady = false; pendingSends.length = 0; win = null; });
 }
 
 // Изолированное окно без доступа к Node и кукам основного окна. Не обходит
@@ -172,8 +177,31 @@ async function openPriceWatchHidden(url, opts) {
   }
 }
 
+/**
+ * Отправка события интерфейсу.
+ *
+ * До did-finish-load кадра окна ещё нет, а во время перезагрузки страницы он
+ * уже уничтожен: прямая отправка в эти моменты печатает в журнал пачки
+ * «Render frame was disposed before WebFrameMain could be accessed» и событие
+ * теряется. Поэтому до загрузки окна события ждут в небольшой очереди,
+ * а отправка в недоступный кадр молча пропускается.
+ */
+function flushSends() {
+  if (!win || win.isDestroyed() || !rendererReady) return;
+  while (pendingSends.length) {
+    const [channel, payload] = pendingSends.shift();
+    try { win.webContents.send(channel, payload); } catch (e) { /* кадр снова недоступен — теряем событие без шума */ }
+  }
+}
+
 function send(channel, payload) {
-  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  if (!win || win.isDestroyed()) return;
+  if (!rendererReady) {
+    pendingSends.push([channel, payload]);
+    if (pendingSends.length > 200) pendingSends.shift();
+    return;
+  }
+  try { win.webContents.send(channel, payload); } catch (e) { /* кадр уничтожен: перезагрузка или сбой рендера */ }
 }
 
 function registerIpc() {
