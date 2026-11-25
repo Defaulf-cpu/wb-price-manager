@@ -28,3 +28,12 @@ Error sending from webFrameMain:  Error: Render frame was disposed before WebFra
 - `node --check electron/main.js` — OK; `tools/version.js` — 309/309.
 - `npm test` — exit 0 (2067 проверок).
 - Поведение окна Electron в песочнице недоступно (бинарь не скачивается при `npm ci --ignore-scripts`); логика покрыта код-ревью: очередь ограничена, обработчики загрузки подписаны в `createWindow`, отправка защищена от исключений.
+
+## Артефакты
+
+- Коммит `b0da8fe`, тег `v1.3.10`, отправлены в `origin/main`.
+- Рядом с проектом: `wb-price-manager-v1.3.10.bundle` (полный Git,
+  SHA-256 `80bb44c7c96b804ba8a742f48115044b70dee1a98f6d95df432d6df1434393fe`),
+  `wb-price-manager-v1.3.10-source.zip` (145 записей,
+  SHA-256 `b7a341474550683769e148a676822b92f13865b4eaf12e53ae6b1b14f0399b3e`),
+  `wb-price-manager-v1.3.10.sha256`.
