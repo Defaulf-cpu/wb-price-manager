@@ -17,6 +17,29 @@ let updateManager = null;
 
 const DEV = process.argv.includes('--dev');
 
+/**
+ * Журнал ошибок запуска рядом с данными приложения (userData/startup-error.log).
+ * Без него сбой главного процесса на Windows выглядит как «ничего не происходит»:
+ * окно не открывается, а текст ошибки некуда напечатать.
+ */
+function logStartupError(error) {
+  try {
+    const file = path.join(app.getPath('userData'), 'startup-error.log');
+    fs.appendFileSync(file, new Date().toISOString() + ' ' + ((error && error.stack) || String(error)) + '\n');
+  } catch (e) { /* журнал — страховка, а не обязательный шаг */ }
+}
+
+process.on('uncaughtException', (error) => {
+  console.error('[fatal] необработанная ошибка главного процесса:', error);
+  logStartupError(error);
+  try {
+    dialog.showErrorBox(APP_NAME, 'Приложение остановлено из-за внутренней ошибки.\n\n' +
+      (error && error.message ? error.message : String(error)) +
+      '\n\nПодробности записаны в startup-error.log рядом с данными приложения.');
+  } catch (e) { /* окно ошибки может быть недоступно до готовности app */ }
+  app.quit();
+});
+
 function makeSecretBox() {
   const available = (() => {
     try { return safeStorage.isEncryptionAvailable(); } catch (e) { return false; }
@@ -87,6 +110,20 @@ function createWindow() {
   });
 
   win.once('ready-to-show', () => win.show());
+  // Страховка от «невидимого» процесса: если ready-to-show не сработал (сбой
+  // загрузки или рендера), окно всё равно показываем и пишем след в журнал —
+  // иначе приложение висит без окна и держит блокировку единственного экземпляра,
+  // а повторные запуски молча закрываются.
+  setTimeout(() => {
+    if (win && !win.isDestroyed() && !win.isVisible()) {
+      console.error('[window] окно не показалось за 15 секунд — показываю принудительно');
+      logStartupError(new Error('Окно не показалось за 15 секунд (ready-to-show не сработал)'));
+      win.show();
+    }
+  }, 15000);
+  win.webContents.on('did-fail-load', (_event, code, description, url) => {
+    if (code !== -3) logStartupError(new Error('Ошибка загрузки окна: ' + code + ' ' + description + ' ' + url));
+  });
   win.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'index.html'));
   if (DEV) win.webContents.openDevTools({ mode: 'detach' });
 
@@ -336,7 +373,10 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) {
+    if (win && !win.isDestroyed()) {
+      // окно могло так и не показаться (см. страховку в createWindow) —
+      // повторный запуск обязан его показать, а не только «передать фокус»
+      if (!win.isVisible()) win.show();
       if (win.isMinimized()) win.restore();
       win.focus();
     }
@@ -386,6 +426,7 @@ if (!gotLock) {
     // При повреждённом регистре/незавершённой миграции нельзя молча открыть
     // новый пустой кабинет. Сохраняем файлы и показываем причину владельцу.
     console.error('[profiles] запуск остановлен:', error);
+    logStartupError(error);
     dialog.showErrorBox(APP_NAME, 'Не удалось открыть данные кабинетов.\n\n' + (error.message || String(error)) + '\n\nИсходные файлы сохранены. Устраните указанную причину и запустите приложение снова.');
     app.quit();
   });
